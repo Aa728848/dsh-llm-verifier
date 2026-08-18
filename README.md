@@ -17,32 +17,56 @@
 
 ## 安装与启用 (Installation & Usage)
 
-### 1. 使用 DSH 插件命令安装
+### 1. 使用 `dsh plugin` 安装
 
-通过 DSH 提供的 `dsh plugin` 命令将本插件安装至对应的 Profile（如 `web` 或 `tui`）：
+DeepSeek Harness（DSH）通过 profile 独立管理各个运行环境的插件依赖。请使用 `dsh plugin` 命令将插件安装至目标 profile（如 `web`）：
 
 ```bash
-# 为 Web Profile 安装插件
+# 方式 A：从 npm 官方 Registry 安装（推荐）
 dsh plugin --profile web add dsh-llm-verifier
 
-# 或为 TUI Profile 安装插件
-dsh plugin --profile tui add dsh-llm-verifier
+# 方式 B：本地源码开发安装（在插件代码目录中直接执行）
+dsh plugin --profile web add .
+
+# 方式 C：从 GitHub 仓库直接安装
+dsh plugin --profile web add github:Aa728848/dsh-llm-verifier
 ```
 
-### 2. 载入与可视化配置
+> [!NOTE]
+> `dsh plugin add` 安装成功后，DSH 会自动识别包内的 `dsh.bundle` 声明并完成插件层自动对齐（Reconcile），**无需手动修改任何配置文件**。
 
-- **常规启动**：安装完成后直接启动对应 Profile（如 `dsh web`），插件将自动载入。
-- **自定义 Patch Overlay（可选）**：若在自定义 Profile 清单中手动声明，可在 `cordis.patch.yml` 中配置：
-  ```yaml
-  - insert:
-      - id: llm-verifier
-        name: 'dsh-llm-verifier'
-  ```
-- **配置面板**：启动 DSH 后打开 **`设置 → LLM Verifier`** 即可可视化配置裁判所使用的 Provider、Model、推理强度、并发限制与缓存策略。
+### 2. 启动与配置
 
-### 3. 作为独立库引用（可选）
+启动 DSH Web 客户端：
 
-你也可以在 TypeScript / JavaScript 项目中直接引用核心算法与评分函数：
+```bash
+dsh web
+# 或
+dsh --profile web
+```
+
+启动后进入前端界面，打开 **`设置 → LLM Verifier`** 即可可视化配置裁判所使用的 Provider、Model、推理强度（Reasoning Effort）、最大并发与缓存策略。
+
+### 3. 常用管理命令
+
+```bash
+# 更新插件至最新版本
+dsh plugin --profile web update dsh-llm-verifier
+
+# 卸载插件
+dsh plugin --profile web remove dsh-llm-verifier
+
+# 查看当前 Profile 已安装的插件与依赖列表
+dsh plugin --profile web list
+```
+
+### 4. 作为独立库引用（可选）
+
+如果你在其它 TypeScript / JavaScript 项目中需要复用核心评分标尺与锦标赛算法，可直接作为普通 npm 依赖安装并引入：
+
+```bash
+pnpm add dsh-llm-verifier
+```
 
 ```typescript
 import {
