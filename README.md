@@ -24,12 +24,6 @@ DeepSeek Harness（DSH）通过 profile 独立管理各个运行环境的插件�
 ```bash
 # 方式 A：从 npm 官方 Registry 安装（推荐）
 dsh plugin --profile web add dsh-llm-verifier
-
-# 方式 B：本地源码开发安装（在插件代码目录中直接执行）
-dsh plugin --profile web add .
-
-# 方式 C：从 GitHub 仓库直接安装
-dsh plugin --profile web add github:Aa728848/dsh-llm-verifier
 ```
 
 > [!NOTE]
