@@ -17,36 +17,32 @@
 
 ## 安装与启用 (Installation & Usage)
 
-### 1. 安装 npm 包
+### 1. 使用 DSH 插件命令安装
 
-在你的 DSH 项目或插件目录中安装：
+通过 DSH 提供的 `dsh plugin` 命令将本插件安装至对应的 Profile（如 `web` 或 `tui`）：
 
 ```bash
-# 使用 pnpm (推荐)
-pnpm add dsh-llm-verifier
+# 为 Web Profile 安装插件
+dsh plugin --profile web add dsh-llm-verifier
 
-# 或使用 npm
-npm install dsh-llm-verifier
-
-# 或使用 yarn
-yarn add dsh-llm-verifier
+# 或为 TUI Profile 安装插件
+dsh plugin --profile tui add dsh-llm-verifier
 ```
 
-### 2. 在 DSH 中配置与载入
+### 2. 载入与可视化配置
 
-在你的 DSH Profile 配置文件或 `cordis.patch.yml` 中注册插件：
+- **常规启动**：安装完成后直接启动对应 Profile（如 `dsh web`），插件将自动载入。
+- **自定义 Patch Overlay（可选）**：若在自定义 Profile 清单中手动声明，可在 `cordis.patch.yml` 中配置：
+  ```yaml
+  - insert:
+      - id: llm-verifier
+        name: 'dsh-llm-verifier'
+  ```
+- **配置面板**：启动 DSH 后打开 **`设置 → LLM Verifier`** 即可可视化配置裁判所使用的 Provider、Model、推理强度、并发限制与缓存策略。
 
-```yaml
-- insert:
-    - id: llm-verifier
-      name: 'dsh-llm-verifier'
-```
+### 3. 作为独立库引用（可选）
 
-载入后，在 DSH 客户端界面打开 **`设置 → LLM Verifier`** 即可可视化配置裁判所使用的 Provider、Model、推理强度与并发缓存策略。
-
-### 3. 作为独立库使用（可选）
-
-你也可以在 TypeScript / JavaScript 代码中直接引用核心算法与评分函数：
+你也可以在 TypeScript / JavaScript 项目中直接引用核心算法与评分函数：
 
 ```typescript
 import {
