@@ -1,6 +1,6 @@
 import type { UserConfig } from 'tsdown'
 
-const packageId = '@local/dsh-llm-verifier'
+const packageId = 'dsh-llm-verifier'
 const clientExternals = [
   'react',
   'react/jsx-runtime',

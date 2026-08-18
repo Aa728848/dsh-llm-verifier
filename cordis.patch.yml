@@ -1,4 +1,4 @@
 # Installs the verifier's model-facing tools into a DSH profile.
 - insert:
     - id: llm-verifier
-      name: '@local/dsh-llm-verifier'
+      name: 'dsh-llm-verifier'

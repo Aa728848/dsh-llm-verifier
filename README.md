@@ -15,6 +15,48 @@
 - `verifier_track`：评估任务在不同检查点（Checkpoint）的完成度与进展；
 - `verifier_current_session`：显式提取当前 DSH 会话记录，进行脱敏并执行复核。
 
+## 安装与启用 (Installation & Usage)
+
+### 1. 安装 npm 包
+
+在你的 DSH 项目或插件目录中安装：
+
+```bash
+# 使用 pnpm (推荐)
+pnpm add dsh-llm-verifier
+
+# 或使用 npm
+npm install dsh-llm-verifier
+
+# 或使用 yarn
+yarn add dsh-llm-verifier
+```
+
+### 2. 在 DSH 中配置与载入
+
+在你的 DSH Profile 配置文件或 `cordis.patch.yml` 中注册插件：
+
+```yaml
+- insert:
+    - id: llm-verifier
+      name: 'dsh-llm-verifier'
+```
+
+载入后，在 DSH 客户端界面打开 **`设置 → LLM Verifier`** 即可可视化配置裁判所使用的 Provider、Model、推理强度与并发缓存策略。
+
+### 3. 作为独立库使用（可选）
+
+你也可以在 TypeScript / JavaScript 代码中直接引用核心算法与评分函数：
+
+```typescript
+import {
+  extractScore,
+  extractProgressScore,
+  bradleyTerry,
+  pivotRoundPairs,
+} from 'dsh-llm-verifier/core'
+```
+
 ## 迁移来源
 
 本插件的核心评估理论、A–T 评分标尺、进度判定算法以及概率基准锦标赛（Probabilistic Pivot Tournament）均源自开源项目：

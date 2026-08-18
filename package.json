@@ -1,7 +1,24 @@
 {
-  "name": "@local/dsh-llm-verifier",
+  "name": "dsh-llm-verifier",
   "version": "0.1.0",
   "description": "Configurable DSH-native LLM verifier with a Web settings page",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aa728848/dsh-llm-verifier.git"
+  },
+  "homepage": "https://github.com/Aa728848/dsh-llm-verifier#readme",
+  "bugs": {
+    "url": "https://github.com/Aa728848/dsh-llm-verifier/issues"
+  },
+  "keywords": [
+    "deepseek",
+    "dsh",
+    "verifier",
+    "llm",
+    "cordis",
+    "plugin"
+  ],
+  "author": "eddyskywalker",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
