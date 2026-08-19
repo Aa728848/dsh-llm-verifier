@@ -5,6 +5,7 @@ import z from 'schemastery'
 export const VERIFIER_SETTINGS_NAMESPACE = settingsNamespace('llm-verifier')
 
 export interface Config {
+  enabled?: boolean
   provider?: string
   model?: string
   reasoningEffort?: string
@@ -20,6 +21,7 @@ export interface Config {
 }
 
 export interface ResolvedConfig {
+  enabled: boolean
   provider: string
   model: string
   reasoningEffort?: string
@@ -35,6 +37,7 @@ export interface ResolvedConfig {
 }
 
 export const Config: z<Config> = z.object({
+  enabled: z.boolean().default(true),
   provider: z.string().default('deepseek-official'),
   model: z.string().default('deepseek-v4-flash'),
   reasoningEffort: z.string(),
@@ -70,7 +73,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   const estimatedOutputUsdPerMillion = config.estimatedOutputUsdPerMillion ?? 0
   if (![estimatedInputUsdPerMillion, estimatedOutputUsdPerMillion].every(value => Number.isFinite(value) && value >= 0)) throw new Error('llm-verifier: estimated token prices must be finite non-negative numbers')
   const reasoningEffort = config.reasoningEffort?.trim()
-  return { provider, model, ...(reasoningEffort ? { reasoningEffort } : {}), maxRetries, cacheDir, estimatedInputUsdPerMillion, estimatedOutputUsdPerMillion, ...values }
+  return { enabled: config.enabled ?? true, provider, model, ...(reasoningEffort ? { reasoningEffort } : {}), maxRetries, cacheDir, estimatedInputUsdPerMillion, estimatedOutputUsdPerMillion, ...values }
 }
 
 export function installVerifierSettings(ctx: Context, entry: ResolvedConfig, onChange: () => void): () => ResolvedConfig {

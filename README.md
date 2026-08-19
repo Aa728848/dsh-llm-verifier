@@ -164,6 +164,7 @@ flowchart LR
 
 | 配置项 | 说明 |
 |---|---|
+| **启用工具 (Enabled)** | 是否允许 Agent 调用 verifier 工具；关闭后调用会立即返回错误，不产生任何模型请求（设置页「工具开关」按钮可切换） |
 | **供应商 (Provider)** | 从 DSH 当前已配置且可路由的 Provider 列表中选择 |
 | **模型 (Model)** | 从所选 Provider 的模型目录中指定具体裁判模型 |
 | **推理强度 (Reasoning Effort)** | 使用 Adapter 为该模型声明的思考强度，或保留模型默认值 |

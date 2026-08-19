@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import z from 'schemastery';
 export declare const VERIFIER_SETTINGS_NAMESPACE: import("@deepseek-ai/dsh-settings").SettingsNamespace;
 export interface Config {
+    enabled?: boolean;
     provider?: string;
     model?: string;
     reasoningEffort?: string;
@@ -16,6 +17,7 @@ export interface Config {
     estimatedOutputUsdPerMillion?: number;
 }
 export interface ResolvedConfig {
+    enabled: boolean;
     provider: string;
     model: string;
     reasoningEffort?: string;
