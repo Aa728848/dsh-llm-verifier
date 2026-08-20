@@ -43,6 +43,8 @@ export declare class RequestLimiter {
     run<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
 }
 export declare function callVerifier(config: VerifierClientConfig, prompt: string, signal?: AbortSignal, images?: readonly VerifierImage[]): Promise<VerifierCompletion>;
+/** Plain-text verifier call for conservative JSON routing; probability labels are intentionally bypassed. */
+export declare function callVerifierText(config: VerifierClientConfig, prompt: string, signal?: AbortSignal): Promise<VerifierCompletion>;
 export declare function addUsage(target: UsageStats, source: UsageStats): void;
 export declare function emptyUsage(): UsageStats;
 //# sourceMappingURL=caller.d.ts.map

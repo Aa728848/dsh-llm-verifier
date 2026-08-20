@@ -104,7 +104,8 @@ export function extractScore(completion: CompletionLogprobs, tag: string): numbe
   let last: RegExpExecArray | null = null
   for (let match = regex.exec(completion.text); match !== null; match = regex.exec(completion.text)) last = match
   const letter = normalizeScoreLetter(last?.[1] ?? '')
-  return letter === undefined ? 0.5 : (letterValue(letter) - 1) / (GRANULARITY - 1)
+  if (letter === undefined) throw new Error('llm-verifier: verifier response did not contain a valid ' + tag + ' A-T score')
+  return (letterValue(letter) - 1) / (GRANULARITY - 1)
 }
 
 export function buildPairwisePrompt(problem: string, traceA: string, traceB: string, criterion: Criterion, groundTruthNote = DEFAULT_GROUND_TRUTH_NOTE): string {

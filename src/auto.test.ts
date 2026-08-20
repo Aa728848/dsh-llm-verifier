@@ -26,6 +26,14 @@ describe('automatic verification policy', () => {
     expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: true, toolCalls: 3, consequentialToolCalls: 1 })
   })
 
+  it('does not count a failed consequential call paired with an unrelated success', () => {
+    const session = taskSession()
+    session.append('tool/call', { turn: 1, step: 1, callId: 'bad' as never, name: 'edit', arguments: '{}' })
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'bad' as never, content: [{ type: 'text', text: 'failed' }], isError: true }), error: { name: 'Error', code: 'FAILED' } }, { surfaceOp: 'append' })
+    call(session, 'read', 'good')
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ consequentialToolCalls: 0, eligible: false, reason: 'no-consequential-work' })
+  })
+
   it('strict mode accepts one completed consequential call', () => {
     const session = taskSession()
     call(session, 'ssh_exec', 'one')

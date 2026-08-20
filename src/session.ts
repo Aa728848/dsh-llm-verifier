@@ -32,9 +32,21 @@ function textOf(blocks: readonly ContentBlock[]): string {
   return parts.join('\n')
 }
 
-function redact(text: string, patterns: readonly string[]): string {
+export const DEFAULT_REDACT_PATTERNS = [
+  'Bearer\\s+[A-Za-z0-9._~+\\/=-]+',
+  "(?:api[_-]?key|token|password|secret)\\s*[=:]\\s*[\"']?[^\\s,\"';}]+",
+] as const
+
+function validateRedactPattern(pattern: string): void {
+  if (pattern.length === 0 || pattern.length > 500) throw new Error('llm-verifier: redact patterns must contain 1-500 characters')
+  // Reject common nested/unbounded constructs that can cause catastrophic backtracking.
+  if (/\([^)]*[+*][^)]*\)[+*{]|\.\*[+*{]|\.\+[+*{]/u.test(pattern)) throw new Error('llm-verifier: unsafe redact pattern')
+}
+
+export function redactText(text: string, patterns: readonly string[] = DEFAULT_REDACT_PATTERNS): string {
   let result = text
   for (const pattern of patterns) {
+    validateRedactPattern(pattern)
     let regex: RegExp
     try { regex = new RegExp(pattern, 'giu') } catch { throw new Error('llm-verifier: invalid redact pattern: ' + pattern) }
     result = result.replace(regex, '[REDACTED]')
@@ -42,13 +54,18 @@ function redact(text: string, patterns: readonly string[]): string {
   return result
 }
 
+export function sanitizeVerifierText(text: string, maxChars: number, patterns: readonly string[] = DEFAULT_REDACT_PATTERNS): string {
+  if (!Number.isSafeInteger(maxChars) || maxChars < 1) throw new Error('llm-verifier: sanitizer maxChars must be a positive integer')
+  const redacted = redactText(text, patterns).trim()
+  return redacted.length <= maxChars ? redacted : redacted.slice(0, maxChars) + '\n[Truncated ' + (redacted.length - maxChars) + ' characters]'
+}
+
 export async function extractSession(agent: Agent, loadImage: (ref: Extract<ContentBlock, { type: 'image' }>['attachment']) => Promise<VerifierImage>, options: SessionExtractOptions = {}): Promise<SessionExtraction> {
   const all = agent.session.events as readonly SessionEvent[]
   const from = options.fromSeq ?? 0
   const to = options.toSeq ?? Number.MAX_SAFE_INTEGER
   const events = all.filter(event => event.seq >= from && event.seq <= to)
-  const defaultPatterns = ['Bearer\s+[A-Za-z0-9._~+\/=-]+', '(?:api[_-]?key|token|password|secret)\s*[:=]\s*[^\s,;]+']
-  const patterns = [...defaultPatterns, ...(options.redactPatterns ?? [])]
+  const patterns = [...DEFAULT_REDACT_PATTERNS, ...(options.redactPatterns ?? [])]
   let problem = ''
   const trace: string[] = []
   const images: VerifierImage[] = []
@@ -67,9 +84,9 @@ export async function extractSession(agent: Agent, loadImage: (ref: Extract<Cont
       trace.push('--- Tool Result turn ' + event.data.turn + ' step ' + event.data.step + ' ---\n[Output] ' + textOf(event.data.message.content))
     }
   }
-  const raw = redact(trace.join('\n\n'), patterns)
+  const raw = redactText(trace.join('\n\n'), patterns)
   const maxChars = options.maxChars ?? 200000
   const omittedCharacters = Math.max(0, raw.length - maxChars)
   const bounded = omittedCharacters ? '[Earlier trace truncated: ' + omittedCharacters + ' characters omitted]\n' + raw.slice(-maxChars) : raw
-  return { problem: redact(problem, patterns), trace: bounded, images, sessionId: String(agent.id), fromSeq: events[0]?.seq ?? from, toSeq: events.at(-1)?.seq ?? from, omittedCharacters }
+  return { problem: redactText(problem, patterns), trace: bounded, images, sessionId: String(agent.id), fromSeq: events[0]?.seq ?? from, toSeq: events.at(-1)?.seq ?? from, omittedCharacters }
 }

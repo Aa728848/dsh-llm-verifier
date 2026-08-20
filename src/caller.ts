@@ -103,7 +103,7 @@ async function callExplicitTag(config: VerifierClientConfig, prompt: string, sig
 export class RequestLimiter {
   private active = 0
   private readonly queue: Array<() => void> = []
-  constructor(readonly limit: number) {}
+  constructor(readonly limit: number) { if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('llm-verifier: request concurrency limit must be a positive integer') }
   async run<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     if (this.active >= this.limit) await new Promise<void>((resolve, reject) => {
       const enter = () => { signal?.removeEventListener('abort', abort); resolve() }
@@ -132,6 +132,12 @@ async function callAutomatic(config: VerifierClientConfig, prompt: string, signa
 
 export async function callVerifier(config: VerifierClientConfig, prompt: string, signal?: AbortSignal, images?: readonly VerifierImage[]): Promise<VerifierCompletion> {
   const invoke = () => callAutomatic(config, prompt, signal, images)
+  return config.limiter === undefined ? invoke() : config.limiter.run(invoke, signal)
+}
+
+/** Plain-text verifier call for conservative JSON routing; probability labels are intentionally bypassed. */
+export async function callVerifierText(config: VerifierClientConfig, prompt: string, signal?: AbortSignal): Promise<VerifierCompletion> {
+  const invoke = () => callExplicitTag(config, prompt, signal)
   return config.limiter === undefined ? invoke() : config.limiter.run(invoke, signal)
 }
 export function addUsage(target: UsageStats, source: UsageStats): void { for (const key of ['calls', 'attempts', 'retries', 'inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningTokens'] as const) target[key] += source[key] }

@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { RunStats } from './engine.ts'
 
-export const VERIFIER_TOOL_NAMES = ['verifier_compare', 'verifier_select', 'verifier_track', 'verifier_current_session'] as const
+export const VERIFIER_TOOL_NAMES = ['verifier_route_classify', 'verifier_compare', 'verifier_select', 'verifier_track', 'verifier_current_session'] as const
 export type VerifierToolName = typeof VERIFIER_TOOL_NAMES[number]
 
 export interface InvocationRecord {
@@ -163,6 +163,51 @@ function isRecord(value: unknown): value is InvocationRecord {
 
 export function resolveStatisticsFile(cacheFile: string): string {
   return join(dirname(cacheFile), 'statistics-v1.json')
+}
+
+/** Combine independently persisted topic summaries for the all-topics dashboard. */
+export function mergeStatisticsOverviews(overviews: readonly StatisticsOverview[], query: StatisticsQuery): StatisticsOverview {
+  const totals = blankTotals()
+  const daily = new Map<string, DailyStatistics>()
+  const tools = new Map<VerifierToolName, ToolStatistics>()
+  const models = new Map<string, ModelStatistics>()
+  let weightedDuration = 0
+  for (const overview of overviews) {
+    const source = overview.totals
+    weightedDuration += source.averageDurationMs * source.invocations
+    for (const key of ['invocations', 'successes', 'failures', 'calls', 'attempts', 'retries', 'inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningTokens', 'tokens', 'cacheHits', 'cacheMisses', 'estimatedCostUsd', 'topLogprobScores', 'explicitTagScores'] as const) totals[key] += source[key]
+    for (const row of overview.daily) {
+      const target = daily.get(row.date) ?? { date: row.date, invocations: 0, successes: 0, failures: 0, calls: 0, tokens: 0, estimatedCostUsd: 0, byTool: {} }
+      for (const key of ['invocations', 'successes', 'failures', 'calls', 'tokens', 'estimatedCostUsd'] as const) target[key] += row[key]
+      for (const [tool, count] of Object.entries(row.byTool)) target.byTool[tool] = (target.byTool[tool] ?? 0) + count
+      daily.set(row.date, target)
+    }
+    for (const row of overview.tools) {
+      const target = tools.get(row.toolName) ?? { toolName: row.toolName, invocations: 0, successes: 0, failures: 0, successRate: 0, averageDurationMs: 0, calls: 0, tokens: 0, cacheHits: 0, cacheMisses: 0, estimatedCostUsd: 0 }
+      target.averageDurationMs = (target.averageDurationMs * target.invocations + row.averageDurationMs * row.invocations) / (target.invocations + row.invocations || 1)
+      for (const key of ['invocations', 'successes', 'failures', 'calls', 'tokens', 'cacheHits', 'cacheMisses', 'estimatedCostUsd'] as const) target[key] += row[key]
+      target.successRate = ratio(target.successes, target.invocations)
+      tools.set(row.toolName, target)
+    }
+    for (const row of overview.models) {
+      const key = row.provider + '\u0000' + row.model
+      const target = models.get(key) ?? { provider: row.provider, model: row.model, invocations: 0, calls: 0, tokens: 0, estimatedCostUsd: 0 }
+      for (const field of ['invocations', 'calls', 'tokens', 'estimatedCostUsd'] as const) target[field] += row[field]
+      models.set(key, target)
+    }
+  }
+  totals.averageDurationMs = ratio(weightedDuration, totals.invocations)
+  totals.successRate = ratio(totals.successes, totals.invocations)
+  totals.cacheHitRate = ratio(totals.cacheHits, totals.cacheHits + totals.cacheMisses)
+  const limit = Math.min(200, Math.max(1, Math.trunc(query.recentLimit ?? 40)))
+  return {
+    generatedAt: Date.now(), fromMs: query.fromMs, toMs: query.toMs,
+    ...(query.sessionId ? { sessionId: query.sessionId } : {}), totals,
+    daily: [...daily.values()].sort((a, b) => a.date.localeCompare(b.date)),
+    tools: [...tools.values()].sort((a, b) => b.invocations - a.invocations || a.toolName.localeCompare(b.toolName)),
+    models: [...models.values()].sort((a, b) => b.calls - a.calls || a.model.localeCompare(b.model)),
+    recent: overviews.flatMap(value => value.recent).sort((a, b) => b.startedAt - a.startedAt).slice(0, limit),
+  }
 }
 
 export class StatisticsStore {

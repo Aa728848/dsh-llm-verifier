@@ -28,6 +28,10 @@ describe('score extraction', () => {
     const value = extractScore(completion('', ['<score_A>'], [[], [{ token: 'A', logprob: Math.log(0.75) }, { token: 'T', logprob: Math.log(0.25) }]]), '<score_A>')
     expect(value).toBeCloseTo(0.75)
   })
+  it('fails closed when the required score tag is missing or invalid', () => {
+    expect(() => extractScore(completion('no score'), '<score_A>')).toThrow('valid <score_A>')
+    expect(() => extractScore(completion('<score_A> Z </score_A>'), '<score_A>')).toThrow('valid <score_A>')
+  })
   it('reverses the progress scale', () => {
     expect(extractProgressScore(completion('<c1> T </c1>'), '<c1>')).toBe(1)
     expect(extractProgressScore(completion('<c1> A </c1>'), '<c1>')).toBe(0)

@@ -1,5 +1,5 @@
 import type { RunStats } from './engine.ts';
-export declare const VERIFIER_TOOL_NAMES: readonly ["verifier_compare", "verifier_select", "verifier_track", "verifier_current_session"];
+export declare const VERIFIER_TOOL_NAMES: readonly ["verifier_route_classify", "verifier_compare", "verifier_select", "verifier_track", "verifier_current_session"];
 export type VerifierToolName = typeof VERIFIER_TOOL_NAMES[number];
 export interface InvocationRecord {
     id: string;
@@ -98,6 +98,8 @@ export interface InvocationInput {
     stats: RunStats;
 }
 export declare function resolveStatisticsFile(cacheFile: string): string;
+/** Combine independently persisted topic summaries for the all-topics dashboard. */
+export declare function mergeStatisticsOverviews(overviews: readonly StatisticsOverview[], query: StatisticsQuery): StatisticsOverview;
 export declare class StatisticsStore {
     private readonly file;
     private readonly maxEntries;

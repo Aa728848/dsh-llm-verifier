@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -53,6 +53,20 @@ describe('DSH model routing and cache', () => {
     expect(resolveConfig({ provider: 'openai', model: 'gpt-5' })).toMatchObject({ provider: 'openai', model: 'gpt-5' })
     expect(resolveConfig({ provider: 'anthropic', model: 'claude-sonnet' })).toMatchObject({ provider: 'anthropic', model: 'claude-sonnet' })
     expect(() => resolveConfig({ provider: '', model: 'gpt-5' })).toThrow(/provider must be non-empty/)
+    expect(resolveConfig({ autoRouteMaxItemChars: 1000, autoRouteMaxInputChars: 2000, autoMaxModelCallsPerTask: 4, autoMaxModelCallsPerSession: 8 })).toMatchObject({ autoRouteMaxItemChars: 1000, autoRouteMaxInputChars: 2000, autoMaxModelCallsPerTask: 4, autoMaxModelCallsPerSession: 8 })
+    expect(() => resolveConfig({ autoRouteMaxCandidates: 17 })).toThrow(/between 3 and 16/)
+    expect(() => resolveConfig({ autoRouteMaxItemChars: 2000, autoRouteMaxInputChars: 3000 })).toThrow(/fit at least two/)
+  })
+  it('rejects malformed persisted entries and recreates them', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-invalid-'))
+    try {
+      const file = join(dir, 'scores.json')
+      writeFileSync(file, JSON.stringify({ version: 1, entries: { bad: { scoreA: 'NaN', scoreB: 0, usage: {}, createdAt: -1 } } }))
+      const cache = new ScoreCache(file, 100)
+      let creates = 0
+      const result = await cache.getOrCreate('bad', async () => { creates++; return { scoreA: .8, scoreB: .2, usage: { calls: 1, attempts: 1, retries: 0, inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, reasoningTokens: 0 }, scoringMode: 'explicit-tag' as const, createdAt: Date.now() } })
+      expect(result.hit).toBe(false); expect(creates).toBe(1)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
   })
   it('persists successful results and avoids duplicate creation', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-'))

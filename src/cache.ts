@@ -25,6 +25,18 @@ export function resolveCacheFile(cacheDir: string, cwd = process.cwd()): string 
   return join(root, 'scores-v1.json')
 }
 
+function validUsage(value: unknown): value is UsageStats {
+  if (typeof value !== 'object' || value === null) return false
+  const row = value as Record<string, unknown>
+  return ['calls', 'attempts', 'retries', 'inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningTokens'].every(key => typeof row[key] === 'number' && Number.isFinite(row[key]) && Number(row[key]) >= 0)
+}
+
+function validEntry(value: unknown): value is CachedPairScore {
+  if (typeof value !== 'object' || value === null) return false
+  const row = value as Record<string, unknown>
+  return typeof row.scoreA === 'number' && Number.isFinite(row.scoreA) && row.scoreA >= 0 && row.scoreA <= 1 && typeof row.scoreB === 'number' && Number.isFinite(row.scoreB) && row.scoreB >= 0 && row.scoreB <= 1 && validUsage(row.usage) && (row.scoringMode === undefined || row.scoringMode === 'top-logprobs' || row.scoringMode === 'explicit-tag') && typeof row.createdAt === 'number' && Number.isFinite(row.createdAt) && row.createdAt >= 0
+}
+
 export class ScoreCache {
   private readonly file: string
   private readonly maxEntries: number
@@ -44,7 +56,7 @@ export class ScoreCache {
     try {
       const document = JSON.parse(await readFile(this.file, 'utf8')) as CacheDocument
       if (document.version !== 1 || typeof document.entries !== 'object' || document.entries === null) return
-      this.entries = new Map(Object.entries(document.entries).map(([key, value]) => [key, { ...value, scoringMode: value.scoringMode ?? 'explicit-tag' }]))
+      this.entries = new Map(Object.entries(document.entries).filter((entry): entry is [string, CachedPairScore] => validEntry(entry[1])).map(([key, value]) => [key, { ...value, scoringMode: value.scoringMode ?? 'explicit-tag' }]))
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
@@ -77,7 +89,7 @@ export class ScoreCache {
 
   private async persist(): Promise<void> {
     const snapshot: CacheDocument = { version: 1, entries: Object.fromEntries(this.entries) }
-    this.writing = this.writing.then(async () => {
+    this.writing = this.writing.catch(() => {}).then(async () => {
       await mkdir(dirname(this.file), { recursive: true })
       const temporary = this.file + '.tmp-' + process.pid
       await writeFile(temporary, JSON.stringify(snapshot), 'utf8')

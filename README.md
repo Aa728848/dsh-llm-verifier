@@ -14,7 +14,8 @@
 - `verifier_select`：在多个候选方案中通过锦标赛机制选出最优解，供 Best-of-N / 多候选编排器直接调用；
 - `verifier_track`：评估任务在已有检查点（Checkpoint）的完成度与进展，供 Goal / Workflow 等长任务编排器直接调用；
 - `verifier_current_session`：显式提取当前 DSH 会话记录，进行脱敏并执行复核；
-- **自动验收门控**：智能或严格策略在 `agent/turn-stopping` 生命周期边界检测真实工具证据，宿主直接运行同一会话验收逻辑；未通过时以插件 steering 反馈要求 Agent 修复并重新验证，而不是依赖模型是否主动想起工具。
+- **四工具自动路由**：智能或严格策略在 `agent/turn-stopping` 生命周期边界按阶段调度 `select → compare → track → current_session`。第一阶段只信任 Workflow 的版本化候选协议与发生真实变化的 Todo 快照；普通 Subagent 输出必须经第二阶段的证据引用分类，避免把不同子任务误当候选；
+- **自动验收门控**：候选选择与进度检查完成后，宿主运行同一会话验收逻辑；未通过时以插件 steering 反馈要求 Agent 修复并重新验证，而不是依赖模型是否主动想起工具。
 
 ## 安装与启用 (Installation & Usage)
 
@@ -166,7 +167,14 @@ flowchart LR
 | 配置项 | 说明 |
 |---|---|
 | **启用工具 (Enabled)** | 是否允许显式工具与自动验收向裁判模型发起请求；关闭后显式调用立即报错且自动门控不运行 |
-| **调用策略** | `manual` 仅显式调用；`smart` 仅在达到工具证据数量且含写入/执行类操作时自动验收；`strict` 对任一已完成的关键操作自动验收 |
+| **调用策略** | `manual` 仅显式调用；`smart` 结构化优先，并只在有候选/检查点线索时做高置信语义路由，达到工具证据门槛后最终验收；`strict` 每个结束边界都尝试语义路由，并对任一已完成关键操作最终验收，路由或验收异常时 fail closed |
+| **混合语义路由** | 结构化证据不足时，是否允许裁判模型保守分类 `compare/select/track/none`；不会生成新候选或编造检查点 |
+| **语义路由置信度** | 语义识别达到该值才执行对应工具，默认 `0.9` |
+| **最多候选数** | 自动 `select` 一次最多纳入的候选数，默认 `8` |
+| **每任务/每会话最多路由** | 独立于最终验收预算，限制 `compare/select/track` 及语义分类的自动次数 |
+| **进度完成阈值** | `track` 任一检查点低于该值时 steering 要求继续工作，默认 `0.8` |
+| **单项/总证据字符上限** | 自动候选与检查点脱敏后的单项、整次路由输入硬上限，默认 `20000 / 60000` |
+| **任务/会话模型调用预算** | 分类、compare/select/track 与最终验收共享的估算请求预算，默认 `48 / 160` |
 | **通过阈值** | 自动会话验收要求证据分数达到阈值且胜过“未执行有效工作”基线 |
 | **自动评估轮次** | 自动验收每个标准的重复轮次；默认 1，作为低成本初筛 |
 | **智能模式最少工具调用** | `smart` 策略需要的最少非 Verifier 工具调用数 |
@@ -185,8 +193,55 @@ flowchart LR
 > [!NOTE]
 > **多模态与图片支持**：若选定的裁判模型不支持图像输入，传入图片时将由对应 DSH Adapter 明确报错拦截，插件绝不会静默丢弃图片证据。
 
+## 四工具自动调度
+
+自动路由发生在 Agent **准备停止但尚未提交 `turn/end`** 的边界，四个工具不是互斥替代关系，而是覆盖不同阶段：
+
+```text
+3 个以上同组真实候选 → verifier_select → steering 实施胜出候选
+恰好 2 个同组真实候选 → verifier_compare → steering 实施胜出候选
+已有多个进度快照/检查点 → verifier_track → 未达阈值则 steering 继续
+候选决策和进度阶段完成 → verifier_current_session → 最终交付验收
+```
+
+### 第一阶段：结构化优先
+
+插件确定性识别以下对象，不额外调用分类模型：
+
+- 同一个 Agent step 中完成的两个同步 `subagent` / `subagent_fork` 结果视为一个候选组；后台启动返回的 Subagent ID 不会被当作候选；
+- `workflow` 只有返回以下版本化协议才会被视为可信候选；普通 JSON、裸数组及 Subagent 文本不会直接触发结构化比较：
+
+```json
+{
+  "protocol": "dsh-verifier-candidates",
+  "version": 1,
+  "groupId": "auth-implementation",
+  "candidates": [
+    { "id": "jwt", "label": "JWT", "status": "completed", "content": "..." },
+    { "id": "session", "label": "Session", "status": "completed", "content": "..." }
+  ]
+}
+```
+
+- 同一任务内至少两个内容或状态发生真实变化的 `todo/write` 快照形成进度检查点；完全相同的重复快照会被折叠。
+
+显式调用过对应的 `verifier_compare`、`verifier_select` 或 `verifier_track` 后，自动 Router 不会再对同类结构化对象重复执行。每个输入还会计算稳定指纹，同一证据不会重复消费预算。
+
+### 第二阶段：混合语义识别
+
+当结构化对象不足时，启用“混合语义路由”可让配置的裁判模型只做严格 JSON 分类：`none / compare / select / track`。分类器不能返回自由文本证据，只能返回会话中已经存在且成功配对的 `tool/call` callId 或真实 `todo/write` seq；宿主再从不可变快照重新提取、脱敏和限长。额外 prose、Markdown fence、未知字段、重复/不存在的引用、非递增检查点都会 fail closed。
+
+- `smart`：仅在会话出现 Subagent、Workflow、Goal、Todo 或“候选/方案/检查点”等明确线索时分类；
+- `strict`：每个准备结束边界都分类，无法确认时返回 `none`；路由调用失败时注入 steering，阻止静默跳过；
+- `manual`：结构化与语义自动路由、最终自动验收都关闭，四个工具仍可显式调用。
+
+候选选择产生 steering 后，Agent 必须实施胜出候选；进度未达阈值也会 steering 继续。任何自动 `compare/select/track` 成功都会设置 `finalVerificationRequired`，下一停止边界即使没有传统写入类工具也必须执行 `verifier_current_session`；只有针对最新快照且达到阈值的最终验收才能清除要求。路由采用 reservation/commit/fail 状态，取消、过期或失败不会被误记为成功；strict 会维持阻断并 fail closed。
+
+所有自动阶段共享任务/会话级模型调用预算；分类请求以 `verifier_route_classify` 单独记录到统计。候选、步骤和标签在发送前统一执行默认脱敏、单项字符上限和总字符上限，图片证据按与显式工具相同的路径传入。
+
 ## 缓存、重试与遥测统计
 
+- **按话题持久化**：成功评分缓存与调用统计写入当前 DSH 话题的持久化目录（`~/.dsh/sessions/<workspace>/<session-id>/verifier/`）。不同话题相互隔离；永久删除话题时，该目录会随会话日志一并删除，不再在桌面或项目工作目录生成 `.dsh-verifier-cache`。
 - **持久化缓存**：成功的评分结果将基于 SHA-256 哈希值进行持久化缓存。Key 的计算维度包含：Provider、Model、任务描述、候选内容、评审标准、轮次编号、参数配置及图片摘要。失败或被取消的请求不会写入缓存。
 - **并发请求合并**：相同的并发比对请求会自动共用在途 Promise（In-flight Deduplication），避免重复调用。
 - **运行统计与监控**：每次调用返回完整的统计信息，涵盖实际请求次数、重试次数（Retries）、各类 Token 消耗（输入/缓存命中/输出/推理 Token）、缓存命中与未命中次数（Cache Hits/Misses）以及费用估算；其中：
@@ -196,7 +251,7 @@ flowchart LR
 
 ## 隐私与数据安全边界
 
-`verifier_current_session` 会在显式调用时读取当前 DSH 会话；启用 `smart` / `strict` 策略后，宿主也会在满足证据门槛的任务结束边界自动调用同一提取与复核路径：
+`verifier_current_session` 会在显式调用时读取当前 DSH 会话；启用 `smart` / `strict` 策略后，宿主也会为混合语义路由和满足证据门槛的最终验收调用同一脱敏提取路径：
 
 - **提取范围**：仅提取直接的用户消息、Assistant 回复、工具调用（Tool Call）及实际工具执行结果（Tool Result）；自动排除插件和系统内置指令（Plugin/System Instructions）；
 - **敏感信息脱敏**：默认对常见 Bearer Token、API Key、通用 Token、Password 及 Secret 进行脱敏替换；

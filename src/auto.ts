@@ -53,10 +53,12 @@ export function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVer
 
   const relevant = events.filter(event => event.seq >= taskStartSeq)
   const calls = relevant.filter((event): event is SessionEvent<'tool/call'> => event.type === 'tool/call')
+  const successfulResults = new Set(relevant.filter((event): event is SessionEvent<'tool/result'> => event.type === 'tool/result' && event.data.error === undefined && event.data.message.content.every(block => block.isError !== true)).map(event => String(event.data.message.source.callId)))
+  const pairedCalls = calls.filter(event => successfulResults.has(String(event.data.callId)))
   const toolCalls = calls.filter(event => !VERIFIER_TOOLS.has(event.data.name)).length
-  const completedToolResults = relevant.filter(event => event.type === 'tool/result' && event.data.error === undefined && event.data.message.content.every(block => block.isError !== true)).length
-  const consequentialToolCalls = calls.filter(event => isConsequential(event.data.name)).length
-  const hasManualSessionVerification = calls.some(event => event.data.name === 'verifier_current_session')
+  const completedToolResults = pairedCalls.length
+  const consequentialToolCalls = pairedCalls.filter(event => isConsequential(event.data.name)).length
+  const hasManualSessionVerification = pairedCalls.some(event => event.data.name === 'verifier_current_session')
 
   if (policy.mode === 'manual') return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, eligible: false, reason: 'manual-mode' }
   if (hasManualSessionVerification) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, eligible: false, reason: 'already-verified' }

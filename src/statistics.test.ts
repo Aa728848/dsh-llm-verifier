@@ -2,7 +2,7 @@ import { mkdtemp, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
-import { StatisticsStore, emptyRunStats } from './statistics.ts'
+import { StatisticsStore, emptyRunStats, mergeStatisticsOverviews } from './statistics.ts'
 
 function stats(overrides: Partial<ReturnType<typeof emptyRunStats>> = {}) {
   return { ...emptyRunStats(), ...overrides }
@@ -40,6 +40,22 @@ describe('StatisticsStore', () => {
     const result = await store.overview({ fromMs: 0, toMs: 10_000 })
     expect(result.totals.invocations).toBe(2)
     expect(result.recent.map(record => record.startedAt)).toEqual([1_002, 1_001])
+  })
+
+  it('merges independently persisted topic summaries', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const first = new StatisticsStore(join(root, 'one.json'))
+    const second = new StatisticsStore(join(root, 'two.json'))
+    await first.record({ toolName: 'verifier_compare', sessionId: 'one', startedAt: 1, finishedAt: 11, success: true, provider: 'p', model: 'm', stats: stats() })
+    await second.record({ toolName: 'verifier_track', sessionId: 'two', startedAt: 2, finishedAt: 22, success: false, provider: 'p', model: 'm', stats: stats() })
+    const query = { fromMs: 0, toMs: 100, recentLimit: 10 }
+    const merged = mergeStatisticsOverviews(await Promise.all([first.overview(query), second.overview(query)]), query)
+    expect(merged.totals.invocations).toBe(2)
+    expect(merged.totals.successes).toBe(1)
+    expect(merged.totals.averageDurationMs).toBe(15)
+    expect(merged.tools.map(row => row.toolName)).toEqual(['verifier_compare', 'verifier_track'])
+    expect(merged.models).toHaveLength(1)
+    expect(merged.recent.map(row => row.sessionId)).toEqual(['two', 'one'])
   })
 
   it('bounds persisted error messages', async () => {
