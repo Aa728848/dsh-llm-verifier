@@ -1,6 +1,15 @@
 import type { UserConfig } from 'tsdown'
 
 const packageId = 'dsh-llm-verifier'
+const fs = await import('node:fs')
+const path = await import('node:path')
+const localClientOut = process.env.DSH_LLM_VERIFIER_CLIENT_OUT
+const clientOutputOptions = {
+  entryFileNames: 'client.js',
+  banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(packageId)}, factory: (require) => {`,
+  footer: 'return module.exports; } });',
+  intro: 'var module = { exports: {} }; var exports = module.exports;',
+}
 const clientExternals = [
   'react',
   'react/jsx-runtime',
@@ -55,12 +64,14 @@ const client: UserConfig = {
     'import.meta.env.MODE': JSON.stringify(process.env.NODE_ENV ?? 'production'),
     'import.meta.env': JSON.stringify({ MODE: process.env.NODE_ENV ?? 'production' }),
   },
-  outputOptions: {
-    entryFileNames: 'client.js',
-    banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(packageId)}, factory: (require) => {`,
-    footer: 'return module.exports; } });',
-    intro: 'var module = { exports: {} }; var exports = module.exports;',
-  },
+  outputOptions: clientOutputOptions,
 }
 
-export default [host, client]
+const configs: UserConfig[] = [host, client]
+if (localClientOut) {
+  const resolved = path.resolve(localClientOut)
+  fs.mkdirSync(resolved, { recursive: true })
+  configs.push({ ...client, name: `${packageId}/client-live`, outDir: resolved, outputOptions: clientOutputOptions })
+}
+
+export default configs
