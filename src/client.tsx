@@ -3,7 +3,7 @@ import type { ModelProviderGroup, SettingsNamespaceView } from '@deepseek-ai/dsh
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-import { Button, IconDataOutline16, IconRefreshOutline16, Input, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconDataOutline16, IconRefreshOutline16, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useMemo, useState } from 'react'
 
 const NS = 'llm-verifier'
@@ -18,11 +18,15 @@ interface Totals extends RunStats { invocations: number; successes: number; fail
 interface StatisticsOverview { generatedAt: number; fromMs: number; toMs: number; sessionId?: string; totals: Totals; daily: DailyStatistics[]; tools: ToolStatistics[]; models: ModelStatistics[]; recent: InvocationRecord[] }
 interface StatisticsPageProps { sessionId: string; rpc: { call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<{ ok: boolean; value?: unknown; error?: { message: string } }> } }
 
-const shell: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 18, padding: '8px 4px 32px', color: 'var(--dsw-text-primary)' }
-const card: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 0, padding: '16px 16px 0', border: '1px solid var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.16))', borderRadius: 12, background: 'var(--dsw-alias-bg-module, rgba(20, 31, 57, 0.42))', overflow: 'hidden' }
-const sectionTitle: React.CSSProperties = { display: 'flex', gap: 10, alignItems: 'center', padding: '0 0 12px', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.16))' }
-const row: React.CSSProperties = { display: 'grid', gridTemplateColumns: 'minmax(150px, 1fr) minmax(220px, 1.4fr)', gap: 18, alignItems: 'center', padding: '14px 0', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.16))' }
-const selectStyle: React.CSSProperties = { width: '100%', minHeight: 38, padding: '0 12px', borderRadius: 10, color: 'var(--dsw-text-primary)', background: 'var(--dsw-surface-sunken)', border: '1px solid var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.16))' }
+const shell: React.CSSProperties = { width: '100%', maxWidth: 720, display: 'flex', flexDirection: 'column', gap: 12, padding: '0 0 32px', color: 'var(--dsw-alias-label-primary)' }
+const settingsHeading: React.CSSProperties = { margin: 0, fontSize: 16, fontWeight: 500, lineHeight: '24px', color: 'var(--dsw-alias-label-primary)' }
+const settingsIntro: React.CSSProperties = { margin: 0, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-tertiary)' }
+const group: React.CSSProperties = { width: '100%', display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--dsw-alias-border-l2)' }
+const groupTitle: React.CSSProperties = { margin: 0, padding: '18px 0 8px', fontSize: 14, fontWeight: 500, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' }
+const row: React.CSSProperties = { minHeight: 64, display: 'grid', gridTemplateColumns: 'minmax(180px, 1fr) minmax(230px, 288px)', gap: 24, alignItems: 'center', padding: '12px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)' }
+const selectStyle: React.CSSProperties = { boxSizing: 'border-box', width: '100%', height: 36, padding: '0 34px 0 12px', borderRadius: 8, color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-input)', border: '1px solid var(--dsw-alias-border-l2)', font: 'inherit', fontSize: 14, lineHeight: '22px', outline: 'none' }
+const toggleStyle = (enabled: boolean): React.CSSProperties => ({ position: 'relative', justifySelf: 'end', width: 40, height: 22, padding: 0, border: 0, borderRadius: 999, cursor: 'pointer', transition: 'background .15s ease', background: enabled ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-bg-input)' })
+const toggleThumbStyle = (enabled: boolean): React.CSSProperties => ({ position: 'absolute', top: 3, left: enabled ? 21 : 3, width: 16, height: 16, borderRadius: '50%', background: 'var(--dsw-static-neutral-00, #fff)', boxShadow: '0 1px 3px rgba(0,0,0,.28)', transition: 'left .15s ease' })
 const dashboardCard: React.CSSProperties = { border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.13))', background: 'color-mix(in srgb, var(--dsw-alias-bg-module, #171925) 88%, transparent)', borderRadius: 16, boxShadow: '0 12px 36px rgba(0,0,0,.12)' }
 const muted: React.CSSProperties = { color: 'var(--dsw-text-secondary)', fontSize: 12 }
 const toolLabels: Record<string, string> = { verifier_compare: '两项对比', verifier_select: '多项优选', verifier_track: '进度跟踪', verifier_current_session: '会话验收' }
@@ -31,7 +35,8 @@ const toolColors: Record<string, string> = { verifier_compare: '#4f8cff', verifi
 function record(value: unknown): Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {} }
 function values(view: SettingsNamespaceView): Values { const v=record(view.value); return { enabled:v.enabled!==false,provider:String(v.provider??''),model:String(v.model??''),...(typeof v.reasoningEffort==='string'?{reasoningEffort:v.reasoningEffort}:{}),maxTokens:Number(v.maxTokens??32768),maxConcurrency:Number(v.maxConcurrency??8),maxRetries:Number(v.maxRetries??3),timeoutMs:Number(v.timeoutMs??300000),cacheMaxEntries:Number(v.cacheMaxEntries??10000),estimatedInputUsdPerMillion:Number(v.estimatedInputUsdPerMillion??0),estimatedOutputUsdPerMillion:Number(v.estimatedOutputUsdPerMillion??0) } }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
-function Label({title,help}:{title:string;help:string}) { return <div><div style={{fontWeight:600}}>{title}</div><div style={{fontSize:12,color:'var(--dsw-text-secondary)',marginTop:3}}>{help}</div></div> }
+function Label({title,help}:{title:string;help:string}) { return <div style={{minWidth:0}}><div style={{fontSize:14,fontWeight:400,lineHeight:'22px',color:'var(--dsw-alias-label-primary)'}}>{title}</div><div style={{fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-label-tertiary)',marginTop:2}}>{help}</div></div> }
+function GroupTitle({children}:{children:React.ReactNode}) { return <h3 style={groupTitle}>{children}</h3> }
 function compact(value: number): string { return new Intl.NumberFormat('zh-CN', { notation: value >= 10_000 ? 'compact' : 'standard', maximumFractionDigits: value >= 1_000 ? 1 : 0 }).format(value) }
 function money(value: number): string { return '$' + value.toLocaleString('en-US', { minimumFractionDigits: value < 0.01 ? 4 : 2, maximumFractionDigits: value < 0.01 ? 4 : 2 }) }
 function duration(value: number): string { if (value < 1000) return Math.round(value) + ' ms'; if (value < 60_000) return (value / 1000).toFixed(1) + ' s'; return (value / 60_000).toFixed(1) + ' min' }
@@ -47,25 +52,39 @@ function VerifierSettings({ api }:{api:any}) {
   const selected=models.find(m=>m.id===draft?.model); const efforts=selected?.reasoning?.efforts??[]
   const patch=<K extends keyof Values>(key:K,value:Values[K])=>setDraft(v=>v?{...v,[key]:value}:v)
   const save=async()=>{if(!loaded||!draft)return;setBusy(true);setSaved(false);setError(null);try{const section={...record(loaded.settings.user),...draft};if(!draft.reasoningEffort)delete section.reasoningEffort;const res=await api.settings.update({ns:NS,patch:section,expectedRevision:loaded.settings.revision});if(!res.result.ok)throw new Error(res.result.error.message);setLoaded(v=>v?{...v,settings:res.result.value}:v);setDraft(values(res.result.value));setSaved(true)}catch(e){setError(message(e))}finally{setBusy(false)}}
-  if(!loaded||!draft)return <div style={shell}><h2>LLM Verifier</h2><p>{error??'正在读取 DSH 模型和设置…'}</p>{error&&<Button onClick={()=>void load()}>重试</Button>}</div>
-  const numeric=(key:keyof Values,min=0)=><Input type="number" min={min} value={String(draft[key])} onChange={e=>patch(key,Number(e.target.value) as never)} />
+  if(!loaded||!draft)return <div style={shell}><h2 style={settingsHeading}>LLM Verifier</h2><p style={settingsIntro}>{error??'正在读取 DSH 模型和设置…'}</p>{error&&<div><Button variant="outline" onClick={()=>void load()}>重试</Button></div>}</div>
+  const numeric=(key:keyof Values,min=0)=><Input style={{width:'100%',height:36,borderRadius:8}} type="number" min={min} value={String(draft[key])} onChange={e=>patch(key,Number(e.target.value) as never)} />
   return <div style={shell}>
-    <div><h2 style={{margin:'0 0 6px'}}>LLM Verifier</h2><p style={{margin:0,color:'var(--dsw-text-secondary)'}}>选择任意已在 DSH「模型」页配置并启用的模型作为独立裁判。设置实时生效。</p></div>
-    <div style={card}><div style={sectionTitle}><StateDot state={draft.enabled?'done':'error'}/><strong>工具开关</strong></div>
-      <div style={row}><Label title="启用 Verifier 工具" help={draft.enabled?'四个 verifier 工具可被 Agent 调用，每次调用会向裁判模型发起请求。':'已停用：Agent 调用 verifier 工具会立即返回错误，不产生任何模型请求。'}/><button onClick={()=>patch('enabled',!draft.enabled)} style={{width:80,height:32,borderRadius:16,border:'1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.16))',background:draft.enabled?'var(--dsw-success, #2f9e5b)':'var(--dsw-surface-sunken)',color:'#fff',cursor:'pointer',fontSize:13,fontWeight:600}}>{draft.enabled?'已启用':'已停用'}</button></div>
-      {!draft.enabled&&<div style={{padding:'0 0 14px',fontSize:12,color:'var(--dsw-state-warn-primary, #d9a441)'}}>⚠ 当前停用 verifier_compare / verifier_select / verifier_track / verifier_current_session 四个工具</div>}
-    </div>
-    <div style={card}><div style={sectionTitle}><StateDot state="done"/><strong>裁判模型</strong></div>
-      <div style={row}><Label title="供应商" help="只显示当前 DSH 中可路由的供应商"/><select style={selectStyle} value={draft.provider} onChange={e=>{const provider=e.target.value;const first=loaded.groups.find(g=>g.id===provider)?.models[0];setDraft({...draft,provider,...(first?{model:first.id,reasoningEffort:first.reasoning?.defaultEffort}:{})})}}>{loaded.groups.map(g=><option key={g.id} value={g.id}>{g.name} · {g.id}</option>)}</select></div>
-      <div style={row}><Label title="模型" help="模型目录来自 DSH adapter，选择结果会持久化"/><select style={selectStyle} value={draft.model} onChange={e=>{const model=e.target.value;const found=models.find(m=>m.id===model);setDraft({...draft,model,...(found?.reasoning?.defaultEffort?{reasoningEffort:found.reasoning.defaultEffort}:{reasoningEffort:undefined})})}}>{models.map(m=><option key={m.id} value={m.id}>{m.name} · {m.id}</option>)}</select></div>
-      <div style={row}><Label title="推理强度" help="由所选模型 adapter 声明；留空使用模型默认值"/><select style={selectStyle} value={draft.reasoningEffort??''} onChange={e=>patch('reasoningEffort',e.target.value||undefined)}><option value="">模型默认</option>{efforts.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</select></div>
-      <div style={row}><Label title="最大输出 Token" help="每个裁判请求的输出上限"/>{numeric('maxTokens',1)}</div>
-    </div>
-    <div style={card}><div style={sectionTitle}><strong>执行控制</strong></div><div style={row}><Label title="最大并发" help="所有 verifier 工具共享的请求并发上限"/>{numeric('maxConcurrency',1)}</div><div style={row}><Label title="最多重试" help="短暂网络、限流和服务端错误的重试次数"/>{numeric('maxRetries',0)}</div><div style={row}><Label title="请求超时（毫秒）" help="单个模型请求的超时时间"/>{numeric('timeoutMs',1)}</div><div style={row}><Label title="缓存条目上限" help="持久评分缓存保留的最大条目数"/>{numeric('cacheMaxEntries',1)}</div></div>
-    <div style={card}><div style={sectionTitle}><strong>费用估算（每百万 Token，USD）</strong></div><div style={row}><Label title="输入价格" help="仅用于结果中的 estimatedCostUsd"/>{numeric('estimatedInputUsdPerMillion',0)}</div><div style={row}><Label title="输出价格" help="仅用于结果中的 estimatedCostUsd"/>{numeric('estimatedOutputUsdPerMillion',0)}</div></div>
-    {loaded.failures.length>0&&<div style={{...card,borderColor:'var(--dsw-alias-state-warn-primary, #d9a441)',paddingBottom:16}}><strong>部分模型目录读取失败</strong>{loaded.failures.map(x=><div key={x}>{x}</div>)}</div>}
-    {error&&<div style={{color:'var(--dsw-danger)'}}>{error}</div>}{saved&&<div style={{color:'var(--dsw-success)'}}>已保存，后续 verifier 调用将使用新设置。</div>}
-    <div style={{display:'flex',gap:10}}><Button disabled={busy||!loaded.writable} onClick={()=>void save()}>{busy?'保存中…':'保存设置'}</Button><Button variant="outline" disabled={busy} onClick={()=>void load()}>重新载入</Button></div>
+    <h2 style={settingsHeading}>LLM Verifier</h2>
+    <p style={settingsIntro}>选择已在 DSH「模型」中配置的模型作为独立裁判。修改后点击页面底部的保存按钮生效。</p>
+
+    <section style={group}><GroupTitle>工具</GroupTitle>
+      <div style={row}><Label title="启用 Verifier 工具" help={draft.enabled?'允许 Agent 调用四个 verifier 工具并向裁判模型发起请求。':'停用后，所有 verifier 工具都会立即返回错误。'}/><button type="button" role="switch" aria-checked={draft.enabled} aria-label="启用 Verifier 工具" onClick={()=>patch('enabled',!draft.enabled)} style={toggleStyle(draft.enabled)}><span style={toggleThumbStyle(draft.enabled)}/></button></div>
+      {!draft.enabled&&<p style={{margin:'8px 0 0',fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-warn-label)'}}>verifier_compare、verifier_select、verifier_track 和 verifier_current_session 当前不可用。</p>}
+    </section>
+
+    <section style={group}><GroupTitle>裁判模型</GroupTitle>
+      <div style={row}><Label title="供应商" help="当前 DSH 中可路由的模型供应商。"/><select style={selectStyle} value={draft.provider} onChange={e=>{const provider=e.target.value;const first=loaded.groups.find(g=>g.id===provider)?.models[0];setDraft({...draft,provider,...(first?{model:first.id,reasoningEffort:first.reasoning?.defaultEffort}:{})})}}>{loaded.groups.map(g=><option key={g.id} value={g.id}>{g.name} · {g.id}</option>)}</select></div>
+      <div style={row}><Label title="模型" help="用作裁判的具体模型。"/><select style={selectStyle} value={draft.model} onChange={e=>{const model=e.target.value;const found=models.find(m=>m.id===model);setDraft({...draft,model,...(found?.reasoning?.defaultEffort?{reasoningEffort:found.reasoning.defaultEffort}:{reasoningEffort:undefined})})}}>{models.map(m=><option key={m.id} value={m.id}>{m.name} · {m.id}</option>)}</select></div>
+      <div style={row}><Label title="推理强度" help="留空时使用所选模型的默认值。"/><select style={selectStyle} value={draft.reasoningEffort??''} onChange={e=>patch('reasoningEffort',e.target.value||undefined)}><option value="">模型默认</option>{efforts.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</select></div>
+      <div style={row}><Label title="最大输出 Token" help="单次裁判请求允许生成的最大 Token 数。"/>{numeric('maxTokens',1)}</div>
+    </section>
+
+    <section style={group}><GroupTitle>执行</GroupTitle>
+      <div style={row}><Label title="最大并发" help="所有 verifier 工具共享的请求并发上限。"/>{numeric('maxConcurrency',1)}</div>
+      <div style={row}><Label title="最多重试" help="限流、超时和短暂网络错误的重试次数。"/>{numeric('maxRetries',0)}</div>
+      <div style={row}><Label title="请求超时" help="单次模型请求的超时时间，单位为毫秒。"/>{numeric('timeoutMs',1)}</div>
+      <div style={row}><Label title="缓存条目上限" help="本地持久评分缓存保留的最大条目数。"/>{numeric('cacheMaxEntries',1)}</div>
+    </section>
+
+    <section style={group}><GroupTitle>费用估算</GroupTitle>
+      <div style={row}><Label title="输入价格" help="每百万输入 Token 的美元价格，仅用于统计估算。"/>{numeric('estimatedInputUsdPerMillion',0)}</div>
+      <div style={row}><Label title="输出价格" help="每百万输出 Token 的美元价格，仅用于统计估算。"/>{numeric('estimatedOutputUsdPerMillion',0)}</div>
+    </section>
+
+    {loaded.failures.length>0&&<div style={{padding:'10px 12px',borderRadius:8,background:'var(--dsw-alias-state-warn-bg)',color:'var(--dsw-alias-state-warn-label)',fontSize:12,lineHeight:'18px'}}><div style={{fontWeight:500,marginBottom:3}}>部分模型目录读取失败</div>{loaded.failures.map(x=><div key={x}>{x}</div>)}</div>}
+    {error&&<p style={{margin:0,fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-error-primary)'}}>{error}</p>}{saved&&<p style={{margin:0,fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-success-primary)'}}>设置已保存。</p>}
+    <div style={{display:'flex',justifyContent:'flex-end',gap:8,paddingTop:4}}><Button variant="outline" disabled={busy} onClick={()=>void load()}>重新载入</Button><Button variant="primary" disabled={busy||!loaded.writable} onClick={()=>void save()}>{busy?'保存中…':'保存设置'}</Button></div>
   </div>
 }
 

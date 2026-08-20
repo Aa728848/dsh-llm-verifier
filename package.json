@@ -1,6 +1,6 @@
 {
   "name": "dsh-llm-verifier",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Configurable DSH-native LLM verifier with a Web settings page",
   "repository": {
     "type": "git",
