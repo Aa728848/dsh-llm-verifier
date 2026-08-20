@@ -8,12 +8,13 @@
 
 `dsh-llm-verifier` 为 DeepSeek Harness（DSH）引入了一套**独立的裁判复核机制**。在主 Agent 负责生成代码、执行命令与工具交互的同时，Verifier 会收集当前任务目标、各候选方案过程以及真实的终端执行结果，交由你在设置中指定的独立 DSH 模型进行仲裁：评估哪个方案更可靠、当前任务的实际完成进度、以及是否存在未发现的潜在错误。
 
-只有在主动调用以下工具时，插件才会向裁判模型发起请求：
+插件提供四个显式工具，并支持可配置的宿主级自动会话验收：
 
 - `verifier_compare`：对两个候选执行过程进行成对比较（Pairwise Comparison）；
-- `verifier_select`：在多个候选方案中通过锦标赛机制选出最优解；
-- `verifier_track`：评估任务在不同检查点（Checkpoint）的完成度与进展；
-- `verifier_current_session`：显式提取当前 DSH 会话记录，进行脱敏并执行复核。
+- `verifier_select`：在多个候选方案中通过锦标赛机制选出最优解，供 Best-of-N / 多候选编排器直接调用；
+- `verifier_track`：评估任务在已有检查点（Checkpoint）的完成度与进展，供 Goal / Workflow 等长任务编排器直接调用；
+- `verifier_current_session`：显式提取当前 DSH 会话记录，进行脱敏并执行复核；
+- **自动验收门控**：智能或严格策略在 `agent/turn-stopping` 生命周期边界检测真实工具证据，宿主直接运行同一会话验收逻辑；未通过时以插件 steering 反馈要求 Agent 修复并重新验证，而不是依赖模型是否主动想起工具。
 
 ## 安装与启用 (Installation & Usage)
 
@@ -164,7 +165,13 @@ flowchart LR
 
 | 配置项 | 说明 |
 |---|---|
-| **启用工具 (Enabled)** | 是否允许 Agent 调用 verifier 工具；关闭后调用会立即返回错误，不产生任何模型请求（设置页「工具开关」按钮可切换） |
+| **启用工具 (Enabled)** | 是否允许显式工具与自动验收向裁判模型发起请求；关闭后显式调用立即报错且自动门控不运行 |
+| **调用策略** | `manual` 仅显式调用；`smart` 仅在达到工具证据数量且含写入/执行类操作时自动验收；`strict` 对任一已完成的关键操作自动验收 |
+| **通过阈值** | 自动会话验收要求证据分数达到阈值且胜过“未执行有效工作”基线 |
+| **自动评估轮次** | 自动验收每个标准的重复轮次；默认 1，作为低成本初筛 |
+| **智能模式最少工具调用** | `smart` 策略需要的最少非 Verifier 工具调用数 |
+| **最大证据字符** | 自动发送给裁判的最近会话轨迹字符上限 |
+| **每任务/每会话最多验收** | 防止低分反馈形成无限修复循环并限制成本 |
 | **供应商 (Provider)** | 从 DSH 当前已配置且可路由的 Provider 列表中选择 |
 | **模型 (Model)** | 从所选 Provider 的模型目录中指定具体裁判模型 |
 | **推理强度 (Reasoning Effort)** | 使用 Adapter 为该模型声明的思考强度，或保留模型默认值 |
@@ -189,7 +196,7 @@ flowchart LR
 
 ## 隐私与数据安全边界
 
-`verifier_current_session` 工具**仅在被显式调用时**才会读取当前 DSH 会话内容：
+`verifier_current_session` 会在显式调用时读取当前 DSH 会话；启用 `smart` / `strict` 策略后，宿主也会在满足证据门槛的任务结束边界自动调用同一提取与复核路径：
 
 - **提取范围**：仅提取直接的用户消息、Assistant 回复、工具调用（Tool Call）及实际工具执行结果（Tool Result）；自动排除插件和系统内置指令（Plugin/System Instructions）；
 - **敏感信息脱敏**：默认对常见 Bearer Token、API Key、通用 Token、Password 及 Secret 进行脱敏替换；

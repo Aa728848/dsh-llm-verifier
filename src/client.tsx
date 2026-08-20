@@ -7,7 +7,7 @@ import { Button, IconDataOutline16, IconRefreshOutline16, Input } from '@deepsee
 import { useEffect, useMemo, useState } from 'react'
 
 const NS = 'llm-verifier'
-interface Values { enabled: boolean; provider: string; model: string; reasoningEffort?: string; maxTokens: number; maxConcurrency: number; maxRetries: number; timeoutMs: number; cacheMaxEntries: number; estimatedInputUsdPerMillion: number; estimatedOutputUsdPerMillion: number }
+interface Values { enabled: boolean; autoVerifyMode: 'manual'|'smart'|'strict'; autoVerifyThreshold: number; autoVerifyRepeats: number; autoVerifyMinToolCalls: number; autoVerifyMaxChars: number; autoVerifyMaxPerTask: number; autoVerifyMaxPerSession: number; provider: string; model: string; reasoningEffort?: string; maxTokens: number; maxConcurrency: number; maxRetries: number; timeoutMs: number; cacheMaxEntries: number; estimatedInputUsdPerMillion: number; estimatedOutputUsdPerMillion: number }
 interface Loaded { groups: ModelProviderGroup[]; settings: SettingsNamespaceView; writable: boolean; failures: string[] }
 interface RunStats { calls: number; attempts: number; retries: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningTokens: number; cacheHits: number; cacheMisses: number; estimatedCostUsd: number; topLogprobScores: number; explicitTagScores: number }
 interface InvocationRecord { id: string; toolName: string; sessionId?: string; startedAt: number; finishedAt: number; durationMs: number; success: boolean; errorName?: string; errorMessage?: string; provider: string; model: string; stats: RunStats }
@@ -33,7 +33,7 @@ const toolLabels: Record<string, string> = { verifier_compare: '两项对比', v
 const toolColors: Record<string, string> = { verifier_compare: '#4f8cff', verifier_select: '#8b6df6', verifier_track: '#2fc5c9', verifier_current_session: '#f5a524' }
 
 function record(value: unknown): Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {} }
-function values(view: SettingsNamespaceView): Values { const v=record(view.value); return { enabled:v.enabled!==false,provider:String(v.provider??''),model:String(v.model??''),...(typeof v.reasoningEffort==='string'?{reasoningEffort:v.reasoningEffort}:{}),maxTokens:Number(v.maxTokens??32768),maxConcurrency:Number(v.maxConcurrency??8),maxRetries:Number(v.maxRetries??3),timeoutMs:Number(v.timeoutMs??300000),cacheMaxEntries:Number(v.cacheMaxEntries??10000),estimatedInputUsdPerMillion:Number(v.estimatedInputUsdPerMillion??0),estimatedOutputUsdPerMillion:Number(v.estimatedOutputUsdPerMillion??0) } }
+function values(view: SettingsNamespaceView): Values { const v=record(view.value); const mode=v.autoVerifyMode==='manual'||v.autoVerifyMode==='strict'?v.autoVerifyMode:'smart'; return { enabled:v.enabled!==false,autoVerifyMode:mode,autoVerifyThreshold:Number(v.autoVerifyThreshold??.65),autoVerifyRepeats:Number(v.autoVerifyRepeats??1),autoVerifyMinToolCalls:Number(v.autoVerifyMinToolCalls??3),autoVerifyMaxChars:Number(v.autoVerifyMaxChars??80000),autoVerifyMaxPerTask:Number(v.autoVerifyMaxPerTask??2),autoVerifyMaxPerSession:Number(v.autoVerifyMaxPerSession??8),provider:String(v.provider??''),model:String(v.model??''),...(typeof v.reasoningEffort==='string'?{reasoningEffort:v.reasoningEffort}:{}),maxTokens:Number(v.maxTokens??32768),maxConcurrency:Number(v.maxConcurrency??8),maxRetries:Number(v.maxRetries??3),timeoutMs:Number(v.timeoutMs??300000),cacheMaxEntries:Number(v.cacheMaxEntries??10000),estimatedInputUsdPerMillion:Number(v.estimatedInputUsdPerMillion??0),estimatedOutputUsdPerMillion:Number(v.estimatedOutputUsdPerMillion??0) } }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function Label({title,help}:{title:string;help:string}) { return <div style={{minWidth:0}}><div style={{fontSize:14,fontWeight:400,lineHeight:'22px',color:'var(--dsw-alias-label-primary)'}}>{title}</div><div style={{fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-label-tertiary)',marginTop:2}}>{help}</div></div> }
 function GroupTitle({children}:{children:React.ReactNode}) { return <h3 style={groupTitle}>{children}</h3> }
@@ -61,6 +61,17 @@ function VerifierSettings({ api }:{api:any}) {
     <section style={group}><GroupTitle>工具</GroupTitle>
       <div style={row}><Label title="启用 Verifier 工具" help={draft.enabled?'允许 Agent 调用四个 verifier 工具并向裁判模型发起请求。':'停用后，所有 verifier 工具都会立即返回错误。'}/><button type="button" role="switch" aria-checked={draft.enabled} aria-label="启用 Verifier 工具" onClick={()=>patch('enabled',!draft.enabled)} style={toggleStyle(draft.enabled)}><span style={toggleThumbStyle(draft.enabled)}/></button></div>
       {!draft.enabled&&<p style={{margin:'8px 0 0',fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-warn-label)'}}>verifier_compare、verifier_select、verifier_track 和 verifier_current_session 当前不可用。</p>}
+    </section>
+
+    <section style={group}><GroupTitle>自动验收</GroupTitle>
+      <div style={row}><Label title="调用策略" help="手动仅暴露工具；智能在复杂且有真实证据的任务结束前验收；严格对任何已完成的写入、执行或远程操作进行验收。"/><select style={selectStyle} value={draft.autoVerifyMode} onChange={e=>patch('autoVerifyMode',e.target.value as Values['autoVerifyMode'])}><option value="manual">手动</option><option value="smart">智能（推荐）</option><option value="strict">严格</option></select></div>
+      <div style={row}><Label title="通过阈值" help="会话证据分数达到该值且胜过空工作基线才允许结束；范围 0–1。"/>{numeric('autoVerifyThreshold',0)}</div>
+      <div style={row}><Label title="自动评估轮次" help="每项标准的自动评分重复次数；1 为低成本初筛。"/>{numeric('autoVerifyRepeats',1)}</div>
+      <div style={row}><Label title="智能模式最少工具调用" help="达到此工具证据数量且包含写入/执行类操作时才自动验收。"/>{numeric('autoVerifyMinToolCalls',1)}</div>
+      <div style={row}><Label title="最大证据字符" help="发送给裁判前保留的最近会话证据字符数。"/>{numeric('autoVerifyMaxChars',1000)}</div>
+      <div style={row}><Label title="每任务最多验收" help="低分反馈后允许再次验收的次数上限，防止循环。"/>{numeric('autoVerifyMaxPerTask',1)}</div>
+      <div style={row}><Label title="每会话最多验收" help="同一会话中的自动验收总预算。"/>{numeric('autoVerifyMaxPerSession',1)}</div>
+      {draft.autoVerifyMode!=='manual'&&<p style={{margin:'8px 0 0',fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-warn-label)'}}>自动验收会将脱敏后的任务、Assistant 轨迹与真实工具输出发送给所选裁判模型；未通过时会自动要求 Agent 修复并重新验证。</p>}
     </section>
 
     <section style={group}><GroupTitle>裁判模型</GroupTitle>

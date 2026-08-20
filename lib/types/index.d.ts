@@ -7,6 +7,7 @@ export * from './core.ts';
 export * from './engine.ts';
 export * from './cache.ts';
 export * from './statistics.ts';
+export * from './auto.ts';
 export { callVerifier, RequestLimiter, type VerifierClientConfig, type VerifierImage, type UsageStats, type VerifierCompletion } from './caller.ts';
 export declare function apply(ctx: Context, config?: Config): void;
 //# sourceMappingURL=index.d.ts.map
