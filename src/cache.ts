@@ -42,7 +42,7 @@ export class ScoreCache {
   private readonly maxEntries: number
   private loaded = false
   private entries = new Map<string, CachedPairScore>()
-  private readonly inflight = new Map<string, Promise<CachedPairScore>>()
+  private readonly inflight = new Map<string, Promise<{ value: CachedPairScore; key: string }>>()
   private writing: Promise<void> = Promise.resolve()
 
   constructor(file: string, maxEntries: number) {
@@ -62,20 +62,22 @@ export class ScoreCache {
     }
   }
 
-  async getOrCreate(key: string, create: () => Promise<CachedPairScore>): Promise<{ value: CachedPairScore; hit: boolean }> {
+  async getOrCreate(key: string, create: () => Promise<CachedPairScore>, keyFor: (value: CachedPairScore) => string = () => key): Promise<{ value: CachedPairScore; hit: boolean }> {
     await this.load()
     const cached = this.entries.get(key)
     if (cached !== undefined) return { value: cached, hit: true }
     const existing = this.inflight.get(key)
-    if (existing !== undefined) return { value: await existing, hit: true }
-    const pending = create()
+    if (existing !== undefined) return { value: (await existing).value, hit: true }
+    // The storage key may differ from the lookup key when the actual scoring mode
+    // differs from the predicted one (first-call logprobs downgrade).
+    const pending = create().then(value => ({ value, key: keyFor(value) }))
     this.inflight.set(key, pending)
     try {
-      const value = await pending
-      this.entries.set(key, value)
+      const landed = await pending
+      this.entries.set(landed.key, landed.value)
       this.trim()
       await this.persist()
-      return { value, hit: false }
+      return { value: landed.value, hit: false }
     } finally {
       this.inflight.delete(key)
     }

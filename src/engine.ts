@@ -1,4 +1,4 @@
-import { addUsage, callVerifier, emptyUsage, type UsageStats, type VerifierClientConfig, type VerifierImage } from './caller.ts'
+import { addUsage, callVerifier, emptyUsage, predictScoringChannel, type ScoringMode, type UsageStats, type VerifierClientConfig, type VerifierImage } from './caller.ts'
 import { ScoreCache, stableHash } from './cache.ts'
 import {
   DEFAULT_CRITERIA, DEFAULT_GROUND_TRUTH_NOTE, accumulatePairs, buildPairwisePrompt, buildProgressPrompt,
@@ -14,6 +14,7 @@ export interface SelectResult { index: number; best: string; scores: number[]; r
 
 function average(values: readonly number[]): number { return values.reduce((sum, value) => sum + value, 0) / (values.length || 1) }
 function blankStats(): RunStats { return { ...emptyUsage(), cacheHits: 0, cacheMisses: 0, estimatedCostUsd: 0, topLogprobScores: 0, explicitTagScores: 0 } }
+function unorderedPair(a: number, b: number): string { return a < b ? a + ',' + b : b + ',' + a }
 
 export class VerifierEngine {
   readonly client: VerifierClientConfig
@@ -35,13 +36,20 @@ export class VerifierEngine {
     const ground = options.groundTruthNote ?? DEFAULT_GROUND_TRUTH_NOTE
     const prompt = buildPairwisePrompt(options.problem, candidateA, candidateB, criterion, ground)
     const imageKey = options.images?.map(image => stableHash([image.mediaType, Buffer.from(image.data).toString('base64')]))
-    const key = stableHash({ version: 2, scoringPolicy: 'auto-top-logprobs', provider: this.client.provider, model: this.client.model, effort: this.client.reasoningEffort, maxTokens: this.client.maxTokens, problem: options.problem, candidateA, candidateB, criterion, ground, repeat, imageKey })
+    // Cache identity pins the scoring channel, but the channel is only predictable
+    // before the call when the capability cache already knows the answer. Lookups
+    // therefore use the predicted channel while entries are always stored under the
+    // ACTUAL completion mode: a first-call downgrade (missing route or provider
+    // rejection) lands under explicit-tag keys and is found by every later
+    // explicit-tag call instead of being misread as a top-logprobs expectation.
+    const identity = { version: 4, provider: this.client.provider, model: this.client.model, effort: this.client.reasoningEffort, maxTokens: this.client.maxTokens, repeat, promptHash: stableHash(prompt), imageKey }
+    const keyForMode = (scoringMode: ScoringMode) => stableHash({ ...identity, scoringMode })
     const create = async () => {
       const completion = await callVerifier(this.client, prompt, signal, options.images)
       return { scoreA: extractScore(completion, '<score_A>'), scoreB: extractScore(completion, '<score_B>'), usage: completion.usage, scoringMode: completion.scoringMode, createdAt: Date.now() }
     }
     if (this.cache === undefined) { const value = await create(); return { scores: [value.scoreA, value.scoreB], usage: value.usage, scoringMode: value.scoringMode, hit: false } }
-    const cached = await this.cache.getOrCreate(key, create)
+    const cached = await this.cache.getOrCreate(keyForMode(predictScoringChannel(this.client)), create, value => keyForMode(value.scoringMode))
     return { scores: [cached.value.scoreA, cached.value.scoreB], usage: cached.hit ? emptyUsage() : cached.value.usage, scoringMode: cached.value.scoringMode, hit: cached.hit }
   }
 
@@ -91,9 +99,23 @@ export class VerifierEngine {
   async select(options: SelectOptions, signal?: AbortSignal): Promise<SelectResult> {
     if (!options.candidates.length) throw new Error('llm-verifier: candidates must not be empty')
     if (options.candidates.length === 1) return { index: 0, best: options.candidates[0]!, scores: [1], ranking: [0], pivots: [0], comparisons: 0, calls: 0, stats: blankStats() }
+    if (options.candidates.length === 2) {
+      // ringCycle(2) would judge the single unordered pair in both directions; play it once.
+      const { rewards, stats } = await this.scorePairs(options, [[0, 1]], signal)
+      const wins = [0, 0]; const counts = [0, 0]
+      accumulatePairs([[0, 1]], rewards, wins, counts)
+      const ranked = rankScores(wins, counts); const index = ranked[0]!.index
+      return { index, best: options.candidates[index]!, scores: wins.map((value, candidate) => value / (counts[candidate] || 1)), ranking: ranked.map(value => value.index), pivots: [], comparisons: 1, calls: stats.calls, stats }
+    }
     const ring = ringCycle(options.candidates.length, options.seed ?? 0); const ringScores = await this.scorePairs(options, ring, signal)
     const firstWins = new Array<number>(options.candidates.length).fill(0); const firstCounts = new Array<number>(options.candidates.length).fill(0); accumulatePairs(ring, ringScores.rewards, firstWins, firstCounts)
-    const pivots = topPivots(firstWins, firstCounts, options.pivots ?? 2); const rounds = pivotRoundPairs(options.candidates.length, pivots); const roundScores = await this.scorePairs(options, rounds, signal)
+    const pivots = topPivots(firstWins, firstCounts, options.pivots ?? 2)
+    // pivotRoundPairs regenerates every ring edge that touches a pivot (reversed for
+    // pivot→neighbour edges). Dropping those duplicates keeps each unordered pair to a
+    // single match so wins/counts are not double-weighted and no pair is judged twice.
+    const ringPairs = new Set(ring.map(pair => unorderedPair(pair[0], pair[1])))
+    const rounds = pivotRoundPairs(options.candidates.length, pivots).filter(pair => !ringPairs.has(unorderedPair(pair[0], pair[1])))
+    const roundScores = await this.scorePairs(options, rounds, signal)
     const allRewards = new Map([...ringScores.rewards, ...roundScores.rewards]); const wins = new Array<number>(options.candidates.length).fill(0); const counts = new Array<number>(options.candidates.length).fill(0)
     accumulatePairs(ring, allRewards, wins, counts); accumulatePairs(rounds, allRewards, wins, counts); const ranked = rankScores(wins, counts); const index = ranked[0]!.index
     const stats = blankStats(); for (const source of [ringScores.stats, roundScores.stats]) { addUsage(stats, source); stats.cacheHits += source.cacheHits; stats.cacheMisses += source.cacheMisses; stats.topLogprobScores += source.topLogprobScores; stats.explicitTagScores += source.explicitTagScores }

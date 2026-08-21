@@ -91,7 +91,7 @@ async function callExplicitTag(config: VerifierClientConfig, prompt: string, sig
       return { text, tokens: [], positions: [], scoringMode: 'explicit-tag', usage: usage(attempt, assembler.usage) }
     } catch (error) {
       if (signal?.aborted) throw signal.reason
-      if (attempt > config.maxRetries || !(error instanceof Error) || !/rate|quota|timeout|timed out|temporar|network|fetch|socket|5dd/i.test(error.message)) throw error
+      if (attempt > config.maxRetries || !(error instanceof Error) || !/rate|quota|timeout|timed out|temporar|network|fetch|socket|5\d\d/i.test(error.message)) throw error
       await delay(Math.min(30000, config.retryBaseDelayMs * 2 ** (attempt - 1) * (0.8 + Math.random() * 0.4)), signal)
     } finally {
       clearTimeout(timeout)
@@ -114,6 +114,11 @@ export class RequestLimiter {
     this.active += 1
     try { return await operation() } finally { this.active -= 1; this.queue.shift()?.() }
   }
+}
+
+/** Best-effort pre-call channel prediction for cache identity only; callAutomatic() stays the runtime source of truth. */
+export function predictScoringChannel(config: VerifierClientConfig): ScoringMode {
+  return config.topLogprobCapabilities.isUnsupported(config.provider, config.model) ? 'explicit-tag' : 'top-logprobs'
 }
 
 async function callAutomatic(config: VerifierClientConfig, prompt: string, signal?: AbortSignal, images?: readonly VerifierImage[]): Promise<VerifierCompletion> {
