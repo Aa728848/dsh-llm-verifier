@@ -37,6 +37,19 @@ function validEntry(value: unknown): value is CachedPairScore {
   return typeof row.scoreA === 'number' && Number.isFinite(row.scoreA) && row.scoreA >= 0 && row.scoreA <= 1 && typeof row.scoreB === 'number' && Number.isFinite(row.scoreB) && row.scoreB >= 0 && row.scoreB <= 1 && validUsage(row.usage) && (row.scoringMode === undefined || row.scoringMode === 'top-logprobs' || row.scoringMode === 'explicit-tag') && typeof row.createdAt === 'number' && Number.isFinite(row.createdAt) && row.createdAt >= 0
 }
 
+/** Channel-independent single-flight: concurrent identical tasks share one promise; joiners are flagged so callers can avoid double-counting usage. */
+export class SingleFlight<T> {
+  private readonly flights = new Map<string, Promise<T>>()
+  async run(key: string, task: () => Promise<T>): Promise<{ value: T; joined: boolean }> {
+    const existing = this.flights.get(key)
+    if (existing !== undefined) return { value: await existing, joined: true }
+    // task() starts synchronously so the flight is registered before its first await.
+    const flight = task().finally(() => { if (this.flights.get(key) === flight) this.flights.delete(key) })
+    this.flights.set(key, flight)
+    return { value: await flight, joined: false }
+  }
+}
+
 export class ScoreCache {
   private readonly file: string
   private readonly maxEntries: number

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { VerifierClientConfig } from './caller.ts'
-import { ScoreCache } from './cache.ts'
+import { ScoreCache, SingleFlight, type CachedPairScore } from './cache.ts'
 import { VerifierEngine } from './engine.ts'
 import { TopLogprobCapabilityCache } from './top-logprobs.ts'
 
@@ -15,7 +15,7 @@ function clientConfig(overrides: Partial<VerifierClientConfig> = {}): VerifierCl
 }
 
 /** Streams an explicit-tag verdict derived from which named candidate sits in trajectory A/B. */
-function scriptedStream(judged: Array<string>): (options: any) => AsyncIterable<any[]> {
+function scriptedStream(judged: Array<string>, gate?: Array<() => void>): (options: any) => AsyncIterable<any[]> {
   return function (options: any) {
     const message = options.messages[0]
     const prompt = typeof message.content === 'string' ? message.content : message.content.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('')
@@ -25,7 +25,9 @@ function scriptedStream(judged: Array<string>): (options: any) => AsyncIterable<
     const letter = (trace: string) => trace.includes('STRONG') ? 'A' : 'T'
     const criterion = /\*\*Evaluation Guideline — (.+?):\*\*/.exec(prompt)?.[1] ?? '?'
     judged.push(criterion + '|' + [traceA.trim(), traceB.trim()].sort().join('|'))
-    return streamOf(chunks('<score_A> ' + letter(traceA) + ' </score_A>\n<score_B> ' + letter(traceB) + ' </score_B>'))
+    const text = '<score_A> ' + letter(traceA) + ' </score_A>\n<score_B> ' + letter(traceB) + ' </score_B>'
+    if (gate === undefined) return streamOf(chunks(text))
+    return (async function* () { await new Promise<void>(resolve => { gate.push(resolve) }); yield* streamOf(chunks(text)) })()
   }
 }
 
@@ -101,5 +103,34 @@ describe('VerifierEngine cache identity', () => {
     expect(result.comparisons).toBe(1)
     expect(result.index).toBe(0)
     expect(result.pivots).toEqual([])
+  })
+  it('merges concurrent identical requests across engine instances inside the first-call downgrade window', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-engine-'))
+    try {
+      const judged: Array<string> = []
+      const gate: Array<() => void> = []
+      const caps = new TopLogprobCapabilityCache()
+      // Separate engines, shared topic flight table + cache — the index.ts assembly shape.
+      const flights = new SingleFlight<{ value: CachedPairScore; hit: boolean }>()
+      const cache = new ScoreCache(join(dir, 'scores.json'), 100)
+      const makeEngine = () => new VerifierEngine(clientConfig({ llm: { stream: scriptedStream(judged, gate) } as any, topLogprobCapabilities: caps }), 4, cache, { input: 0, output: 0 }, flights)
+      const options = { problem: 'task', candidateA: 'AAA', candidateB: 'BBB', repeats: 1, criteria: [{ id: 'one', name: 'One', description: 'single criterion' }] }
+      // No settings in ctx, so t1 predicts top-logprobs but downgrades at runtime.
+      const first = makeEngine().compare(options)
+      caps.markUnsupported('openai', 'gpt-5')
+      const second = makeEngine().compare(options)
+      // Wait until the first engine's stream is actually parked on the gate (cache
+      // load does real fs I/O, so a single macrotask tick is not enough), then release.
+      for (let index = 0; index < 200 && gate.length === 0; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 5))
+      while (gate.length > 0) gate.shift()!()
+      const [r1, r2] = await Promise.all([first, second])
+      // One criterion, one merged model call — without the shared flight the second engine would re-run it.
+      expect(judged).toHaveLength(1)
+      expect(r1.stats.cacheMisses).toBe(1)
+      expect(r2.stats.cacheHits).toBe(1)
+      expect(r2.stats.calls).toBe(0)
+      expect(r2.scoreA).toBe(r1.scoreA)
+      expect(r2.scoreB).toBe(r1.scoreB)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 })

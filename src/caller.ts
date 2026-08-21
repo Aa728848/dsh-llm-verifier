@@ -117,11 +117,13 @@ export class RequestLimiter {
 }
 
 /** Best-effort pre-call channel prediction for cache identity only; callAutomatic() stays the runtime source of truth. */
-export function predictScoringChannel(config: VerifierClientConfig): ScoringMode {
+export async function predictScoringChannel(config: VerifierClientConfig): Promise<ScoringMode> {
+  await config.topLogprobCapabilities.ensureLoaded()
   return config.topLogprobCapabilities.isUnsupported(config.provider, config.model) ? 'explicit-tag' : 'top-logprobs'
 }
 
 async function callAutomatic(config: VerifierClientConfig, prompt: string, signal?: AbortSignal, images?: readonly VerifierImage[]): Promise<VerifierCompletion> {
+  await config.topLogprobCapabilities.ensureLoaded()
   if (!config.topLogprobCapabilities.isUnsupported(config.provider, config.model)) {
     const route = await resolveTopLogprobRoute(config.ctx, config.provider)
     if (route !== undefined) {

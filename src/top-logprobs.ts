@@ -1,6 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { CompletionLogprobs, TokenAlternative } from './core.ts'
 import type { UsageStats, VerifierImage } from './caller.ts'
 
@@ -90,8 +92,63 @@ export async function callTopLogprobs(route: TopLogprobRoute, model: string, pro
   return { text: answer, tokens, positions, scoringMode: 'top-logprobs', usage: { calls: 1, attempts: 1, retries: 0, inputTokens: Math.max(0, input - cached), cachedInputTokens: cached, outputTokens: Number(rawUsage.completion_tokens ?? 0) || 0, reasoningTokens: Number(completionDetails.reasoning_tokens ?? 0) || 0 } }
 }
 
+/** Marks older than this are dropped on hydration so a provider that later gains logprobs support is re-probed. */
+export const CAPABILITY_TTL_MS = 24 * 60 * 60 * 1000
+
+interface CapabilityDocument { version: 1; entries: Record<string, number> }
+
+/** Resolves the capability memory file beside the score cache inside the topic verifier directory. */
+export function resolveCapabilityFile(cacheDir: string, cwd = process.cwd()): string {
+  const root = isAbsolute(cacheDir) ? cacheDir : resolve(cwd, cacheDir)
+  return join(root, 'capabilities-v1.json')
+}
+
 export class TopLogprobCapabilityCache {
-  private readonly unsupported = new Set<string>()
+  private readonly unsupported = new Map<string, number>()
+  private loaded = false
+  private hydrating: Promise<void> | undefined
+  private writing: Promise<void> = Promise.resolve()
+
+  constructor(private readonly file?: string, private readonly now: () => number = Date.now) {}
+
   isUnsupported(provider: string, model: string): boolean { return this.unsupported.has(provider + '\0' + model) }
-  markUnsupported(provider: string, model: string): void { this.unsupported.add(provider + '\0' + model) }
+
+  /** Hydrates persisted marks once; in-process marks always win over file contents. */
+  async ensureLoaded(): Promise<void> {
+    if (this.loaded || this.file === undefined) return
+    this.hydrating ??= (async () => {
+      try {
+        const document = JSON.parse(await readFile(this.file!, 'utf8')) as CapabilityDocument
+        const entries = document !== null && typeof document === 'object' && document.version === 1 && typeof document.entries === 'object' && document.entries !== null ? document.entries : {}
+        const now = this.now()
+        for (const [key, markedAt] of Object.entries(entries)) {
+          if (typeof markedAt !== 'number' || !Number.isFinite(markedAt) || markedAt < 0 || now - markedAt > CAPABILITY_TTL_MS) continue
+          // Max-merge: never let an older persisted stamp clobber a fresher in-process probe.
+          const existing = this.unsupported.get(key)
+          if (existing === undefined || existing < markedAt) this.unsupported.set(key, markedAt)
+        }
+      } catch { /* a missing or unreadable file simply starts empty */ }
+      this.loaded = true
+    })()
+    await this.hydrating
+  }
+
+  markUnsupported(provider: string, model: string): void {
+    this.unsupported.set(provider + '\0' + model, this.now())
+    if (this.file === undefined) return
+    // Serialize behind hydration so an early mark never clobbers not-yet-loaded entries.
+    this.writing = this.writing
+      .then(() => this.ensureLoaded())
+      .then(async () => {
+        const snapshot: CapabilityDocument = { version: 1, entries: Object.fromEntries(this.unsupported) }
+        await mkdir(dirname(this.file!), { recursive: true })
+        const temporary = this.file! + '.tmp-' + process.pid
+        await writeFile(temporary, JSON.stringify(snapshot), 'utf8')
+        try { await rename(temporary, this.file!) } catch (error) { await unlink(temporary).catch(() => {}); throw error }
+      })
+      .catch(() => { /* capability memory is best-effort; the next mark rewrites the file */ })
+  }
+
+  /** Resolves once the trailing persistence attempt settles; exposed for tests. */
+  flush(): Promise<void> { return this.writing }
 }

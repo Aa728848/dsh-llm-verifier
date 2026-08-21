@@ -1,5 +1,5 @@
 import { addUsage, callVerifier, emptyUsage, predictScoringChannel, type ScoringMode, type UsageStats, type VerifierClientConfig, type VerifierImage } from './caller.ts'
-import { ScoreCache, stableHash } from './cache.ts'
+import { ScoreCache, SingleFlight, stableHash, type CachedPairScore } from './cache.ts'
 import {
   DEFAULT_CRITERIA, DEFAULT_GROUND_TRUTH_NOTE, accumulatePairs, buildPairwisePrompt, buildProgressPrompt,
   extractProgressScore, extractScore, pivotRoundPairs, rankScores, ringCycle, topPivots, type Criterion,
@@ -22,9 +22,10 @@ export class VerifierEngine {
   readonly cache: ScoreCache | undefined
   readonly inputPrice: number
   readonly outputPrice: number
+  private readonly flights: SingleFlight<{ value: CachedPairScore; hit: boolean }>
 
-  constructor(client: VerifierClientConfig, maxConcurrency = 8, cache?: ScoreCache, prices: { input: number; output: number } = { input: 0, output: 0 }) {
-    this.client = client; this.maxConcurrency = maxConcurrency; this.cache = cache; this.inputPrice = prices.input; this.outputPrice = prices.output
+  constructor(client: VerifierClientConfig, maxConcurrency = 8, cache?: ScoreCache, prices: { input: number; output: number } = { input: 0, output: 0 }, flights: SingleFlight<{ value: CachedPairScore; hit: boolean }> = new SingleFlight()) {
+    this.client = client; this.maxConcurrency = maxConcurrency; this.cache = cache; this.inputPrice = prices.input; this.outputPrice = prices.output; this.flights = flights
   }
 
   private finishStats(stats: RunStats): RunStats {
@@ -37,20 +38,28 @@ export class VerifierEngine {
     const prompt = buildPairwisePrompt(options.problem, candidateA, candidateB, criterion, ground)
     const imageKey = options.images?.map(image => stableHash([image.mediaType, Buffer.from(image.data).toString('base64')]))
     // Cache identity pins the scoring channel, but the channel is only predictable
-    // before the call when the capability cache already knows the answer. Lookups
-    // therefore use the predicted channel while entries are always stored under the
-    // ACTUAL completion mode: a first-call downgrade (missing route or provider
-    // rejection) lands under explicit-tag keys and is found by every later
-    // explicit-tag call instead of being misread as a top-logprobs expectation.
+    // before the call when the capability cache already knows the answer. Lookups use
+    // the predicted channel while entries are always stored under the ACTUAL
+    // completion mode, so a first-call downgrade lands under explicit-tag keys and is
+    // found by later explicit-tag calls instead of being misread as a top-logprobs
+    // expectation. The channel stays OUT of the in-flight dedup key below.
     const identity = { version: 4, provider: this.client.provider, model: this.client.model, effort: this.client.reasoningEffort, maxTokens: this.client.maxTokens, repeat, promptHash: stableHash(prompt), imageKey }
     const keyForMode = (scoringMode: ScoringMode) => stableHash({ ...identity, scoringMode })
     const create = async () => {
       const completion = await callVerifier(this.client, prompt, signal, options.images)
       return { scoreA: extractScore(completion, '<score_A>'), scoreB: extractScore(completion, '<score_B>'), usage: completion.usage, scoringMode: completion.scoringMode, createdAt: Date.now() }
     }
-    if (this.cache === undefined) { const value = await create(); return { scores: [value.scoreA, value.scoreB], usage: value.usage, scoringMode: value.scoringMode, hit: false } }
-    const cached = await this.cache.getOrCreate(keyForMode(predictScoringChannel(this.client)), create, value => keyForMode(value.scoringMode))
-    return { scores: [cached.value.scoreA, cached.value.scoreB], usage: cached.hit ? emptyUsage() : cached.value.usage, scoringMode: cached.value.scoringMode, hit: cached.hit }
+    const cache = this.cache
+    if (cache === undefined) { const value = await create(); return { scores: [value.scoreA, value.scoreB], usage: value.usage, scoringMode: value.scoringMode, hit: false } }
+    // Registration happens in the synchronous segment before any await, so a request
+    // that arrives while the first one is still resolving its channel prediction
+    // still merges instead of duplicating the model call. The flight table is shared
+    // per topic, so concurrent tool calls through separate engine instances merge too.
+    const dedupeKey = stableHash(identity)
+    const outcome = await this.flights.run(dedupeKey, async () => cache.getOrCreate(keyForMode(await predictScoringChannel(this.client)), create, value => keyForMode(value.scoringMode)))
+    const landed = outcome.value
+    const reused = outcome.joined || landed.hit
+    return { scores: [landed.value.scoreA, landed.value.scoreB], usage: reused ? emptyUsage() : landed.value.usage, scoringMode: landed.value.scoringMode, hit: reused }
   }
 
   private async mapLimited<T, R>(items: readonly T[], worker: (item: T) => Promise<R>): Promise<R[]> {

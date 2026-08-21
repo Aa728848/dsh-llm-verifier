@@ -7,8 +7,8 @@ import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attac
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import { Config, installVerifierSettings, resolveConfig } from './config.ts'
 import { RequestLimiter, callVerifierText } from './caller.ts'
-import { TopLogprobCapabilityCache } from './top-logprobs.ts'
-import { ScoreCache, resolveCacheFile, stableHash } from './cache.ts'
+import { TopLogprobCapabilityCache, resolveCapabilityFile } from './top-logprobs.ts'
+import { ScoreCache, SingleFlight, resolveCacheFile, stableHash, type CachedPairScore } from './cache.ts'
 import { VerifierEngine, normalizeCriteria, type RunStats } from './engine.ts'
 import { loadVerifierImages } from './images.ts'
 import { extractSession } from './session.ts'
@@ -48,10 +48,9 @@ export function apply(ctx: Context, config: Config = {}): void {
   const entry = resolveConfig(config)
   let limiter = new RequestLimiter(entry.maxConcurrency)
   const current = installVerifierSettings(ctx, entry, () => { limiter = new RequestLimiter(current().maxConcurrency) })
-  const topLogprobCapabilities = new TopLogprobCapabilityCache()
   const autoBudget = new AutoVerificationBudget()
   const autoRouter = new AutoVerifierRouter()
-  const topics = new Map<string, { dataDir: string; cache: ScoreCache; statistics: StatisticsStore }>()
+  const topics = new Map<string, { dataDir: string; cache: ScoreCache; capabilities: TopLogprobCapabilityCache; flights: SingleFlight<{ value: CachedPairScore; hit: boolean }>; statistics: StatisticsStore }>()
   const topic = (header: SessionHeader) => {
     const selected = current()
     const dataDir = resolveTopicDataDir(services.sessionPersistence, header, selected.cacheDir)
@@ -59,7 +58,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const existing = topics.get(id)
     if (existing?.dataDir === dataDir) return existing
     const cacheFile = resolveCacheFile(dataDir)
-    const created = { dataDir, cache: new ScoreCache(cacheFile, selected.cacheMaxEntries), statistics: new StatisticsStore(resolveStatisticsFile(cacheFile)) }
+    const created = { dataDir, cache: new ScoreCache(cacheFile, selected.cacheMaxEntries), capabilities: new TopLogprobCapabilityCache(resolveCapabilityFile(dataDir)), flights: new SingleFlight<{ value: CachedPairScore; hit: boolean }>(), statistics: new StatisticsStore(resolveStatisticsFile(cacheFile)) }
     topics.set(id, created)
     return created
   }
@@ -71,7 +70,8 @@ export function apply(ctx: Context, config: Config = {}): void {
   const engine = async (agent: Agent) => {
     const selected = current()
     await ctx.llm.resolveCallConfig({ provider: selected.provider, model: selected.model, ...(selected.reasoningEffort ? { reasoningEffort: selected.reasoningEffort as never } : {}), maxTokens: selected.maxTokens })
-    return { verifier: new VerifierEngine({ ...selected, ctx, llm: ctx.llm, attachments: services.attachments, topLogprobCapabilities, limiter }, selected.maxConcurrency, topic(agent.session.header).cache, { input: selected.estimatedInputUsdPerMillion, output: selected.estimatedOutputUsdPerMillion }), selected }
+    const topicEntry = topic(agent.session.header)
+    return { verifier: new VerifierEngine({ ...selected, ctx, llm: ctx.llm, attachments: services.attachments, topLogprobCapabilities: topicEntry.capabilities, limiter }, selected.maxConcurrency, topicEntry.cache, { input: selected.estimatedInputUsdPerMillion, output: selected.estimatedOutputUsdPerMillion }, topicEntry.flights), selected }
   }
   const images = (values: readonly string[] | undefined, signal: AbortSignal) => loadVerifierImages(values, signal)
   const route = (selected: { provider: string; model: string }) => ({ provider: selected.provider, model: selected.model })
