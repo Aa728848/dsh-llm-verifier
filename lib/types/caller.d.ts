@@ -42,6 +42,8 @@ export declare class RequestLimiter {
     constructor(limit: number);
     run<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
 }
+/** Best-effort pre-call channel prediction for cache identity only; callAutomatic() stays the runtime source of truth. */
+export declare function predictScoringChannel(config: VerifierClientConfig): Promise<ScoringMode>;
 export declare function callVerifier(config: VerifierClientConfig, prompt: string, signal?: AbortSignal, images?: readonly VerifierImage[]): Promise<VerifierCompletion>;
 /** Plain-text verifier call for conservative JSON routing; probability labels are intentionally bypassed. */
 export declare function callVerifierText(config: VerifierClientConfig, prompt: string, signal?: AbortSignal): Promise<VerifierCompletion>;

@@ -1,5 +1,5 @@
 import { type UsageStats, type VerifierClientConfig, type VerifierImage } from './caller.ts';
-import { ScoreCache } from './cache.ts';
+import { ScoreCache, SingleFlight, type CachedPairScore } from './cache.ts';
 import { DEFAULT_GROUND_TRUTH_NOTE, type Criterion } from './core.ts';
 export interface CompareOptions {
     problem: string;
@@ -57,10 +57,14 @@ export declare class VerifierEngine {
     readonly cache: ScoreCache | undefined;
     readonly inputPrice: number;
     readonly outputPrice: number;
+    private readonly flights;
     constructor(client: VerifierClientConfig, maxConcurrency?: number, cache?: ScoreCache, prices?: {
         input: number;
         output: number;
-    });
+    }, flights?: SingleFlight<{
+        value: CachedPairScore;
+        hit: boolean;
+    }>);
     private finishStats;
     private scoreOne;
     private mapLimited;
