@@ -57,13 +57,15 @@ interface Reservation {
     taskStartSeq: number;
 }
 export declare function latestDirectUserSeq(events: readonly SessionEvent[]): number | undefined;
+export interface EvidenceCall {
+    name: string;
+    callSeq: number;
+    resultSeq: number;
+    text: string;
+}
 interface EvidenceIndex {
     problemSeq: number;
-    calls: Map<string, {
-        call: SessionEvent<'tool/call'>;
-        result: SessionEvent<'tool/result'>;
-        text: string;
-    }>;
+    calls: Map<string, EvidenceCall>;
     todos: Map<number, TodoItem[]>;
 }
 export declare function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceIndex | undefined;

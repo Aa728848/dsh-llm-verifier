@@ -82,6 +82,17 @@ export async function extractSession(agent: Agent, loadImage: (ref: Extract<Cont
       trace.push('--- Tool Call turn ' + event.data.turn + ' step ' + event.data.step + ' ---\n[Command] ' + event.data.name + ' ' + event.data.arguments)
     } else if (event.type === 'tool/result') {
       trace.push('--- Tool Result turn ' + event.data.turn + ' step ' + event.data.step + ' ---\n[Output] ' + textOf(event.data.message.content))
+    } else if (event.type === 'tool/code-dispatch') {
+      const data = event.data as { name: string; arguments?: unknown; isError?: boolean; content?: readonly ContentBlock[] }
+      const status = data.isError ? ' [Error]' : ''
+      const args = data.arguments !== undefined ? ' ' + (typeof data.arguments === 'string' ? data.arguments : JSON.stringify(data.arguments)) : ''
+      const content = Array.isArray(data.content) ? textOf(data.content) : ''
+      if (Array.isArray(data.content)) {
+        for (const block of data.content) {
+          if (block.type === 'image') images.push(await loadImage(block.attachment))
+        }
+      }
+      trace.push('--- Code Dispatch ' + data.name + status + ' seq ' + event.seq + ' ---\n[Command] ' + data.name + args + '\n[Output] ' + content)
     }
   }
   const raw = redactText(trace.join('\n\n'), patterns)

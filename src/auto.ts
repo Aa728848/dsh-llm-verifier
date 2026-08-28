@@ -47,6 +47,20 @@ function isConsequential(name: string): boolean {
   return /(?:edit|write|patch|apply|deploy|upload|delete|remove|kill|exec|shell|command|migration|database|tunnel|cluster)/iu.test(name)
 }
 
+interface CodeDispatchData {
+  subCallId?: string
+  name: string
+  arguments?: unknown
+  isError?: boolean
+  content?: readonly { isError?: boolean }[]
+}
+
+function isSuccessfulCodeDispatch(data: CodeDispatchData): boolean {
+  if (data.isError === true) return false
+  if (Array.isArray(data.content) && data.content.some(b => b.isError === true)) return false
+  return true
+}
+
 export function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVerifyPolicy): AutoTaskEvidence {
   const taskStartSeq = latestDirectUserSeq(events)
   if (taskStartSeq === undefined) return { taskStartSeq: 0, toolCalls: 0, completedToolResults: 0, consequentialToolCalls: 0, hasManualSessionVerification: false, eligible: false, reason: 'no-direct-user-task' }
@@ -55,10 +69,14 @@ export function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVer
   const calls = relevant.filter((event): event is SessionEvent<'tool/call'> => event.type === 'tool/call')
   const successfulResults = new Set(relevant.filter((event): event is SessionEvent<'tool/result'> => event.type === 'tool/result' && event.data.error === undefined && event.data.message.content.every(block => block.isError !== true)).map(event => String(event.data.message.source.callId)))
   const pairedCalls = calls.filter(event => successfulResults.has(String(event.data.callId)))
-  const toolCalls = calls.filter(event => !VERIFIER_TOOLS.has(event.data.name)).length
-  const completedToolResults = pairedCalls.length
-  const consequentialToolCalls = pairedCalls.filter(event => isConsequential(event.data.name)).length
-  const hasManualSessionVerification = pairedCalls.some(event => event.data.name === 'verifier_current_session')
+
+  const codeDispatches = relevant.filter(event => event.type === 'tool/code-dispatch').map(event => event.data as CodeDispatchData)
+  const successfulDispatches = codeDispatches.filter(isSuccessfulCodeDispatch)
+
+  const toolCalls = calls.filter(event => !VERIFIER_TOOLS.has(event.data.name)).length + codeDispatches.filter(d => !VERIFIER_TOOLS.has(d.name)).length
+  const completedToolResults = pairedCalls.length + successfulDispatches.length
+  const consequentialToolCalls = pairedCalls.filter(event => isConsequential(event.data.name)).length + successfulDispatches.filter(d => isConsequential(d.name)).length
+  const hasManualSessionVerification = pairedCalls.some(event => event.data.name === 'verifier_current_session') || successfulDispatches.some(d => d.name === 'verifier_current_session')
 
   if (policy.mode === 'manual') return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, eligible: false, reason: 'manual-mode' }
   if (hasManualSessionVerification) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, eligible: false, reason: 'already-verified' }

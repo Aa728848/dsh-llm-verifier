@@ -69,10 +69,10 @@ export function latestDirectUserSeq(events: readonly SessionEvent[]): number | u
   return undefined
 }
 
-function blockText(event: SessionEvent<'tool/result'>): string {
+function blockText(blocks: readonly ContentBlock[]): string {
   const parts: string[] = []
-  const visit = (blocks: readonly ContentBlock[]) => { for (const block of blocks) { if (block.type === 'text' || block.type === 'reasoning') parts.push(block.text); else if (block.type === 'tool-result') visit(block.content) } }
-  visit(event.data.message.content)
+  const visit = (items: readonly ContentBlock[]) => { for (const block of items) { if (block.type === 'text' || block.type === 'reasoning') parts.push(block.text); else if (block.type === 'tool-result') visit(block.content) } }
+  visit(blocks)
   return parts.join('\n').trim()
 }
 
@@ -86,9 +86,16 @@ function strictJson(text: string): unknown {
   try { return JSON.parse(trimmed) } catch { return undefined }
 }
 
+export interface EvidenceCall {
+  name: string
+  callSeq: number
+  resultSeq: number
+  text: string
+}
+
 interface EvidenceIndex {
   problemSeq: number
-  calls: Map<string, { call: SessionEvent<'tool/call'>; result: SessionEvent<'tool/result'>; text: string }>
+  calls: Map<string, EvidenceCall>
   todos: Map<number, TodoItem[]>
 }
 
@@ -99,15 +106,26 @@ export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceInd
   const calls = new Map<string, SessionEvent<'tool/call'>>()
   const results = new Map<string, SessionEvent<'tool/result'>>()
   const todos = new Map<number, TodoItem[]>()
+  const paired = new Map<string, EvidenceCall>()
+
   for (const event of relevant) {
     if (event.type === 'tool/call') calls.set(String(event.data.callId), event)
     else if (event.type === 'tool/result' && successful(event)) results.set(String(event.data.message.source.callId), event)
     else if (event.type === 'todo/write') todos.set(event.seq, event.data.todos)
+    else if (event.type === 'tool/code-dispatch') {
+      const data = event.data as { subCallId?: string; name: string; isError?: boolean; content?: readonly ContentBlock[] }
+      const isOk = data.isError !== true && (!Array.isArray(data.content) || data.content.every(b => b.isError !== true))
+      if (isOk) {
+        const subCallId = String(data.subCallId ?? ('code:' + event.seq))
+        const content = Array.isArray(data.content) ? data.content : []
+        paired.set(subCallId, { name: data.name, callSeq: event.seq, resultSeq: event.seq, text: blockText(content) })
+      }
+    }
   }
-  const paired = new Map<string, { call: SessionEvent<'tool/call'>; result: SessionEvent<'tool/result'>; text: string }>()
+
   for (const [callId, call] of calls) {
     const result = results.get(callId)
-    if (result) paired.set(callId, { call, result, text: blockText(result) })
+    if (result) paired.set(callId, { name: call.data.name, callSeq: call.seq, resultSeq: result.seq, text: blockText(result.data.message.content) })
   }
   return { problemSeq: taskStartSeq, calls: paired, todos }
 }
@@ -135,9 +153,9 @@ function successfulExplicitKinds(events: readonly SessionEvent[]): Set<RoutedVer
   const kinds = new Set<RoutedVerifierKind>()
   if (!index) return kinds
   for (const pair of index.calls.values()) {
-    if (!ROUTED_TOOLS.has(pair.call.data.name)) continue
-    if (pair.call.data.name === 'verifier_compare') kinds.add('compare')
-    else if (pair.call.data.name === 'verifier_select') kinds.add('select')
+    if (!ROUTED_TOOLS.has(pair.name)) continue
+    if (pair.name === 'verifier_compare') kinds.add('compare')
+    else if (pair.name === 'verifier_select') kinds.add('select')
     else kinds.add('track')
   }
   return kinds
@@ -160,8 +178,8 @@ export function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandi
   const explicit = successfulExplicitKinds(events.filter(event => event.seq >= index.problemSeq))
   const groups: CandidateArtifact[][] = []
   for (const [callId, pair] of index.calls) {
-    if (pair.call.data.name !== 'workflow') continue
-    const candidates = parseTrustedWorkflow(strictJson(pair.text), callId, pair.call.seq, pair.result.seq, maxCandidates, maxItemChars)
+    if (pair.name !== 'workflow') continue
+    const candidates = parseTrustedWorkflow(strictJson(pair.text), callId, pair.callSeq, pair.resultSeq, maxCandidates, maxItemChars)
     if (candidates.length >= 2) groups.push(candidates)
   }
   groups.sort((a, b) => b.length - a.length || b[0]!.toSeq - a[0]!.toSeq)
@@ -182,7 +200,7 @@ export function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandi
 export function semanticRouteHint(events: readonly SessionEvent[]): boolean {
   const index = buildEvidenceIndex(events)
   if (!index) return false
-  if ([...index.calls.values()].some(pair => pair.call.data.name === 'subagent' || pair.call.data.name === 'subagent_fork' || pair.call.data.name === 'workflow')) return true
+  if ([...index.calls.values()].some(pair => pair.name === 'subagent' || pair.name === 'subagent_fork' || pair.name === 'workflow')) return true
   if (canonicalTodoSnapshots(index).length >= 2) return true
   return false
 }
@@ -190,7 +208,7 @@ export function semanticRouteHint(events: readonly SessionEvent[]): boolean {
 export function buildSemanticRoutePrompt(problem: string, events: readonly SessionEvent[], maxCandidates: number, maxItemChars = 20_000): string {
   const index = buildEvidenceIndex(events)
   if (!index) throw new Error('llm-verifier: semantic routing requires a direct user task')
-  const artifacts = [...index.calls.entries()].map(([callId, pair]) => ({ callId, tool: pair.call.data.name, callSeq: pair.call.seq, resultSeq: pair.result.seq, text: sanitizeVerifierText(pair.text, maxItemChars) }))
+  const artifacts = [...index.calls.entries()].map(([callId, pair]) => ({ callId, tool: pair.name, callSeq: pair.callSeq, resultSeq: pair.resultSeq, text: sanitizeVerifierText(pair.text, maxItemChars) }))
   const checkpoints = [...index.todos.entries()].map(([seq, todos]) => ({ seq, todos }))
   return [
     'You are a conservative verifier router. The artifact IDs and checkpoint sequence numbers below are the ONLY evidence you may reference.',
@@ -232,7 +250,7 @@ export function semanticDecision(output: SemanticRouteOutput, events: readonly S
   }
   const candidates = output.candidateCallIds.map((callId, i) => {
     const pair = index.calls.get(callId)
-    return pair ? { id: callId, groupId: 'semantic', label: pair.call.data.name + ' ' + (i + 1), content: sanitizeVerifierText(pair.text, maxItemChars), callId, fromSeq: pair.call.seq, toSeq: pair.result.seq } : undefined
+    return pair ? { id: callId, groupId: 'semantic', label: pair.name + ' ' + (i + 1), content: sanitizeVerifierText(pair.text, maxItemChars), callId, fromSeq: pair.callSeq, toSeq: pair.resultSeq } : undefined
   }).filter((candidate): candidate is CandidateArtifact => candidate !== undefined)
   if (candidates.length !== output.candidateCallIds.length) return undefined
   const fingerprint = stableHash({ kind: output.kind, candidates })

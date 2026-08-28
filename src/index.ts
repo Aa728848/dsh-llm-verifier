@@ -121,7 +121,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const routePolicy = (selected: ReturnType<typeof current>) => ({ mode: selected.autoVerifyMode, minConfidence: selected.autoRouteMinConfidence, maxCandidates: selected.autoRouteMaxCandidates, maxPerTask: selected.autoRouteMaxPerTask + selected.autoVerifyMaxPerTask, maxPerSession: selected.autoRouteMaxPerSession + selected.autoVerifyMaxPerSession, maxModelCallsPerTask: selected.autoMaxModelCallsPerTask, maxModelCallsPerSession: selected.autoMaxModelCallsPerSession, maxInputChars: selected.autoRouteMaxInputChars, maxItemChars: selected.autoRouteMaxItemChars })
   const routeFeedback = (decision: RouteDecision, detail: string) => createUserMessage({ content: [{ type: 'text' as const, text: '[Automatic verifier routing: ' + decision.kind + ']\n' + detail + '\nUse this independent result to continue the actual task. Do not merely restate the ranking or progress score; implement, correct, and verify the required work.' }], source: { kind: 'plugin' as const, plugin: 'dsh-llm-verifier', form: 'notice' as const, summary: 'Automatic verifier routed ' + decision.kind } })
 
-  ctx.effect(() => services.connection.rpc.handle('/llm-verifier', async (endpoint: string, payload: unknown) => {
+  services.connection.rpc.handle('/llm-verifier', async (endpoint: string, payload: unknown) => {
     if (endpoint !== 'statistics') return rpcFailure('unknown llm-verifier endpoint')
     if (typeof payload !== 'object' || payload === null) return rpcFailure('statistics payload must be an object')
     const row = payload as Record<string, unknown>
@@ -133,7 +133,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const value: StatisticsOverview = mergeStatisticsOverviews(overviews, query)
       return rpcSuccess(value)
     } catch (error) { return rpcFailure(error instanceof Error ? error.message : String(error)) }
-  }, { authority: 'loopback' }), 'llm-verifier: statistics rpc')
+  }, { authority: 'loopback' } as never)
 
   ctx.on('agent/disposed', ({ agent }) => { autoBudget.release(agent); autoRouter.release(agent); topics.delete(String(agent.id)) })
   ctx.on('agent/turn-stopping', async ({ agent, signal }) => {

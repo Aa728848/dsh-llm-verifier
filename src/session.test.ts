@@ -21,4 +21,16 @@ describe('current session extraction', () => {
     expect(result.trace).toContain('exit 0')
     expect(result.trace).not.toContain('hunter2')
   })
+
+  it('extracts PTC mode tool/code-dispatch events and redacts content', async () => {
+    const session = Session.create('session-00000000-0000-4000-8000-000000000002' as never)
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Run PTC task' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+    session.append('tool/code-dispatch', { subCallId: 'code-1' as never, name: 'edit', arguments: { file: 'src/main.ts' }, isError: false, content: [{ type: 'text', text: 'updated file api_key=secret-value' }] })
+    const agent = { id: session.id, session } as never
+    const result = await extractSession(agent, async () => { throw new Error('no image expected') })
+    expect(result.trace).toContain('--- Code Dispatch edit')
+    expect(result.trace).toContain('src/main.ts')
+    expect(result.trace).toContain('[REDACTED]')
+    expect(result.trace).not.toContain('secret-value')
+  })
 })

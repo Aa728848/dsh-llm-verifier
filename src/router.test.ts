@@ -57,6 +57,14 @@ describe('semantic evidence references', () => {
     expect(semanticDecision({ ...parsed, candidateCallIds: ['a', 'missing'] }, value.events)).toBeUndefined()
     expect(buildSemanticRoutePrompt('problem', value.events, 5)).toContain('candidateCallIds')
   })
+  it('resolves candidates emitted via PTC mode tool/code-dispatch', () => {
+    const value = session()
+    value.append('tool/code-dispatch', { subCallId: 'c-1' as never, name: 'subagent', arguments: '{}', isError: false, content: [{ type: 'text', text: 'candidate 1 content' }] })
+    value.append('tool/code-dispatch', { subCallId: 'c-2' as never, name: 'subagent', arguments: '{}', isError: false, content: [{ type: 'text', text: 'candidate 2 content' }] })
+    expect(semanticRouteHint(value.events)).toBe(true)
+    const parsed = parseSemanticRoute(JSON.stringify({ kind: 'compare', confidence: 0.92, reason: 'PTC alternatives', candidateCallIds: ['c-1', 'c-2'], checkpointSeqs: [] }))!
+    expect(semanticDecision(parsed, value.events)).toMatchObject({ kind: 'compare', source: 'semantic' })
+  })
 })
 
 describe('transactional router state', () => {

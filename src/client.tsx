@@ -1,5 +1,5 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type { ModelProviderGroup, SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
+import type { ClientRemote, ModelProviderGroup, SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
@@ -8,7 +8,7 @@ import { useEffect, useMemo, useState } from 'react'
 
 const NS = 'llm-verifier'
 interface Values { enabled: boolean; autoVerifyMode: 'manual'|'smart'|'strict'; autoVerifyThreshold: number; autoVerifyRepeats: number; autoVerifyMinToolCalls: number; autoVerifyMaxChars: number; autoVerifyMaxPerTask: number; autoVerifyMaxPerSession: number; autoRouteSemantic: boolean; autoRouteMinConfidence: number; autoRouteMaxCandidates: number; autoRouteMaxPerTask: number; autoRouteMaxPerSession: number; autoTrackCompletionThreshold: number; autoRouteMaxItemChars: number; autoRouteMaxInputChars: number; autoMaxModelCallsPerTask: number; autoMaxModelCallsPerSession: number; provider: string; model: string; reasoningEffort?: string; maxTokens: number; maxConcurrency: number; maxRetries: number; timeoutMs: number; cacheMaxEntries: number; estimatedInputUsdPerMillion: number; estimatedOutputUsdPerMillion: number }
-interface Loaded { groups: ModelProviderGroup[]; settings: SettingsNamespaceView; writable: boolean; failures: string[] }
+interface Loaded { groups: readonly ModelProviderGroup[]; settings: SettingsNamespaceView; writable: boolean; failures: string[] }
 interface RunStats { calls: number; attempts: number; retries: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningTokens: number; cacheHits: number; cacheMisses: number; estimatedCostUsd: number; topLogprobScores: number; explicitTagScores: number }
 interface InvocationRecord { id: string; toolName: string; sessionId?: string; startedAt: number; finishedAt: number; durationMs: number; success: boolean; errorName?: string; errorMessage?: string; provider: string; model: string; stats: RunStats }
 interface DailyStatistics { date: string; invocations: number; successes: number; failures: number; calls: number; tokens: number; estimatedCostUsd: number; byTool: Record<string, number> }
@@ -16,7 +16,39 @@ interface ToolStatistics { toolName: string; invocations: number; successes: num
 interface ModelStatistics { provider: string; model: string; invocations: number; calls: number; tokens: number; estimatedCostUsd: number }
 interface Totals extends RunStats { invocations: number; successes: number; failures: number; successRate: number; averageDurationMs: number; tokens: number; cacheHitRate: number }
 interface StatisticsOverview { generatedAt: number; fromMs: number; toMs: number; sessionId?: string; totals: Totals; daily: DailyStatistics[]; tools: ToolStatistics[]; models: ModelStatistics[]; recent: InvocationRecord[] }
-interface StatisticsPageProps { sessionId: string; rpc: { call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<{ ok: boolean; value?: unknown; error?: { message: string } }> } }
+interface VerifierRemote {
+  session: {
+    modelCatalog(): Promise<{
+      ok: boolean
+      value: { groups: readonly ModelProviderGroup[]; failures: readonly { provider: string; message: string }[] }
+      error: { message: string }
+    }>
+  }
+  settings: {
+    describe(): Promise<{
+      ok: boolean
+      value: { writable: boolean; namespaces: readonly SettingsNamespaceView[] }
+      error: { message: string }
+    }>
+    update(
+      ns: string,
+      patch: Record<string, unknown>,
+      expectedRevision: number | undefined,
+    ): Promise<{
+      ok: boolean
+      value: SettingsNamespaceView
+      error: { message: string }
+    }>
+  }
+}
+
+interface VerifierSettingsProps { remote: VerifierRemote }
+interface StatisticsPageProps {
+  sessionId: string
+  rpc: {
+    call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<{ ok: boolean; value?: unknown; error?: { message: string } }>
+  }
+}
 
 const shell: React.CSSProperties = { width: '100%', maxWidth: 720, display: 'flex', flexDirection: 'column', gap: 12, padding: '0 0 32px', color: 'var(--dsw-alias-label-primary)' }
 const settingsHeading: React.CSSProperties = { margin: 0, fontSize: 16, fontWeight: 500, lineHeight: '24px', color: 'var(--dsw-alias-label-primary)' }
@@ -44,14 +76,14 @@ function dateTime(value: number): string { return new Intl.DateTimeFormat('zh-CN
 function startOfRange(days: number): number { const date = new Date(); date.setHours(0,0,0,0); date.setDate(date.getDate() - days + 1); return date.getTime() }
 function endOfToday(): number { const date = new Date(); date.setHours(0,0,0,0); date.setDate(date.getDate() + 1); return date.getTime() }
 
-function VerifierSettings({ api }:{api:any}) {
+function VerifierSettings({ remote }: VerifierSettingsProps) {
   const [loaded,setLoaded]=useState<Loaded|null>(null); const [draft,setDraft]=useState<Values|null>(null); const [busy,setBusy]=useState(false); const [error,setError]=useState<string|null>(null); const [saved,setSaved]=useState(false)
-  const load=async()=>{setError(null);try{const [m,s]=await Promise.all([api.llm.models({}),api.settings.describe({})]);if(!m.result.ok)throw new Error(m.result.error.message);if(!s.result.ok)throw new Error(s.result.error.message);const view=s.result.value.namespaces.find((x:SettingsNamespaceView)=>x.ns===NS);if(!view)throw new Error('Verifier settings namespace is not registered. Restart the DSH host.');const next={groups:m.result.value.groups,settings:view,writable:s.result.value.writable,failures:m.result.value.failures.map((f:any)=>f.name+': '+f.message)};setLoaded(next);setDraft(values(view))}catch(e){setError(message(e))}}
+  const load=async()=>{setError(null);try{const [m,s]=await Promise.all([remote.session.modelCatalog(),remote.settings.describe()]);if(!m.ok)throw new Error(m.error.message);if(!s.ok)throw new Error(s.error.message);const view=s.value.namespaces.find((x:SettingsNamespaceView)=>x.ns===NS);if(!view)throw new Error('Verifier settings namespace is not registered. Restart the DSH host.');const next={groups:m.value.groups,settings:view,writable:s.value.writable,failures:m.value.failures.map((f: { provider: string; message: string })=>f.provider+': '+f.message)};setLoaded(next);setDraft(values(view))}catch(e){setError(message(e))}}
   useEffect(()=>{void load()},[])
   const models=useMemo(()=>loaded?.groups.find(g=>g.id===draft?.provider)?.models??[],[loaded,draft?.provider])
   const selected=models.find(m=>m.id===draft?.model); const efforts=selected?.reasoning?.efforts??[]
   const patch=<K extends keyof Values>(key:K,value:Values[K])=>setDraft(v=>v?{...v,[key]:value}:v)
-  const save=async()=>{if(!loaded||!draft)return;setBusy(true);setSaved(false);setError(null);try{const section={...record(loaded.settings.user),...draft};if(!draft.reasoningEffort)delete section.reasoningEffort;const res=await api.settings.update({ns:NS,patch:section,expectedRevision:loaded.settings.revision});if(!res.result.ok)throw new Error(res.result.error.message);setLoaded(v=>v?{...v,settings:res.result.value}:v);setDraft(values(res.result.value));setSaved(true)}catch(e){setError(message(e))}finally{setBusy(false)}}
+  const save=async()=>{if(!loaded||!draft)return;setBusy(true);setSaved(false);setError(null);try{const section={...record(loaded.settings.user),...draft};if(!draft.reasoningEffort)delete section.reasoningEffort;const res=await remote.settings.update(NS,section as never,loaded.settings.revision);if(!res.ok)throw new Error(res.error.message);setLoaded(v=>v?{...v,settings:res.value}:v);setDraft(values(res.value));setSaved(true)}catch(e){setError(message(e))}finally{setBusy(false)}}
   if(!loaded||!draft)return <div style={shell}><h2 style={settingsHeading}>LLM Verifier</h2><p style={settingsIntro}>{error??'正在读取 DSH 模型和设置…'}</p>{error&&<div><Button variant="outline" onClick={()=>void load()}>重试</Button></div>}</div>
   const numeric=(key:keyof Values,min=0)=><Input style={{width:'100%',height:36,borderRadius:8}} type="number" min={min} value={String(draft[key])} onChange={e=>patch(key,Number(e.target.value) as never)} />
   return <div style={shell}>
@@ -128,7 +160,7 @@ function TrendChart({ daily, days }:{daily:DailyStatistics[];days:number}) {
 
 function StatisticsPage({ sessionId, rpc }:StatisticsPageProps) {
   const [days,setDays]=useState(30);const [sessionOnly,setSessionOnly]=useState(false);const [data,setData]=useState<StatisticsOverview|null>(null);const [loading,setLoading]=useState(true);const [error,setError]=useState<string|null>(null);const [refresh,setRefresh]=useState(0)
-  useEffect(()=>{const controller=new AbortController();setLoading(true);setError(null);void rpc.call('/llm-verifier','statistics',{fromMs:startOfRange(days),toMs:endOfToday(),timezoneOffsetMinutes:new Date().getTimezoneOffset(),recentLimit:50,...(sessionOnly?{sessionId:String(sessionId)}:{})},controller.signal).then(result=>{if(!result.ok)throw new Error(result.error?.message??'统计接口请求失败');setData(result.value as StatisticsOverview)},cause=>{if(!controller.signal.aborted)throw cause}).catch(cause=>{if(!controller.signal.aborted)setError(message(cause))}).finally(()=>{if(!controller.signal.aborted)setLoading(false)});return()=>controller.abort()},[days,sessionOnly,sessionId,refresh,rpc])
+  useEffect(()=>{const controller=new AbortController();setLoading(true);setError(null);void rpc.call('/llm-verifier','statistics',{fromMs:startOfRange(days),toMs:endOfToday(),timezoneOffsetMinutes:new Date().getTimezoneOffset(),recentLimit:50,...(sessionOnly?{sessionId:String(sessionId)}:{})},controller.signal).then((result: { ok: boolean; value?: unknown; error?: { message: string } })=>{if(!result.ok)throw new Error(result.error?.message??'统计接口请求失败');setData(result.value as StatisticsOverview)},(cause: unknown)=>{if(!controller.signal.aborted)throw cause}).catch((cause: unknown)=>{if(!controller.signal.aborted)setError(message(cause))}).finally(()=>{if(!controller.signal.aborted)setLoading(false)});return()=>controller.abort()},[days,sessionOnly,sessionId,refresh,rpc])
   const totals=data?.totals
   return <main style={{height:'100%',overflow:'auto',boxSizing:'border-box',padding:'22px clamp(16px, 3vw, 38px) 48px',color:'var(--dsw-text-primary)',background:'radial-gradient(circle at 10% 0%, rgba(115,77,255,.09), transparent 32%), radial-gradient(circle at 100% 8%, rgba(47,197,201,.07), transparent 28%)'}}>
     <div style={{maxWidth:1180,margin:'0 auto',display:'flex',flexDirection:'column',gap:16}}>
@@ -148,9 +180,22 @@ function StatisticsPage({ sessionId, rpc }:StatisticsPageProps) {
   </main>
 }
 
-export const inject=['slots','connection']
-export function apply(ctx:ClientContext):void {
-  const connection=ctx.get('connection') as any
-  ctx.slots.inject('settings.section',()=>ctx.slots.register({name:'settings.section',id:'llm-verifier',order:35,label:'LLM Verifier',inject:()=>({api:connection.api})},VerifierSettings as never))
-  ctx.slots.inject('conversation.view',()=>ctx.slots.register({name:'conversation.view',id:'llm-verifier-statistics',order:30,label:'工具统计',inject:()=>({rpc:connection.rpc})},StatisticsPage as never))
+export const inject = ['slots', 'connection', 'remote', 'remote.session', 'remote.settings']
+export function apply(ctx: ClientContext): void {
+  const connection = ctx.get('connection') as any
+  const remote = ctx.remote
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'llm-verifier',
+    order: 35,
+    label: 'LLM Verifier',
+    inject: () => ({ remote }),
+  }, VerifierSettings as never))
+  ctx.slots.inject('conversation.view', () => ctx.slots.register({
+    name: 'conversation.view',
+    id: 'llm-verifier-statistics',
+    order: 30,
+    label: '工具统计',
+    inject: () => ({ rpc: connection.rpc }),
+  }, StatisticsPage as never))
 }

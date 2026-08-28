@@ -74,4 +74,13 @@ describe('automatic verification policy', () => {
     expect(automaticFeedback(0.42, 0.31, 'A', 0.65)).toContain('42.0%')
     expect(automaticFeedback(0.42, 0.31, 'A', 0.65)).toContain('verification command')
   })
+
+  it('recognizes PTC mode tool/code-dispatch events for eligibility', () => {
+    const session = taskSession()
+    session.append('tool/code-dispatch', { subCallId: 'c1' as never, name: 'read', arguments: '{}', isError: false, content: [{ type: 'text', text: 'data' }] })
+    session.append('tool/code-dispatch', { subCallId: 'c2' as never, name: 'grep', arguments: '{}', isError: false, content: [{ type: 'text', text: 'match' }] })
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work' })
+    session.append('tool/code-dispatch', { subCallId: 'c3' as never, name: 'edit', arguments: '{}', isError: false, content: [{ type: 'text', text: 'done' }] })
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: true, toolCalls: 3, consequentialToolCalls: 1 })
+  })
 })
