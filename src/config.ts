@@ -1,8 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from 'schemastery'
 
-export const VERIFIER_SETTINGS_NAMESPACE = settingsNamespace('llm-verifier')
+export const VERIFIER_SETTINGS_NAMESPACE = 'llm-verifier' as never
 
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict'
 
@@ -155,10 +154,30 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
 
 export function installVerifierSettings(ctx: Context, entry: ResolvedConfig, onChange: () => void): () => ResolvedConfig {
   let source = () => entry
-  installSettingsSection(ctx, VERIFIER_SETTINGS_NAMESPACE, Config as z<ResolvedConfig>, entry, {
-    setSource(current) { source = current },
-    onChange,
-    validate(value) { resolveConfig(value) },
+  const ns = VERIFIER_SETTINGS_NAMESPACE
+  ctx.inject(['settings'], (sctx: Context & { settings?: any }) => {
+    if (!sctx.settings) return
+    if (typeof sctx.settings.installSection === 'function') {
+      sctx.settings.installSection(ctx, ns, Config as z<ResolvedConfig>, entry, {
+        setSource(current: () => ResolvedConfig) { source = current },
+        onChange,
+        validate(value: ResolvedConfig) { resolveConfig(value) },
+      })
+    } else if (typeof sctx.settings.register === 'function') {
+      const scope = sctx.settings.register(ns, Config as z<ResolvedConfig>, {
+        base: entry,
+        validate: (value: ResolvedConfig) => { resolveConfig(value) },
+      })
+      source = () => scope.get()
+      sctx.effect(() => () => {
+        source = () => entry
+        onChange()
+      })
+      onChange()
+      scope.watch(() => {
+        onChange()
+      })
+    }
   })
   return () => resolveConfig(source())
 }

@@ -1,6 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { CompletionLogprobs, TokenAlternative } from './core.ts'
@@ -29,14 +28,14 @@ async function credential(ctx: Context, name: string | undefined): Promise<strin
 export async function resolveTopLogprobRoute(ctx: Context, provider: string): Promise<TopLogprobRoute | undefined> {
   const settings = ctx.get('settings')
   if (provider === 'deepseek-official') {
-    const value = settings ? object(settings.get(settingsNamespace('llm-deepseek'))) ?? {} : {}
+    const value = settings ? object(settings.get('llm-deepseek' as never)) ?? {} : {}
     const apiKeyEnv = text(value.apiKeyEnv) ?? 'DEEPSEEK_API_KEY'
     const apiKey = await credential(ctx, apiKeyEnv)
     if (!apiKey) return undefined
     return { baseURL: text(value.baseURL) ?? 'https://api.deepseek.com', apiKey, deepSeekThinking: true }
   }
   if (!settings) return undefined
-  const root = object(settings.get(settingsNamespace('llm-pi-ai')))
+  const root = object(settings.get('llm-pi-ai' as never))
   const profiles = object(root?.providers)
   const profile = object(profiles?.[provider])
   // Only explicitly OpenAI-compatible profiles are safe to serialize directly.

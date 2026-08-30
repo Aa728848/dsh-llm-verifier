@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
 import z from 'schemastery';
-export declare const VERIFIER_SETTINGS_NAMESPACE: import("@deepseek-ai/dsh-settings").SettingsNamespace;
+export declare const VERIFIER_SETTINGS_NAMESPACE: never;
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict';
 export interface Config {
     enabled?: boolean;
