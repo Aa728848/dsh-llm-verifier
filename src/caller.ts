@@ -1,4 +1,19 @@
-import { BlockAssembler, ReasoningEffortId, createUserMessage, deepFreeze, type ContentBlock, type FinishReason, type LlmRuntime } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, ReasoningEffortId, createUserMessage, type ContentBlock, type FinishReason, type LlmRuntime } from '@deepseek-ai/dsh-llm'
+import * as LlmModule from '@deepseek-ai/dsh-llm'
+
+function deepFreeze<T>(value: T): T {
+  const mod = LlmModule as unknown as Record<string, unknown>
+  if (typeof mod.deepFreeze === 'function') {
+    return (mod.deepFreeze as Function)(value)
+  }
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value)
+    for (const key of Object.keys(value)) {
+      deepFreeze((value as Record<string, unknown>)[key])
+    }
+  }
+  return value
+}
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { CompletionLogprobs } from './core.ts'
 import { TopLogprobCapabilityCache, TopLogprobsUnsupportedError, callTopLogprobs, resolveTopLogprobRoute } from './top-logprobs.ts'
