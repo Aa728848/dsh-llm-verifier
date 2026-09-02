@@ -44,7 +44,7 @@ interface SessionVerificationOptions { fromSeq?: number; toSeq?: number; include
 interface SessionVerificationResult { sessionId: string; problem: string; score: number; baselineScore: number; winner: 'A' | 'B' | 'tie'; fromSeq: number; toSeq: number; omittedCharacters: number; calls: number; stats: RunStats }
 
 export function apply(ctx: Context, config: Config = {}): void {
-  const services = ctx as Context & { attachments: AttachmentStore; connection: HostConnectionHandle; sessionPersistence: SessionArtifactLocator & { list(signal?: AbortSignal): Promise<SessionHeader[]> } }
+  const services = ctx as Context & { attachments: AttachmentStore; connection: HostConnectionHandle; sessionPersistence: SessionArtifactLocator & { list(signal?: AbortSignal): Promise<readonly unknown[]> } }
   const entry = resolveConfig(config)
   let limiter = new RequestLimiter(entry.maxConcurrency)
   const current = installVerifierSettings(ctx, entry, () => { limiter = new RequestLimiter(current().maxConcurrency) })
@@ -128,7 +128,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     const sessionId = typeof row.sessionId === 'string' && row.sessionId.length > 0 ? row.sessionId : undefined
     const query: StatisticsQuery = { fromMs: numberField(row.fromMs, Number.NaN), toMs: numberField(row.toMs, Number.NaN), timezoneOffsetMinutes: numberField(row.timezoneOffsetMinutes, 0), recentLimit: numberField(row.recentLimit, 40), ...(sessionId ? { sessionId } : {}) }
     try {
-      const headers = (await services.sessionPersistence.list()).filter(header => sessionId === undefined || String(header.id) === sessionId)
+      const items = await services.sessionPersistence.list()
+      const headers: SessionHeader[] = items
+        .map(item => item && typeof item === 'object' && 'header' in item ? (item as { header: SessionHeader }).header : item as SessionHeader)
+        .filter(header => header !== undefined && (sessionId === undefined || String(header.id) === sessionId))
       const overviews = await Promise.all(headers.map(header => topic(header).statistics.overview(query)))
       const value: StatisticsOverview = mergeStatisticsOverviews(overviews, query)
       return rpcSuccess(value)

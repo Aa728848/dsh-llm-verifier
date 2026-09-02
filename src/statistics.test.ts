@@ -65,4 +65,16 @@ describe('StatisticsStore', () => {
     const result = await store.overview({ fromMs: 0, toMs: 10 })
     expect(result.recent[0]?.errorMessage).toHaveLength(500)
   })
+
+  it('normalizes legacy and modern sessionPersistence.list output formats', () => {
+    const legacyHeaders = [{ id: 'sess-1', cwd: 'C:\\test' }]
+    const modernSnapshots = [{ header: { id: 'sess-2', cwd: 'C:\\test' }, revision: 'rev-1' }]
+    const normalize = (items: readonly unknown[]) =>
+      items
+        .map(item => item && typeof item === 'object' && 'header' in item ? (item as { header: { id: string } }).header : item as { id: string })
+        .filter(header => header !== undefined)
+
+    expect(normalize(legacyHeaders).map(h => h.id)).toEqual(['sess-1'])
+    expect(normalize(modernSnapshots).map(h => h.id)).toEqual(['sess-2'])
+  })
 })
