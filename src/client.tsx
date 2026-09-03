@@ -26,7 +26,7 @@ interface VerifierRemote {
   session: {
     modelCatalog(): Promise<{
       ok: boolean
-      value: { groups: readonly ModelProviderGroup[]; failures: readonly { provider: string; message: string }[] }
+      value: { groups: readonly ModelProviderGroup[]; failures: readonly { id?: string; provider?: string; name?: string; message: string }[] }
       error: { message: string }
     }>
   }
@@ -81,7 +81,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
   const lang = useLanguage()
   const t = dictionaries[lang]
   const [loaded,setLoaded]=useState<Loaded|null>(null); const [draft,setDraft]=useState<Values|null>(null); const [busy,setBusy]=useState(false); const [error,setError]=useState<string|null>(null); const [saved,setSaved]=useState(false)
-  const load=async()=>{setError(null);try{const [m,s]=await Promise.all([remote.session.modelCatalog(),remote.settings.describe()]);if(!m.ok)throw new Error(m.error.message);if(!s.ok)throw new Error(s.error.message);const view=s.value.namespaces.find((x:SettingsNamespaceView)=>x.ns===NS);if(!view)throw new Error(t['settings.nsUnregistered']);const next={groups:m.value.groups,settings:view,writable:s.value.writable,failures:m.value.failures.map((f: { provider: string; message: string })=>f.provider+': '+f.message)};setLoaded(next);setDraft(values(view))}catch(e){setError(message(e))}}
+  const load=async()=>{setError(null);try{const [m,s]=await Promise.all([remote.session.modelCatalog(),remote.settings.describe()]);if(!m.ok)throw new Error(m.error.message);if(!s.ok)throw new Error(s.error.message);const view=s.value.namespaces.find((x:SettingsNamespaceView)=>x.ns===NS);if(!view)throw new Error(t['settings.nsUnregistered']);const next={groups:m.value.groups,settings:view,writable:s.value.writable,failures:m.value.failures.map((f: { id?: string; provider?: string; name?: string; message: string })=>(f.id??f.provider??f.name??'unknown')+': '+f.message)};setLoaded(next);setDraft(values(view))}catch(e){setError(message(e))}}
   useEffect(()=>{void load()},[])
   const models=useMemo(()=>loaded?.groups.find(g=>g.id===draft?.provider)?.models??[],[loaded,draft?.provider])
   const selected=models.find(m=>m.id===draft?.model); const efforts=selected?.reasoning?.efforts??[]

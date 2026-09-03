@@ -20,5 +20,12 @@ describe('resolveTopicDataDir', () => {
 
   it('fails closed when the backend cannot locate a topic artifact', () => {
     expect(() => resolveTopicDataDir({ locate: () => undefined }, header, 'verifier')).toThrow(/does not expose/u)
+    expect(() => resolveTopicDataDir({}, header, 'verifier')).toThrow(/does not expose/u)
+  })
+
+  it('falls back to root-based path when locate is missing', () => {
+    const result = resolveTopicDataDir({ root: 'C:\\data\\sessions' }, header, 'verifier')
+    expect(result).toBe(join('C:\\data\\sessions', 'session-test', 'verifier'))
   })
 })
+

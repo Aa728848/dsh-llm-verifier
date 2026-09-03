@@ -1,8 +1,9 @@
 import type { SessionHeader } from '@deepseek-ai/dsh-session';
 export interface SessionArtifactLocator {
-    locate(meta: SessionHeader): {
+    locate?(meta: SessionHeader): {
         readonly path: string;
     } | undefined;
+    root?: string;
 }
 /**
  * Resolve verifier sidecars beneath the persistence backend's per-session

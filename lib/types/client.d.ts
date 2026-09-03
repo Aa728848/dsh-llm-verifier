@@ -9,7 +9,9 @@ interface VerifierRemote {
             value: {
                 groups: readonly ModelProviderGroup[];
                 failures: readonly {
-                    provider: string;
+                    id?: string;
+                    provider?: string;
+                    name?: string;
                     message: string;
                 }[];
             };
