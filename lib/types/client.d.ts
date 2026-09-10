@@ -44,7 +44,8 @@ interface VerifierSettingsProps {
     remote: VerifierRemote;
 }
 interface StatisticsPageProps {
-    sessionId: string;
+    sessionId?: string;
+    isGlobal?: boolean;
     rpc: {
         call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<{
             ok: boolean;
@@ -56,7 +57,19 @@ interface StatisticsPageProps {
     };
 }
 export declare function VerifierSettings({ remote }: VerifierSettingsProps): import("react").JSX.Element;
-export declare function StatisticsPage({ sessionId, rpc }: StatisticsPageProps): import("react").JSX.Element;
+export declare function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps): import("react").JSX.Element;
+export declare function VerifierSidebarIcon({ size, active }: {
+    size: number;
+    active?: boolean;
+}): import("react").JSX.Element;
+export declare function GlobalVerifierDashboard({ rpc }: {
+    rpc: any;
+}): import("react").JSX.Element;
+export declare function RightSidebarVerifierPanel({ rpc, sessionId }: {
+    rpc: any;
+    sessionId?: string;
+}): import("react").JSX.Element;
+export declare function RightSidebarVerifierTitle(): import("react").JSX.Element;
 export declare const inject: string[];
 export declare function apply(ctx: ClientContext): void;
 //# sourceMappingURL=client.d.ts.map

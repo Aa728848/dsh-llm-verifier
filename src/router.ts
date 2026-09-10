@@ -5,7 +5,7 @@ import type { AutoVerifyMode } from './auto.ts'
 import { sanitizeVerifierText } from './session.ts'
 
 export type RoutedVerifierKind = 'compare' | 'select' | 'track'
-export type RoutePhase = 'semantic' | RoutedVerifierKind | 'final'
+export type RoutePhase = 'semantic' | RoutedVerifierKind | 'final' | 'plan_review' | 'team_task'
 
 export interface CandidateArtifact {
   id: string
@@ -93,10 +93,20 @@ export interface EvidenceCall {
   text: string
 }
 
+export interface TeamTaskItem {
+  id: string
+  revision: number
+  subject: string
+  description?: string
+  status: 'pending' | 'in_progress' | 'completed' | 'deleted'
+  ownerId?: string
+}
+
 interface EvidenceIndex {
   problemSeq: number
   calls: Map<string, EvidenceCall>
   todos: Map<number, TodoItem[]>
+  teamTasks: Map<number, TeamTaskItem[]>
 }
 
 export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceIndex | undefined {
@@ -106,15 +116,27 @@ export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceInd
   const calls = new Map<string, SessionEvent<'tool/call'>>()
   const results = new Map<string, SessionEvent<'tool/result'>>()
   const todos = new Map<number, TodoItem[]>()
+  const teamTasks = new Map<number, TeamTaskItem[]>()
   const paired = new Map<string, EvidenceCall>()
 
-  for (const event of relevant) {
-    if (event.type === 'tool/call') calls.set(String(event.data.callId), event)
-    else if (event.type === 'tool/result' && successful(event)) results.set(String(event.data.message.source.callId), event)
+  // Track the rolling view of team tasks across the session
+  const currentTeamTasks = new Map<string, TeamTaskItem>()
+
+  for (const rawEvent of relevant) {
+    const event = rawEvent as unknown as { type: string; seq: number; data: any }
+    if (event.type === 'tool/call') calls.set(String(event.data.callId), rawEvent as SessionEvent<'tool/call'>)
+    else if (event.type === 'tool/result' && successful(rawEvent as SessionEvent<'tool/result'>)) results.set(String(event.data.message.source.callId), rawEvent as SessionEvent<'tool/result'>)
     else if (event.type === 'todo/write') todos.set(event.seq, event.data.todos)
-    else if (event.type === 'tool/code-dispatch') {
+    else if (event.type === 'team/task') {
+      const data = event.data as { task?: TeamTaskItem }
+      if (data?.task) {
+        currentTeamTasks.set(data.task.id, { ...data.task })
+        teamTasks.set(event.seq, [...currentTeamTasks.values()])
+      }
+    }
+    else if (event.type === 'tool/ptc-dispatch' || event.type === 'tool/code-dispatch') {
       const data = event.data as { subCallId?: string; name: string; isError?: boolean; content?: readonly ContentBlock[] }
-      const isOk = data.isError !== true && (!Array.isArray(data.content) || data.content.every(b => b.isError !== true))
+      const isOk = data.isError !== true && (!Array.isArray(data.content) || data.content.every(b => (b as { isError?: boolean }).isError !== true))
       if (isOk) {
         const subCallId = String(data.subCallId ?? ('code:' + event.seq))
         const content = Array.isArray(data.content) ? data.content : []
@@ -127,7 +149,7 @@ export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceInd
     const result = results.get(callId)
     if (result) paired.set(callId, { name: call.data.name, callSeq: call.seq, resultSeq: result.seq, text: blockText(result.data.message.content) })
   }
-  return { problemSeq: taskStartSeq, calls: paired, todos }
+  return { problemSeq: taskStartSeq, calls: paired, todos, teamTasks }
 }
 
 function parseTrustedWorkflow(value: unknown, callId: string, callSeq: number, resultSeq: number, maxCandidates: number, maxItemChars: number): CandidateArtifact[] {
@@ -172,6 +194,17 @@ function canonicalTodoSnapshots(index: EvidenceIndex): Array<{ seq: number; todo
   return values
 }
 
+function canonicalTeamTaskSnapshots(index: EvidenceIndex): Array<{ seq: number; tasks: TeamTaskItem[] }> {
+  const values: Array<{ seq: number; tasks: TeamTaskItem[] }> = []
+  let previous = ''
+  for (const [seq, tasks] of index.teamTasks) {
+    const canonical = JSON.stringify(tasks.map(t => ({ id: t.id, status: t.status, revision: t.revision })))
+    if (canonical !== previous) values.push({ seq, tasks })
+    previous = canonical
+  }
+  return values
+}
+
 export function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandidates = 8, maxItemChars = 20_000): RouteDecision | undefined {
   const index = buildEvidenceIndex(events)
   if (!index) return undefined
@@ -193,6 +226,12 @@ export function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandi
       const checkpoints = steps.map((_, i) => i + 1)
       return { kind: 'track', source: 'structured', confidence: 1, reason: 'changed durable todo snapshots', fingerprint: stableHash({ kind: 'track', snapshots }), steps, checkpoints, evidenceSeqs: snapshots.map(snapshot => snapshot.seq) }
     }
+    const teamSnapshots = canonicalTeamTaskSnapshots(index)
+    if (teamSnapshots.length >= 2) {
+      const steps = teamSnapshots.map(snapshot => sanitizeVerifierText('Team task checkpoint seq ' + snapshot.seq + ':\n' + snapshot.tasks.map(task => '- [' + task.status + '] ' + task.subject + (task.description ? ' (' + task.description + ')' : '')).join('\n'), maxItemChars))
+      const checkpoints = steps.map((_, i) => i + 1)
+      return { kind: 'track', source: 'structured', confidence: 1, reason: 'changed durable team tasks', fingerprint: stableHash({ kind: 'track', teamSnapshots }), steps, checkpoints, evidenceSeqs: teamSnapshots.map(snapshot => snapshot.seq) }
+    }
   }
   return undefined
 }
@@ -200,8 +239,9 @@ export function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandi
 export function semanticRouteHint(events: readonly SessionEvent[]): boolean {
   const index = buildEvidenceIndex(events)
   if (!index) return false
-  if ([...index.calls.values()].some(pair => pair.name === 'subagent' || pair.name === 'subagent_fork' || pair.name === 'workflow')) return true
+  if ([...index.calls.values()].some(pair => pair.name === 'subagent' || pair.name === 'subagent_fork' || pair.name === 'workflow' || pair.name === 'exit_plan_mode')) return true
   if (canonicalTodoSnapshots(index).length >= 2) return true
+  if (canonicalTeamTaskSnapshots(index).length >= 2) return true
   return false
 }
 

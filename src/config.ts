@@ -24,6 +24,8 @@ export interface Config {
   autoRouteMaxInputChars?: number
   autoMaxModelCallsPerTask?: number
   autoMaxModelCallsPerSession?: number
+  autoVerifyTeamTasks?: boolean
+  autoVerifyPlanMode?: boolean
   provider?: string
   model?: string
   reasoningEffort?: string
@@ -57,6 +59,8 @@ export interface ResolvedConfig {
   autoRouteMaxInputChars: number
   autoMaxModelCallsPerTask: number
   autoMaxModelCallsPerSession: number
+  autoVerifyTeamTasks: boolean
+  autoVerifyPlanMode: boolean
   provider: string
   model: string
   reasoningEffort?: string
@@ -90,8 +94,10 @@ export const Config: z<Config> = z.object({
   autoRouteMaxInputChars: z.number().step(1).min(1000).default(60000),
   autoMaxModelCallsPerTask: z.number().step(1).min(1).default(48),
   autoMaxModelCallsPerSession: z.number().step(1).min(1).default(160),
+  autoVerifyTeamTasks: z.boolean().default(true),
+  autoVerifyPlanMode: z.boolean().default(true),
   provider: z.string().default('deepseek-official'),
-  model: z.string().default('deepseek-v4-flash'),
+  model: z.string().default('deepseek-flash'),
   reasoningEffort: z.string(),
   maxTokens: z.number().step(1).min(1).default(32768),
   timeoutMs: z.number().step(1).min(1).default(300000),
@@ -106,7 +112,7 @@ export const Config: z<Config> = z.object({
 
 export function resolveConfig(config: Config = {}): ResolvedConfig {
   const provider = (config.provider ?? 'deepseek-official').trim()
-  const model = (config.model ?? 'deepseek-v4-flash').trim()
+  const model = (config.model ?? 'deepseek-flash').trim()
   if (!provider) throw new Error('llm-verifier: provider must be non-empty')
   if (!model) throw new Error('llm-verifier: model must be non-empty')
   const autoVerifyMode = config.autoVerifyMode ?? 'smart'
@@ -149,7 +155,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   const estimatedOutputUsdPerMillion = config.estimatedOutputUsdPerMillion ?? 0
   if (![estimatedInputUsdPerMillion, estimatedOutputUsdPerMillion].every(value => Number.isFinite(value) && value >= 0)) throw new Error('llm-verifier: estimated token prices must be finite non-negative numbers')
   const reasoningEffort = config.reasoningEffort?.trim()
-  return { enabled: config.enabled ?? true, autoVerifyMode, autoVerifyThreshold, autoRouteSemantic: config.autoRouteSemantic ?? true, autoRouteMinConfidence, autoTrackCompletionThreshold, provider, model, ...(reasoningEffort ? { reasoningEffort } : {}), maxRetries, cacheDir, estimatedInputUsdPerMillion, estimatedOutputUsdPerMillion, ...values }
+  return { enabled: config.enabled ?? true, autoVerifyMode, autoVerifyThreshold, autoRouteSemantic: config.autoRouteSemantic ?? true, autoRouteMinConfidence, autoTrackCompletionThreshold, autoVerifyTeamTasks: config.autoVerifyTeamTasks ?? true, autoVerifyPlanMode: config.autoVerifyPlanMode ?? true, provider, model, ...(reasoningEffort ? { reasoningEffort } : {}), maxRetries, cacheDir, estimatedInputUsdPerMillion, estimatedOutputUsdPerMillion, ...values }
 }
 
 export function installVerifierSettings(ctx: Context, entry: ResolvedConfig, onChange: () => void): () => ResolvedConfig {

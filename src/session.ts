@@ -24,10 +24,15 @@ export interface SessionExtraction {
 function textOf(blocks: readonly ContentBlock[]): string {
   const parts: string[] = []
   for (const block of blocks) {
-    if (block.type === 'text') parts.push(block.text)
-    else if (block.type === 'reasoning') parts.push('[Reasoning] ' + block.text)
-    else if (block.type === 'tool-call') parts.push('[Tool Call] ' + block.name + ' ' + block.arguments)
-    else if (block.type === 'tool-result') parts.push('[Tool Result] ' + textOf(block.content))
+    const blockType = (block as { type: string }).type
+    if (blockType === 'text') parts.push((block as Extract<ContentBlock, { type: 'text' }>).text)
+    else if (blockType === 'reasoning') parts.push('[Reasoning] ' + (block as Extract<ContentBlock, { type: 'reasoning' }>).text)
+    else if (blockType === 'tool-call') parts.push('[Tool Call] ' + (block as Extract<ContentBlock, { type: 'tool-call' }>).name + ' ' + (block as Extract<ContentBlock, { type: 'tool-call' }>).arguments)
+    else if (blockType === 'tool-result') parts.push('[Tool Result] ' + textOf((block as Extract<ContentBlock, { type: 'tool-result' }>).content))
+    else if (blockType === 'file') {
+      const fileData = block as unknown as { path?: string; filename?: string; title?: string }
+      parts.push('[File] ' + (fileData.path ?? fileData.filename ?? fileData.title ?? 'attachment'))
+    }
   }
   return parts.join('\n')
 }
@@ -69,20 +74,23 @@ export async function extractSession(agent: Agent, loadImage: (ref: Extract<Cont
   let problem = ''
   const trace: string[] = []
   const images: VerifierImage[] = []
-  for (const event of events) {
+  for (const rawEvent of events) {
+    const event = rawEvent as unknown as { type: string; seq: number; data: any }
     if (event.type === 'user/message') {
-      if (event.data.source.kind !== 'user') continue
+      const sourceKind = event.data?.source?.kind as string
+      if (sourceKind !== 'user' && sourceKind !== 'team-message') continue
       const text = textOf(event.data.content)
-      if (!problem && text.trim()) problem = text.trim()
+      if (!problem && sourceKind === 'user' && text.trim()) problem = text.trim()
       for (const block of event.data.content) if (block.type === 'image') images.push(await loadImage(block.attachment))
-      trace.push('--- User seq ' + event.seq + ' ---\n' + text)
+      const tag = sourceKind === 'team-message' ? 'Team Message' : 'User'
+      trace.push('--- ' + tag + ' seq ' + event.seq + ' ---\n' + text)
     } else if (event.type === 'assistant/message' && options.includeAssistantText !== false) {
       trace.push('--- Assistant turn ' + event.data.turn + ' step ' + event.data.step + ' ---\n' + textOf(event.data.message.content))
     } else if (event.type === 'tool/call') {
       trace.push('--- Tool Call turn ' + event.data.turn + ' step ' + event.data.step + ' ---\n[Command] ' + event.data.name + ' ' + event.data.arguments)
     } else if (event.type === 'tool/result') {
       trace.push('--- Tool Result turn ' + event.data.turn + ' step ' + event.data.step + ' ---\n[Output] ' + textOf(event.data.message.content))
-    } else if (event.type === 'tool/code-dispatch') {
+    } else if (event.type === 'tool/ptc-dispatch' || event.type === 'tool/code-dispatch') {
       const data = event.data as { name: string; arguments?: unknown; isError?: boolean; content?: readonly ContentBlock[] }
       const status = data.isError ? ' [Error]' : ''
       const args = data.arguments !== undefined ? ' ' + (typeof data.arguments === 'string' ? data.arguments : JSON.stringify(data.arguments)) : ''
@@ -92,7 +100,13 @@ export async function extractSession(agent: Agent, loadImage: (ref: Extract<Cont
           if (block.type === 'image') images.push(await loadImage(block.attachment))
         }
       }
-      trace.push('--- Code Dispatch ' + data.name + status + ' seq ' + event.seq + ' ---\n[Command] ' + data.name + args + '\n[Output] ' + content)
+      const label = event.type === 'tool/ptc-dispatch' ? 'PTC Dispatch ' : 'Code Dispatch '
+      trace.push('--- ' + label + data.name + status + ' seq ' + event.seq + ' ---\n[Command] ' + data.name + args + '\n[Output] ' + content)
+    } else if (event.type === 'team/message/queued') {
+      const data = event.data as { message?: { senderName?: string; targetId?: string; content?: readonly ContentBlock[] } }
+      const sender = data?.message?.senderName ?? 'Teammate'
+      const content = Array.isArray(data?.message?.content) ? textOf(data.message!.content) : ''
+      trace.push('--- Team Message Queued from ' + sender + ' seq ' + event.seq + ' ---\n' + content)
     }
   }
   const raw = redactText(trace.join('\n\n'), patterns)

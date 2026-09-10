@@ -33,4 +33,21 @@ describe('current session extraction', () => {
     expect(result.trace).toContain('[REDACTED]')
     expect(result.trace).not.toContain('secret-value')
   })
+
+  it('extracts Session V3 tool/ptc-dispatch, file content blocks, and team messages', async () => {
+    const session = Session.create('session-00000000-0000-4000-8000-000000000003' as never)
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Team task instructions' }, { type: 'file' as never, path: 'src/config.ts' } as never], source: { kind: 'user' } }), { surfaceOp: 'append' })
+    session.append('tool/ptc-dispatch' as never, { subCallId: 'ptc-1', name: 'run_test', arguments: { target: 'unit' }, isError: false, content: [{ type: 'text', text: 'all tests passed' }] } as never)
+    session.append('team/message/queued' as never, { message: { senderName: 'Alice', content: [{ type: 'text', text: 'Reviewed PR #123' }] } } as never)
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Follow-up from Bob' }], source: { kind: 'team-message' as never } as never }), { surfaceOp: 'append' })
+    const agent = { id: session.id, session } as never
+    const result = await extractSession(agent, async () => { throw new Error('no image expected') })
+    expect(result.trace).toContain('[File] src/config.ts')
+    expect(result.trace).toContain('--- PTC Dispatch run_test')
+    expect(result.trace).toContain('all tests passed')
+    expect(result.trace).toContain('--- Team Message Queued from Alice')
+    expect(result.trace).toContain('Reviewed PR #123')
+    expect(result.trace).toContain('--- Team Message seq')
+    expect(result.trace).toContain('Follow-up from Bob')
+  })
 })

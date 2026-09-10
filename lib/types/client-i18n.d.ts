@@ -122,6 +122,15 @@ export declare const zh: {
     'models.tokens': string;
     'models.empty': string;
     'slot.statistics': string;
+    'slot.globalDashboard': string;
+    'global.panelTitle': string;
+    'global.panelIntro': string;
+    'guide.verifier.title': string;
+    'guide.verifier.desc': string;
+    'field.autoVerifyTeamTasks.title': string;
+    'field.autoVerifyTeamTasks.help': string;
+    'field.autoVerifyPlanMode.title': string;
+    'field.autoVerifyPlanMode.help': string;
 };
 export type I18nDict = typeof zh;
 export declare const en: I18nDict;
@@ -250,6 +259,15 @@ export declare const dictionaries: {
         'models.tokens': string;
         'models.empty': string;
         'slot.statistics': string;
+        'slot.globalDashboard': string;
+        'global.panelTitle': string;
+        'global.panelIntro': string;
+        'guide.verifier.title': string;
+        'guide.verifier.desc': string;
+        'field.autoVerifyTeamTasks.title': string;
+        'field.autoVerifyTeamTasks.help': string;
+        'field.autoVerifyPlanMode.title': string;
+        'field.autoVerifyPlanMode.help': string;
     };
     en: {
         'settings.title': string;
@@ -375,6 +393,15 @@ export declare const dictionaries: {
         'models.tokens': string;
         'models.empty': string;
         'slot.statistics': string;
+        'slot.globalDashboard': string;
+        'global.panelTitle': string;
+        'global.panelIntro': string;
+        'guide.verifier.title': string;
+        'guide.verifier.desc': string;
+        'field.autoVerifyTeamTasks.title': string;
+        'field.autoVerifyTeamTasks.help': string;
+        'field.autoVerifyPlanMode.title': string;
+        'field.autoVerifyPlanMode.help': string;
     };
 };
 export declare const toolLabels: Record<'zh' | 'en', Record<string, string>>;

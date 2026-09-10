@@ -65,6 +65,24 @@ describe('semantic evidence references', () => {
     const parsed = parseSemanticRoute(JSON.stringify({ kind: 'compare', confidence: 0.92, reason: 'PTC alternatives', candidateCallIds: ['c-1', 'c-2'], checkpointSeqs: [] }))!
     expect(semanticDecision(parsed, value.events)).toMatchObject({ kind: 'compare', source: 'semantic' })
   })
+
+  it('resolves candidates emitted via Session V3 tool/ptc-dispatch', () => {
+    const value = session()
+    value.append('tool/ptc-dispatch' as never, { subCallId: 'ptc-1', name: 'subagent', arguments: '{}', isError: false, content: [{ type: 'text', text: 'candidate A from ptc' }] } as never)
+    value.append('tool/ptc-dispatch' as never, { subCallId: 'ptc-2', name: 'subagent', arguments: '{}', isError: false, content: [{ type: 'text', text: 'candidate B from ptc' }] } as never)
+    expect(semanticRouteHint(value.events)).toBe(true)
+    const parsed = parseSemanticRoute(JSON.stringify({ kind: 'compare', confidence: 0.95, reason: 'V3 PTC alternatives', candidateCallIds: ['ptc-1', 'ptc-2'], checkpointSeqs: [] }))!
+    expect(semanticDecision(parsed, value.events)).toMatchObject({ kind: 'compare', source: 'semantic' })
+  })
+
+  it('routes progress tracking based on changed team/task snapshots', () => {
+    const value = session()
+    value.append('team/task' as never, { task: { id: 'task-1', revision: 1, subject: 'Backend API', status: 'in_progress' } } as never)
+    value.append('team/task' as never, { task: { id: 'task-1', revision: 2, subject: 'Backend API', status: 'completed' } } as never)
+    expect(semanticRouteHint(value.events)).toBe(true)
+    const decision = analyzeStructuredRoute(value.events)
+    expect(decision).toMatchObject({ kind: 'track', source: 'structured', reason: 'changed durable team tasks' })
+  })
 })
 
 describe('transactional router state', () => {

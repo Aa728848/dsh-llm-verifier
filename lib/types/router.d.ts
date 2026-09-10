@@ -1,7 +1,7 @@
 import type { SessionEvent, TodoItem } from '@deepseek-ai/dsh-session';
 import type { AutoVerifyMode } from './auto.ts';
 export type RoutedVerifierKind = 'compare' | 'select' | 'track';
-export type RoutePhase = 'semantic' | RoutedVerifierKind | 'final';
+export type RoutePhase = 'semantic' | RoutedVerifierKind | 'final' | 'plan_review' | 'team_task';
 export interface CandidateArtifact {
     id: string;
     groupId: string;
@@ -63,10 +63,19 @@ export interface EvidenceCall {
     resultSeq: number;
     text: string;
 }
+export interface TeamTaskItem {
+    id: string;
+    revision: number;
+    subject: string;
+    description?: string;
+    status: 'pending' | 'in_progress' | 'completed' | 'deleted';
+    ownerId?: string;
+}
 interface EvidenceIndex {
     problemSeq: number;
     calls: Map<string, EvidenceCall>;
     todos: Map<number, TodoItem[]>;
+    teamTasks: Map<number, TeamTaskItem[]>;
 }
 export declare function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceIndex | undefined;
 export declare function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandidates?: number, maxItemChars?: number): RouteDecision | undefined;

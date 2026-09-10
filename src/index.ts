@@ -14,6 +14,8 @@ import { loadVerifierImages } from './images.ts'
 import { extractSession } from './session.ts'
 import { AutoVerificationBudget, analyzeAutoTask, automaticFeedback } from './auto.ts'
 import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRoutePrompt, parseSemanticRoute, semanticDecision, semanticRouteHint, type RouteDecision } from './router.ts'
+import { detectPlanExit, buildPlanPreReviewPrompt, parsePlanReviewVerdict } from './plan-gate.ts'
+import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from './team-gate.ts'
 import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, resolveStatisticsFile, type StatisticsOverview, type StatisticsQuery, type VerifierToolName } from './statistics.ts'
 import { resolveTopicDataDir, type SessionArtifactLocator } from './topic-storage.ts'
 
@@ -27,6 +29,8 @@ export * from './statistics.ts'
 export * from './topic-storage.ts'
 export * from './auto.ts'
 export * from './router.ts'
+export * from './plan-gate.ts'
+export * from './team-gate.ts'
 export { callVerifier, RequestLimiter, type VerifierClientConfig, type VerifierImage, type UsageStats, type VerifierCompletion } from './caller.ts'
 
 const criterionSchema = { type: 'object' as const, additionalProperties: false, properties: { id: { type: 'string' as const, required: true as const }, name: { type: 'string' as const, required: true as const }, description: { type: 'string' as const, required: true as const } } }
@@ -121,8 +125,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const routePolicy = (selected: ReturnType<typeof current>) => ({ mode: selected.autoVerifyMode, minConfidence: selected.autoRouteMinConfidence, maxCandidates: selected.autoRouteMaxCandidates, maxPerTask: selected.autoRouteMaxPerTask + selected.autoVerifyMaxPerTask, maxPerSession: selected.autoRouteMaxPerSession + selected.autoVerifyMaxPerSession, maxModelCallsPerTask: selected.autoMaxModelCallsPerTask, maxModelCallsPerSession: selected.autoMaxModelCallsPerSession, maxInputChars: selected.autoRouteMaxInputChars, maxItemChars: selected.autoRouteMaxItemChars })
   const routeFeedback = (decision: RouteDecision, detail: string) => createUserMessage({ content: [{ type: 'text' as const, text: '[Automatic verifier routing: ' + decision.kind + ']\n' + detail + '\nUse this independent result to continue the actual task. Do not merely restate the ranking or progress score; implement, correct, and verify the required work.' }], source: { kind: 'plugin' as const, plugin: 'dsh-llm-verifier', form: 'notice' as const, summary: 'Automatic verifier routed ' + decision.kind } })
 
-  services.connection.rpc.handle('/llm-verifier', async (endpoint: string, payload: unknown) => {
-    if (endpoint !== 'statistics') return rpcFailure('unknown llm-verifier endpoint')
+  const handleStatisticsQuery = async (payload: unknown): Promise<{ ok: true; value: StatisticsOverview } | { ok: false; error: { code: 'bad-request'; message: string; details: { issues: never[] } } }> => {
     if (typeof payload !== 'object' || payload === null) return rpcFailure('statistics payload must be an object')
     const row = payload as Record<string, unknown>
     const sessionId = typeof row.sessionId === 'string' && row.sessionId.length > 0 ? row.sessionId : undefined
@@ -136,7 +139,97 @@ export function apply(ctx: Context, config: Config = {}): void {
       const value: StatisticsOverview = mergeStatisticsOverviews(overviews, query)
       return rpcSuccess(value)
     } catch (error) { return rpcFailure(error instanceof Error ? error.message : String(error)) }
-  }, { authority: 'loopback' } as never)
+  }
+
+  // 1. 优先注册到官方 /api 共享通道 (connection.fetch.register)
+  const anyConn = services.connection as unknown as { fetch?: { register: (route: unknown) => () => Promise<void> } }
+  if (anyConn && anyConn.fetch && typeof anyConn.fetch.register === 'function') {
+    try {
+      anyConn.fetch.register({
+        path: '/api/llm-verifier/statistics',
+        methods: ['POST'],
+        requestBody: 'buffered',
+        fetch: async (request: Request): Promise<Response> => {
+          let body: unknown
+          try {
+            body = await request.json()
+          } catch {
+            return new Response('body is not JSON', { status: 400 })
+          }
+          const isRpcEnvelope = typeof body === 'object' && body !== null && (body as { type?: unknown }).type === 'client-request' && typeof (body as { rpcId?: unknown }).rpcId === 'string'
+          const rpcId = isRpcEnvelope ? (body as { rpcId: string }).rpcId : 'direct'
+          const payload = isRpcEnvelope ? (body as { payload?: unknown }).payload : body
+          const outcome = await handleStatisticsQuery(payload)
+          if (isRpcEnvelope) {
+            return Response.json({
+              type: 'server-response',
+              rpcId,
+              result: outcome,
+            })
+          }
+          return Response.json(outcome)
+        },
+      })
+    } catch (e) {
+      ctx.logger.warn('failed to register /api/llm-verifier/statistics fetch route: ' + String(e))
+    }
+  }
+
+  // 2. 尝试向底层 webServer 挂载 /llm-verifier 前缀路由（若当前宿主提供 webServer 服务）
+  const mountWebServerRoute = (ws: { register?: (route: unknown) => void }) => {
+    if (!ws || typeof ws.register !== 'function') return
+    try {
+      ws.register({
+        kind: 'prefix',
+        path: '/llm-verifier',
+        handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => {
+          if (req.method !== 'POST') {
+            res.writeHead(405)
+            res.end()
+            return
+          }
+          let bodyStr = ''
+          req.on('data', (chunk: Buffer) => { bodyStr += chunk.toString() })
+          req.on('end', async () => {
+            try {
+              const body = JSON.parse(bodyStr)
+              const isRpcEnvelope = typeof body === 'object' && body !== null && body.type === 'client-request' && typeof body.rpcId === 'string'
+              const rpcId = isRpcEnvelope ? body.rpcId : 'direct'
+              const payload = isRpcEnvelope ? body.payload : body
+              const outcome = await handleStatisticsQuery(payload)
+              res.writeHead(200, { 'content-type': 'application/json' })
+              if (isRpcEnvelope) {
+                res.end(JSON.stringify({ type: 'server-response', rpcId, result: outcome }))
+              } else {
+                res.end(JSON.stringify(outcome))
+              }
+            } catch (err) {
+              res.writeHead(400, { 'content-type': 'application/json' })
+              res.end(JSON.stringify({ error: String(err) }))
+            }
+          })
+        },
+      })
+    } catch {}
+  }
+
+  if (typeof (ctx as any).inject === 'function') {
+    try {
+      (ctx as any).inject(['webServer'], (webCtx: { webServer?: unknown }) => {
+        if (webCtx?.webServer) mountWebServerRoute(webCtx.webServer as never)
+      })
+    } catch {}
+  }
+
+  // 3. 保留原有 RPC channel 注册以保持纯单元测试和旧客户端兼容
+  try {
+    services.connection?.rpc?.handle('/llm-verifier', async (endpoint: string, payload: unknown) => {
+      if (endpoint !== 'statistics') return rpcFailure('unknown llm-verifier endpoint')
+      return handleStatisticsQuery(payload)
+    }, { authority: 'loopback' } as never)
+  } catch (e) {
+    ctx.logger.warn('failed to register /llm-verifier rpc handler: ' + String(e))
+  }
 
   ctx.on('agent/disposed', ({ agent }) => { autoBudget.release(agent); autoRouter.release(agent); topics.delete(String(agent.id)) })
   ctx.on('agent/turn-stopping', async ({ agent, signal }) => {
@@ -147,6 +240,82 @@ export function apply(ctx: Context, config: Config = {}): void {
     const admittedLastSeq = agent.session.events.at(-1)?.seq ?? -1
     const snapshot = agent.session.events.filter(event => event.seq <= admittedLastSeq)
     const stillCurrent = () => !signal.aborted && (agent.session.events.at(-1)?.seq ?? -1) === admittedLastSeq
+
+    if (selected.autoVerifyPlanMode) {
+      const planDetection = detectPlanExit(snapshot, evidence.taskStartSeq)
+      if (planDetection.hasExitPlanMode && planDetection.planText) {
+        const planFingerprint = stableHash({ phase: 'plan_review', callSeq: planDetection.callSeq, plan: planDetection.planText })
+        const planReservation = autoRouter.reserve(agent, 'plan_review', planFingerprint, 1, policy)
+        if (planReservation) {
+          try {
+            const extracted = await extractTask(agent, evidence.taskStartSeq, admittedLastSeq, selected.autoVerifyMaxChars, signal)
+            const prompt = buildPlanPreReviewPrompt(extracted.problem, planDetection.planText, selected.autoRouteMaxInputChars)
+            const classified = await classifyRoute(agent, prompt, signal)
+            if (!stillCurrent()) { autoRouter.fail(agent, planReservation, false); return }
+            const verdict = parsePlanReviewVerdict(classified.text)
+            if (verdict.score >= selected.autoVerifyThreshold) {
+              autoRouter.commit(agent, planReservation, admittedLastSeq)
+            } else {
+              autoRouter.fail(agent, planReservation, selected.autoVerifyMode === 'strict')
+              agent.steer(createUserMessage({
+                content: [{
+                  type: 'text',
+                  text: '[Automatic Verifier Plan Pre-review]\nPlan pre-review scored ' + (verdict.score * 100).toFixed(1) + '% (Threshold: ' + (selected.autoVerifyThreshold * 100).toFixed(0) + '%).\n' + verdict.feedback + '\nAddress the identified issues or improve the plan before proceeding.'
+                }],
+                source: { kind: 'plugin', plugin: 'dsh-llm-verifier', form: 'notice', summary: 'Plan Pre-review Feedback' }
+              }))
+              return
+            }
+          } catch (error) {
+            autoRouter.fail(agent, planReservation, selected.autoVerifyMode === 'strict')
+            ctx.logger.warn('llm-verifier plan pre-review failed: ' + (error instanceof Error ? error.message : String(error)))
+            if (selected.autoVerifyMode === 'strict' && !signal.aborted) {
+              agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic Verifier Plan Pre-review]\nPlan pre-review failed: ' + (error instanceof Error ? error.message : String(error)) }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+              return
+            }
+          }
+        }
+      }
+    }
+
+    if (selected.autoVerifyTeamTasks) {
+      const teamInspection = inspectTeamTasks(snapshot, evidence.taskStartSeq)
+      if (teamInspection.hasRecentCompletedTask && teamInspection.latestCompletedTask) {
+        const task = teamInspection.latestCompletedTask
+        const taskFingerprint = stableHash({ phase: 'team_task', taskId: task.id, status: task.status, seq: teamInspection.completedSeq })
+        const taskReservation = autoRouter.reserve(agent, 'team_task', taskFingerprint, 1, policy)
+        if (taskReservation) {
+          try {
+            const extracted = await extractTask(agent, evidence.taskStartSeq, admittedLastSeq, selected.autoVerifyMaxChars, signal)
+            const prompt = buildTeamTaskVerificationPrompt(task, extracted.trace, selected.autoRouteMaxInputChars)
+            const classified = await classifyRoute(agent, prompt, signal)
+            if (!stillCurrent()) { autoRouter.fail(agent, taskReservation, false); return }
+            const verdict = parsePlanReviewVerdict(classified.text)
+            if (verdict.score >= selected.autoVerifyThreshold) {
+              autoRouter.commit(agent, taskReservation, admittedLastSeq)
+            } else {
+              autoRouter.fail(agent, taskReservation, selected.autoVerifyMode === 'strict')
+              agent.steer(createUserMessage({
+                content: [{
+                  type: 'text',
+                  text: '[Automatic Verifier Team Task Gate]\nTask "' + task.subject + '" (#' + task.id + ') verification scored ' + (verdict.score * 100).toFixed(1) + '% (Threshold: ' + (selected.autoVerifyThreshold * 100).toFixed(0) + '%).\n' + verdict.feedback + '\nProvide verified execution evidence or resolve remaining issues before completing the task.'
+                }],
+                source: { kind: 'plugin', plugin: 'dsh-llm-verifier', form: 'notice', summary: 'Team Task Gate Feedback' }
+              }))
+              return
+            }
+          } catch (error) {
+            autoRouter.fail(agent, taskReservation, selected.autoVerifyMode === 'strict')
+            ctx.logger.warn('llm-verifier team task verification failed: ' + (error instanceof Error ? error.message : String(error)))
+            if (selected.autoVerifyMode === 'strict' && !signal.aborted) {
+              agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic Verifier Team Task Gate]\nTask verification failed: ' + (error instanceof Error ? error.message : String(error)) }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+              return
+            }
+          }
+        }
+      }
+    }
+
     let decision = boundDecision(analyzeStructuredRoute(snapshot, selected.autoRouteMaxCandidates, selected.autoRouteMaxItemChars) as RouteDecision, policy)
 
     if (decision === undefined && selected.autoRouteSemantic && (selected.autoVerifyMode === 'strict' || semanticRouteHint(snapshot))) {

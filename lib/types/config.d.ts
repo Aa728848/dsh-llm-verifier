@@ -21,6 +21,8 @@ export interface Config {
     autoRouteMaxInputChars?: number;
     autoMaxModelCallsPerTask?: number;
     autoMaxModelCallsPerSession?: number;
+    autoVerifyTeamTasks?: boolean;
+    autoVerifyPlanMode?: boolean;
     provider?: string;
     model?: string;
     reasoningEffort?: string;
@@ -53,6 +55,8 @@ export interface ResolvedConfig {
     autoRouteMaxInputChars: number;
     autoMaxModelCallsPerTask: number;
     autoMaxModelCallsPerSession: number;
+    autoVerifyTeamTasks: boolean;
+    autoVerifyPlanMode: boolean;
     provider: string;
     model: string;
     reasoningEffort?: string;

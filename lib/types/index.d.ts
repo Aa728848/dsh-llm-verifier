@@ -10,6 +10,8 @@ export * from './statistics.ts';
 export * from './topic-storage.ts';
 export * from './auto.ts';
 export * from './router.ts';
+export * from './plan-gate.ts';
+export * from './team-gate.ts';
 export { callVerifier, RequestLimiter, type VerifierClientConfig, type VerifierImage, type UsageStats, type VerifierCompletion } from './caller.ts';
 export declare function apply(ctx: Context, config?: Config): void;
 //# sourceMappingURL=index.d.ts.map
