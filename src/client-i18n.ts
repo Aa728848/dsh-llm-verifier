@@ -6,7 +6,7 @@ export const zh = {
   'settings.intro': '选择已在 DSH「模型」中配置的模型作为独立裁判。修改后点击页面底部的保存按钮生效。',
   'settings.loading': '正在读取 DSH 模型和设置…',
   'settings.retry': '重试',
-  'settings.nsUnregistered': 'Verifier settings namespace is not registered. Restart the DSH host.',
+  'settings.nsUnregistered': '未注册 Verifier 设置命名空间，请重启 DSH 宿主。',
 
   // Section: Tools
   'section.tools': '工具',
@@ -160,6 +160,8 @@ export const zh = {
   'field.autoVerifyTeamTasks.help': '当 Agent Teams 中的任务状态变更或进入完成状态时，自动路由进度追踪与任务验收。',
   'field.autoVerifyPlanMode.title': '计划模式自动预审',
   'field.autoVerifyPlanMode.help': '在 Agent 调用 exit_plan_mode 提交计划交付人类评审前，自动对计划完整度与风险进行独立预审。',
+  'field.autoVerifySubagents.title': '同时验收子 Agent',
+  'field.autoVerifySubagents.help': '子 Agent（subagent / fork）的会话也执行自动路由与最终验收。默认关闭：子会话同样以真实用户消息播种，被门控会额外消耗裁判预算并可能反复 steering 子 Agent。',
 }
 
 export type I18nDict = typeof zh
@@ -324,6 +326,8 @@ export const en: I18nDict = {
   'field.autoVerifyTeamTasks.help': 'Automatically route progress and verify tasks when Agent Teams task status changes or completes.',
   'field.autoVerifyPlanMode.title': 'Plan Mode Pre-verification',
   'field.autoVerifyPlanMode.help': 'Automatically pre-verify plan feasibility and risks before exit_plan_mode presents it for user review.',
+  'field.autoVerifySubagents.title': 'Verify Subagent Sessions',
+  'field.autoVerifySubagents.help': 'Also run automatic routing and final acceptance on delegated child sessions. Off by default: child sessions are seeded with a real user message, so gating them spends extra judge budget and can repeatedly steer the subagent.',
 }
 
 export const dictionaries = { zh, en }

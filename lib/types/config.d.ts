@@ -23,6 +23,7 @@ export interface Config {
     autoMaxModelCallsPerSession?: number;
     autoVerifyTeamTasks?: boolean;
     autoVerifyPlanMode?: boolean;
+    autoVerifySubagents?: boolean;
     provider?: string;
     model?: string;
     reasoningEffort?: string;
@@ -57,6 +58,7 @@ export interface ResolvedConfig {
     autoMaxModelCallsPerSession: number;
     autoVerifyTeamTasks: boolean;
     autoVerifyPlanMode: boolean;
+    autoVerifySubagents: boolean;
     provider: string;
     model: string;
     reasoningEffort?: string;

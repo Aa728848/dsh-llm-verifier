@@ -22,6 +22,29 @@ describe('automatic verifier scoring', () => {
     const result = await callVerifier(config(async function* () { streamed = true; yield* streamOf(chunks()) }, vi.fn(), context), 'prompt')
     expect(result.scoringMode).toBe('top-logprobs'); expect(result.positions[1]?.length).toBe(2); expect(streamed).toBe(false)
   })
+  it('applies timeout and retry budget to the top-logprob transport', async () => {
+    const fetcher = vi.fn((_url: unknown, init: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(init.signal.reason ?? new Error('aborted')), { once: true })
+    }))
+    vi.stubGlobal('fetch', fetcher)
+    const context = ctx({ providers: { openai: { api: 'openai-completions', baseURL: 'https://example.test/v1', apiKeyEnv: 'OPENAI_API_KEY' } } })
+    const cfg = { ...config(async function* () { yield* streamOf(chunks()) }, vi.fn(), context), timeoutMs: 20, maxRetries: 2 }
+    await expect(callVerifier(cfg, 'prompt')).rejects.toThrow(/timed out/)
+    expect(fetcher).toHaveBeenCalledTimes(3)
+  })
+  it('downgrades the direct transport on a non-logprob provider rejection', async () => {
+    const fetcher = vi.fn(async () => new Response('{"error":{"message":"max_tokens is too large"}}', { status: 400 }))
+    vi.stubGlobal('fetch', fetcher)
+    const context = ctx({ providers: { openai: { api: 'openai-completions', baseURL: 'https://example.test/v1' } } })
+    let streamed = 0
+    const cfg = config(async function* () { streamed += 1; yield* streamOf(chunks()) }, vi.fn(), context)
+    expect((await callVerifier(cfg, 'prompt')).scoringMode).toBe('explicit-tag')
+    expect(streamed).toBe(1)
+    // The rejection is remembered, so the second call must not probe again.
+    expect((await callVerifier(cfg, 'prompt2')).scoringMode).toBe('explicit-tag')
+    expect(streamed).toBe(2)
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
   it('remembers a provider logprob rejection and falls back through DSH', async () => {
     const fetcher = vi.fn(async () => new Response('{"error":{"message":"logprobs unsupported"}}', { status: 400 }))
     vi.stubGlobal('fetch', fetcher)

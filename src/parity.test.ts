@@ -9,6 +9,9 @@ import { resolveConfig } from './config.ts'
 
 const PYTHON_ROOT = join(import.meta.dirname, '..', '..', 'llm-as-a-verifier')
 const hasPythonUpstream = existsSync(join(PYTHON_ROOT, 'llm_verifier'))
+/** Sibling checkout path, launcher, and interpreter flag differ per platform. */
+const PYTHON_BIN = process.env.DSH_VERIFIER_PYTHON ?? (process.platform === 'win32' ? 'py' : 'python3')
+const PYTHON_ARGS = process.platform === 'win32' && PYTHON_BIN === 'py' ? ['-3'] : []
 
 function python(payload: unknown): unknown {
   const script = [
@@ -22,7 +25,7 @@ function python(payload: unknown): unknown {
   ].join(';')
   const source = payload as Record<string, unknown>
   const compatible = source.kind === 'score' ? { ...source, positions: (source.positions as Array<Array<{ token: string; logprob: number }>>).map(position => position.map(item => [item.token, item.logprob])) } : source
-  const result = execFileSync('py', ['-3', '-c', script, PYTHON_ROOT], { input: JSON.stringify(compatible), encoding: 'utf8' })
+  const result = execFileSync(PYTHON_BIN, [...PYTHON_ARGS, '-c', script, PYTHON_ROOT], { input: JSON.stringify(compatible), encoding: 'utf8' })
   return JSON.parse(result)
 }
 

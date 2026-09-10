@@ -4,7 +4,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { Button, IconDataOutline16, IconRefreshOutline16, Input } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage,
   compact, money, duration, dateTime, type I18nDict,
@@ -13,7 +13,7 @@ import {
 export { zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage, compact, money, duration, dateTime, type I18nDict }
 
 const NS = 'llm-verifier'
-interface Values { enabled: boolean; autoVerifyMode: 'manual'|'smart'|'strict'; autoVerifyThreshold: number; autoVerifyRepeats: number; autoVerifyMinToolCalls: number; autoVerifyMaxChars: number; autoVerifyMaxPerTask: number; autoVerifyMaxPerSession: number; autoRouteSemantic: boolean; autoRouteMinConfidence: number; autoRouteMaxCandidates: number; autoRouteMaxPerTask: number; autoRouteMaxPerSession: number; autoTrackCompletionThreshold: number; autoRouteMaxItemChars: number; autoRouteMaxInputChars: number; autoMaxModelCallsPerTask: number; autoMaxModelCallsPerSession: number; autoVerifyTeamTasks: boolean; autoVerifyPlanMode: boolean; provider: string; model: string; reasoningEffort?: string; maxTokens: number; maxConcurrency: number; maxRetries: number; timeoutMs: number; cacheMaxEntries: number; estimatedInputUsdPerMillion: number; estimatedOutputUsdPerMillion: number }
+interface Values { enabled: boolean; autoVerifyMode: 'manual'|'smart'|'strict'; autoVerifyThreshold: number; autoVerifyRepeats: number; autoVerifyMinToolCalls: number; autoVerifyMaxChars: number; autoVerifyMaxPerTask: number; autoVerifyMaxPerSession: number; autoRouteSemantic: boolean; autoRouteMinConfidence: number; autoRouteMaxCandidates: number; autoRouteMaxPerTask: number; autoRouteMaxPerSession: number; autoTrackCompletionThreshold: number; autoRouteMaxItemChars: number; autoRouteMaxInputChars: number; autoMaxModelCallsPerTask: number; autoMaxModelCallsPerSession: number; autoVerifyTeamTasks: boolean; autoVerifyPlanMode: boolean; provider: string; model: string; reasoningEffort?: string; maxTokens: number; maxConcurrency: number; maxRetries: number; timeoutMs: number; cacheMaxEntries: number; estimatedInputUsdPerMillion: number; estimatedOutputUsdPerMillion: number; autoVerifySubagents: boolean }
 interface Loaded { groups: readonly ModelProviderGroup[]; settings: SettingsNamespaceView; writable: boolean; failures: string[] }
 interface RunStats { calls: number; attempts: number; retries: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningTokens: number; cacheHits: number; cacheMisses: number; estimatedCostUsd: number; topLogprobScores: number; explicitTagScores: number }
 interface InvocationRecord { id: string; toolName: string; sessionId?: string; startedAt: number; finishedAt: number; durationMs: number; success: boolean; errorName?: string; errorMessage?: string; provider: string; model: string; stats: RunStats }
@@ -71,8 +71,10 @@ const muted: React.CSSProperties = { color: 'var(--dsw-text-secondary)', fontSiz
 const toolColors: Record<string, string> = { verifier_route_classify: '#d97706', verifier_compare: '#4f8cff', verifier_select: '#8b6df6', verifier_track: '#2fc5c9', verifier_current_session: '#f5a524' }
 
 function record(value: unknown): Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {} }
-function values(view: SettingsNamespaceView): Values { const v=record(view.value); const mode=v.autoVerifyMode==='manual'||v.autoVerifyMode==='strict'?v.autoVerifyMode:'smart'; return { enabled:v.enabled!==false,autoVerifyMode:mode,autoVerifyThreshold:Number(v.autoVerifyThreshold??.65),autoVerifyRepeats:Number(v.autoVerifyRepeats??1),autoVerifyMinToolCalls:Number(v.autoVerifyMinToolCalls??3),autoVerifyMaxChars:Number(v.autoVerifyMaxChars??80000),autoVerifyMaxPerTask:Number(v.autoVerifyMaxPerTask??2),autoVerifyMaxPerSession:Number(v.autoVerifyMaxPerSession??8),autoRouteSemantic:v.autoRouteSemantic!==false,autoRouteMinConfidence:Number(v.autoRouteMinConfidence??.9),autoRouteMaxCandidates:Number(v.autoRouteMaxCandidates??8),autoRouteMaxPerTask:Number(v.autoRouteMaxPerTask??2),autoRouteMaxPerSession:Number(v.autoRouteMaxPerSession??8),autoTrackCompletionThreshold:Number(v.autoTrackCompletionThreshold??.8),autoRouteMaxItemChars:Number(v.autoRouteMaxItemChars??20000),autoRouteMaxInputChars:Number(v.autoRouteMaxInputChars??60000),autoMaxModelCallsPerTask:Number(v.autoMaxModelCallsPerTask??48),autoMaxModelCallsPerSession:Number(v.autoMaxModelCallsPerSession??160),autoVerifyTeamTasks:v.autoVerifyTeamTasks!==false,autoVerifyPlanMode:v.autoVerifyPlanMode!==false,provider:String(v.provider??''),model:String(v.model??''),...(typeof v.reasoningEffort==='string'?{reasoningEffort:v.reasoningEffort}:{}),maxTokens:Number(v.maxTokens??32768),maxConcurrency:Number(v.maxConcurrency??8),maxRetries:Number(v.maxRetries??3),timeoutMs:Number(v.timeoutMs??300000),cacheMaxEntries:Number(v.cacheMaxEntries??10000),estimatedInputUsdPerMillion:Number(v.estimatedInputUsdPerMillion??0),estimatedOutputUsdPerMillion:Number(v.estimatedOutputUsdPerMillion??0) } }
+function values(view: SettingsNamespaceView): Values { const v=record(view.value); const mode=v.autoVerifyMode==='manual'||v.autoVerifyMode==='strict'?v.autoVerifyMode:'smart'; return { enabled:v.enabled!==false,autoVerifyMode:mode,autoVerifyThreshold:Number(v.autoVerifyThreshold??.65),autoVerifyRepeats:Number(v.autoVerifyRepeats??1),autoVerifyMinToolCalls:Number(v.autoVerifyMinToolCalls??3),autoVerifyMaxChars:Number(v.autoVerifyMaxChars??80000),autoVerifyMaxPerTask:Number(v.autoVerifyMaxPerTask??2),autoVerifyMaxPerSession:Number(v.autoVerifyMaxPerSession??8),autoRouteSemantic:v.autoRouteSemantic!==false,autoRouteMinConfidence:Number(v.autoRouteMinConfidence??.9),autoRouteMaxCandidates:Number(v.autoRouteMaxCandidates??8),autoRouteMaxPerTask:Number(v.autoRouteMaxPerTask??2),autoRouteMaxPerSession:Number(v.autoRouteMaxPerSession??8),autoTrackCompletionThreshold:Number(v.autoTrackCompletionThreshold??.8),autoRouteMaxItemChars:Number(v.autoRouteMaxItemChars??20000),autoRouteMaxInputChars:Number(v.autoRouteMaxInputChars??60000),autoMaxModelCallsPerTask:Number(v.autoMaxModelCallsPerTask??64),autoMaxModelCallsPerSession:Number(v.autoMaxModelCallsPerSession??240),autoVerifyTeamTasks:v.autoVerifyTeamTasks!==false,autoVerifyPlanMode:v.autoVerifyPlanMode!==false,provider:String(v.provider??''),model:String(v.model??''),...(typeof v.reasoningEffort==='string'?{reasoningEffort:v.reasoningEffort}:{}),maxTokens:Number(v.maxTokens??32768),maxConcurrency:Number(v.maxConcurrency??8),maxRetries:Number(v.maxRetries??3),timeoutMs:Number(v.timeoutMs??300000),cacheMaxEntries:Number(v.cacheMaxEntries??10000),estimatedInputUsdPerMillion:Number(v.estimatedInputUsdPerMillion??0),estimatedOutputUsdPerMillion:Number(v.estimatedOutputUsdPerMillion??0),autoVerifySubagents:v.autoVerifySubagents===true } }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
+/** The endpoint answered but rejected the request: a transport fallback would only repeat it. */
+class EndpointError extends Error {}
 function Label({title,help}:{title:string;help:string}) { return <div style={{minWidth:0}}><div style={{fontSize:14,fontWeight:400,lineHeight:'22px',color:'var(--dsw-alias-label-primary)'}}>{title}</div><div style={{fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-label-tertiary)',marginTop:2}}>{help}</div></div> }
 function GroupTitle({children}:{children:React.ReactNode}) { return <h3 style={groupTitle}>{children}</h3> }
 function startOfRange(days: number): number { const date = new Date(); date.setHours(0,0,0,0); date.setDate(date.getDate() - days + 1); return date.getTime() }
@@ -81,15 +83,28 @@ function endOfToday(): number { const date = new Date(); date.setHours(0,0,0,0);
 export function VerifierSettings({ remote }: VerifierSettingsProps) {
   const lang = useLanguage()
   const t = dictionaries[lang]
-  const [loaded,setLoaded]=useState<Loaded|null>(null); const [draft,setDraft]=useState<Values|null>(null); const [busy,setBusy]=useState(false); const [error,setError]=useState<string|null>(null); const [saved,setSaved]=useState(false)
-  const load=async()=>{setError(null);try{const [m,s]=await Promise.all([remote.session.modelCatalog(),remote.settings.describe()]);if(!m.ok)throw new Error(m.error.message);if(!s.ok)throw new Error(s.error.message);const view=s.value.namespaces.find((x:SettingsNamespaceView)=>x.ns===NS);if(!view)throw new Error(t['settings.nsUnregistered']);const next={groups:m.value.groups,settings:view,writable:s.value.writable,failures:m.value.failures.map((f: { id?: string; provider?: string; name?: string; message: string })=>(f.id??f.provider??f.name??'unknown')+': '+f.message)};setLoaded(next);setDraft(values(view))}catch(e){setError(message(e))}}
+  const [loaded,setLoaded]=useState<Loaded|null>(null); const [draft,setDraft]=useState<Values|null>(null); const [busy,setBusy]=useState(false); const [error,setError]=useState<string|null>(null); const [saved,setSaved]=useState(false); const [editing,setEditing]=useState<Record<string,string>>({})
+  const load=async()=>{setError(null);try{const [m,s]=await Promise.all([remote.session.modelCatalog(),remote.settings.describe()]);if(!m.ok)throw new Error(m.error.message);if(!s.ok)throw new Error(s.error.message);const view=s.value.namespaces.find((x:SettingsNamespaceView)=>x.ns===NS);if(!view)throw new Error(t['settings.nsUnregistered']);const next={groups:m.value.groups,settings:view,writable:s.value.writable,failures:m.value.failures.map((f: { id?: string; provider?: string; name?: string; message: string })=>(f.id??f.provider??f.name??'unknown')+': '+f.message)};setLoaded(next);setDraft(values(view));setEditing({})}catch(e){setError(message(e))}}
   useEffect(()=>{void load()},[])
   const models=useMemo(()=>loaded?.groups.find(g=>g.id===draft?.provider)?.models??[],[loaded,draft?.provider])
   const selected=models.find(m=>m.id===draft?.model); const efforts=selected?.reasoning?.efforts??[]
-  const patch=<K extends keyof Values>(key:K,value:Values[K])=>setDraft(v=>v?{...v,[key]:value}:v)
-  const save=async()=>{if(!loaded||!draft)return;setBusy(true);setSaved(false);setError(null);try{const section={...record(loaded.settings.user),...draft};if(!draft.reasoningEffort)delete section.reasoningEffort;const res=await remote.settings.update(NS,section as never,loaded.settings.revision);if(!res.ok)throw new Error(res.error.message);setLoaded(v=>v?{...v,settings:res.value}:v);setDraft(values(res.value));setSaved(true)}catch(e){setError(message(e))}finally{setBusy(false)}}
+  const patch=<K extends keyof Values>(key:K,value:Values[K])=>{setSaved(false);setDraft(v=>v?{...v,[key]:value}:v)}
+  const save=async()=>{if(!loaded||!draft)return;setBusy(true);setSaved(false);setError(null);try{const section={...record(loaded.settings.user),...draft};if(!draft.reasoningEffort)delete section.reasoningEffort;const res=await remote.settings.update(NS,section as never,loaded.settings.revision);if(!res.ok)throw new Error(res.error.message);setLoaded(v=>v?{...v,settings:res.value}:v);setDraft(values(res.value));setEditing({});setSaved(true)}catch(e){setError(message(e))}finally{setBusy(false)}}
   if(!loaded||!draft)return <div style={shell}><h2 style={settingsHeading}>{t['settings.title']}</h2><p style={settingsIntro}>{error??t['settings.loading']}</p>{error&&<div><Button variant="outline" onClick={()=>void load()}>{t['settings.retry']}</Button></div>}</div>
-  const numeric=(key:keyof Values,min=0)=><Input style={{width:'100%',height:36,borderRadius:8}} type="number" min={min} value={String(draft[key])} onChange={e=>patch(key,Number(e.target.value) as never)} />
+  // Fractional settings are typed character by character, so the raw text is
+  // kept while the field has focus: a controlled type="number" input rewrites
+  // "0." back to "0" and swallows the decimal point. The parsed value is
+  // committed on every keystroke that parses, and blur restores canonical text.
+  const numeric=(key:keyof Values,min=0)=><Input
+    style={{width:'100%',height:36,borderRadius:8}}
+    type="text"
+    inputMode="decimal"
+    disabled={busy}
+    aria-label={(t[('field.'+key+'.title') as keyof I18nDict] as string|undefined)??String(key)}
+    value={editing[key]??String(draft[key]??'')}
+    onChange={e=>{const raw=e.target.value;setEditing(current=>current[key]===raw?current:{...current,[key]:raw});const parsed=Number(raw);if(raw.trim()!==''&&Number.isFinite(parsed)&&parsed>=min)patch(key,parsed as never)}}
+    onBlur={()=>setEditing(current=>{if(!(key in current))return current;const next={...current};delete next[key];return next})}
+  />
   return <div style={shell}>
     <h2 style={settingsHeading}>{t['settings.title']}</h2>
     <p style={settingsIntro}>{t['settings.intro']}</p>
@@ -100,9 +115,10 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     </section>
 
     <section style={group}><GroupTitle>{t['section.autoVerify']}</GroupTitle>
-      <div style={row}><Label title={t['field.autoVerifyMode.title']} help={t['field.autoVerifyMode.help']}/><select style={selectStyle} value={draft.autoVerifyMode} onChange={e=>patch('autoVerifyMode',e.target.value as Values['autoVerifyMode'])}><option value="manual">{t['field.autoVerifyMode.manual']}</option><option value="smart">{t['field.autoVerifyMode.smart']}</option><option value="strict">{t['field.autoVerifyMode.strict']}</option></select></div>
+      <div style={row}><Label title={t['field.autoVerifyMode.title']} help={t['field.autoVerifyMode.help']}/><select style={selectStyle} disabled={busy} aria-label={t['field.autoVerifyMode.title']} value={draft.autoVerifyMode} onChange={e=>patch('autoVerifyMode',e.target.value as Values['autoVerifyMode'])}><option value="manual">{t['field.autoVerifyMode.manual']}</option><option value="smart">{t['field.autoVerifyMode.smart']}</option><option value="strict">{t['field.autoVerifyMode.strict']}</option></select></div>
       <div style={row}><Label title={t['field.autoRouteSemantic.title']} help={t['field.autoRouteSemantic.help']}/><button type="button" role="switch" aria-checked={draft.autoRouteSemantic} aria-label={t['field.autoRouteSemantic.title']} onClick={()=>patch('autoRouteSemantic',!draft.autoRouteSemantic)} style={toggleStyle(draft.autoRouteSemantic)}><span style={toggleThumbStyle(draft.autoRouteSemantic)}/></button></div>
       <div style={row}><Label title={t['field.autoVerifyTeamTasks.title']} help={t['field.autoVerifyTeamTasks.help']}/><button type="button" role="switch" aria-checked={draft.autoVerifyTeamTasks} aria-label={t['field.autoVerifyTeamTasks.title']} onClick={()=>patch('autoVerifyTeamTasks',!(draft.autoVerifyTeamTasks))} style={toggleStyle(draft.autoVerifyTeamTasks)}><span style={toggleThumbStyle(draft.autoVerifyTeamTasks)}/></button></div>
+      <div style={row}><Label title={t['field.autoVerifySubagents.title']} help={t['field.autoVerifySubagents.help']}/><button type="button" role="switch" aria-checked={draft.autoVerifySubagents} aria-label={t['field.autoVerifySubagents.title']} onClick={()=>patch('autoVerifySubagents',!draft.autoVerifySubagents)} style={toggleStyle(draft.autoVerifySubagents)}><span style={toggleThumbStyle(draft.autoVerifySubagents)}/></button></div>
       <div style={row}><Label title={t['field.autoVerifyPlanMode.title']} help={t['field.autoVerifyPlanMode.help']}/><button type="button" role="switch" aria-checked={draft.autoVerifyPlanMode} aria-label={t['field.autoVerifyPlanMode.title']} onClick={()=>patch('autoVerifyPlanMode',!(draft.autoVerifyPlanMode))} style={toggleStyle(draft.autoVerifyPlanMode)}><span style={toggleThumbStyle(draft.autoVerifyPlanMode)}/></button></div>
       <div style={row}><Label title={t['field.autoRouteMinConfidence.title']} help={t['field.autoRouteMinConfidence.help']}/>{numeric('autoRouteMinConfidence',0)}</div>
       <div style={row}><Label title={t['field.autoRouteMaxCandidates.title']} help={t['field.autoRouteMaxCandidates.help']}/>{numeric('autoRouteMaxCandidates',3)}</div>
@@ -123,9 +139,9 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     </section>
 
     <section style={group}><GroupTitle>{t['section.model']}</GroupTitle>
-      <div style={row}><Label title={t['field.provider.title']} help={t['field.provider.help']}/><select style={selectStyle} value={draft.provider} onChange={e=>{const provider=e.target.value;const first=loaded.groups.find(g=>g.id===provider)?.models[0];setDraft({...draft,provider,...(first?{model:first.id,reasoningEffort:first.reasoning?.defaultEffort}:{})})}}>{loaded.groups.map(g=><option key={g.id} value={g.id}>{g.name} · {g.id}</option>)}</select></div>
-      <div style={row}><Label title={t['field.model.title']} help={t['field.model.help']}/><select style={selectStyle} value={draft.model} onChange={e=>{const model=e.target.value;const found=models.find(m=>m.id===model);setDraft({...draft,model,...(found?.reasoning?.defaultEffort?{reasoningEffort:found.reasoning.defaultEffort}:{reasoningEffort:undefined})})}}>{models.map(m=><option key={m.id} value={m.id}>{m.name} · {m.id}</option>)}</select></div>
-      <div style={row}><Label title={t['field.reasoningEffort.title']} help={t['field.reasoningEffort.help']}/><select style={selectStyle} value={draft.reasoningEffort??''} onChange={e=>patch('reasoningEffort',e.target.value||undefined)}><option value="">{t['field.reasoningEffort.default']}</option>{efforts.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</select></div>
+      <div style={row}><Label title={t['field.provider.title']} help={t['field.provider.help']}/><select style={selectStyle} disabled={busy} aria-label={t['field.provider.title']} value={draft.provider} onChange={e=>{const provider=e.target.value;const first=loaded.groups.find(g=>g.id===provider)?.models[0];setDraft({...draft,provider,...(first?{model:first.id,reasoningEffort:first.reasoning?.defaultEffort}:{})})}}>{loaded.groups.map(g=><option key={g.id} value={g.id}>{g.name} · {g.id}</option>)}</select></div>
+      <div style={row}><Label title={t['field.model.title']} help={t['field.model.help']}/><select style={selectStyle} disabled={busy} aria-label={t['field.model.title']} value={draft.model} onChange={e=>{const model=e.target.value;const found=models.find(m=>m.id===model);setDraft({...draft,model,...(found?.reasoning?.defaultEffort?{reasoningEffort:found.reasoning.defaultEffort}:{reasoningEffort:undefined})})}}>{models.map(m=><option key={m.id} value={m.id}>{m.name} · {m.id}</option>)}</select></div>
+      <div style={row}><Label title={t['field.reasoningEffort.title']} help={t['field.reasoningEffort.help']}/><select style={selectStyle} disabled={busy} aria-label={t['field.reasoningEffort.title']} value={draft.reasoningEffort??''} onChange={e=>patch('reasoningEffort',e.target.value||undefined)}><option value="">{t['field.reasoningEffort.default']}</option>{efforts.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</select></div>
       <div style={row}><Label title={t['field.maxTokens.title']} help={t['field.maxTokens.help']}/>{numeric('maxTokens',1)}</div>
     </section>
 
@@ -175,10 +191,16 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [refresh, setRefresh] = useState(0)
+  // Data belongs to the range/session that produced it: keeping the previous
+  // range's numbers under an error banner reads as if they were current.
+  const queryKey = days + '|' + sessionOnly + '|' + String(sessionId ?? '')
+  const lastQueryKey = useRef<string | undefined>(undefined)
 
   useEffect(() => {
     const controller = new AbortController()
     setLoading(true); setError(null)
+    if (lastQueryKey.current !== undefined && lastQueryKey.current !== queryKey) setData(null)
+    lastQueryKey.current = queryKey
     const effectiveSessionId = sessionOnly && sessionId ? String(sessionId) : undefined
     const queryPayload = {
       fromMs: startOfRange(days),
@@ -196,10 +218,13 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
             return result.value as StatisticsOverview
           }
           if (result && result.ok === false) {
-            throw new Error(result.error?.message ?? t['stats.requestFailed'])
+            throw new EndpointError(result.error?.message ?? t['stats.requestFailed'])
           }
         } catch (rpcError) {
           if (controller.signal.aborted) throw rpcError
+          // A business rejection is the host's real answer; retrying it over the
+          // raw fetch endpoint would only duplicate the request and hide it.
+          if (rpcError instanceof EndpointError) throw rpcError
           console.warn('[llm-verifier] rpc.call failed, trying fetch fallback:', rpcError)
         }
       }
@@ -221,9 +246,10 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
         if (data && data.type === 'server-response' && data.result?.ok === true) {
           return data.result.value as StatisticsOverview
         }
-        throw new Error(data?.error?.message ?? data?.result?.error?.message ?? t['stats.requestFailed'])
+        throw new EndpointError(data?.error?.message ?? data?.result?.error?.message ?? t['stats.requestFailed'])
       } catch (fetchError) {
         if (controller.signal.aborted) throw fetchError
+        if (fetchError instanceof EndpointError) throw fetchError
         // Hosts without the exact Fetch route registry only answer on the plugin's own channel.
         if (rpc && typeof rpc.call === 'function') {
           const legacy = await rpc.call('/llm-verifier', 'statistics', queryPayload, controller.signal)
@@ -235,7 +261,7 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
 
     void fetchOverview()
       .then(overview => {
-        setData(overview)
+        if (!controller.signal.aborted) setData(overview)
       })
       .catch((cause: unknown) => {
         if (!controller.signal.aborted) setError(message(cause))
@@ -244,7 +270,7 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
         if (!controller.signal.aborted) setLoading(false)
       })
     return () => controller.abort()
-  }, [days, sessionOnly, sessionId, refresh, rpc, t])
+  }, [days, sessionOnly, sessionId, refresh, rpc, t, queryKey])
 
   const totals = data?.totals
   return <main style={{ height: '100%', overflow: 'auto', boxSizing: 'border-box', padding: '22px clamp(16px, 3vw, 38px) 48px', color: 'var(--dsw-text-primary)', background: 'radial-gradient(circle at 10% 0%, rgba(115,77,255,.09), transparent 32%), radial-gradient(circle at 100% 8%, rgba(47,197,201,.07), transparent 28%)' }}>
@@ -261,9 +287,9 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', padding: 3, borderRadius: 10, background: 'var(--dsw-surface-sunken)', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.12))' }}>
-            {[7, 30, 90].map(value => <button key={value} onClick={() => setDays(value)} style={{ border: 0, borderRadius: 7, padding: '6px 10px', cursor: 'pointer', color: days === value ? '#fff' : 'var(--dsw-text-secondary)', background: days === value ? '#3f68d8' : 'transparent' }}>{tFormat(t['stats.daysUnit'], { days: value })}</button>)}
+            {[7, 30, 90].map(value => <button key={value} aria-pressed={days === value} onClick={() => setDays(value)} style={{ border: 0, borderRadius: 7, padding: '6px 10px', cursor: 'pointer', color: days === value ? '#fff' : 'var(--dsw-text-secondary)', background: days === value ? '#3f68d8' : 'transparent' }}>{tFormat(t['stats.daysUnit'], { days: value })}</button>)}
           </div>
-          {Boolean(sessionId) && <button onClick={() => setSessionOnly(value => !value)} style={{ border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.15))', borderRadius: 9, padding: '7px 11px', cursor: 'pointer', color: 'var(--dsw-text-primary)', background: sessionOnly ? 'rgba(79,140,255,.18)' : 'var(--dsw-surface-sunken)' }}>{sessionOnly ? t['stats.currentSession'] : t['stats.allSessions']}</button>}
+          {Boolean(sessionId) && <button aria-pressed={sessionOnly} onClick={() => setSessionOnly(value => !value)} style={{ border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.15))', borderRadius: 9, padding: '7px 11px', cursor: 'pointer', color: 'var(--dsw-text-primary)', background: sessionOnly ? 'rgba(79,140,255,.18)' : 'var(--dsw-surface-sunken)' }}>{sessionOnly ? t['stats.currentSession'] : t['stats.allSessions']}</button>}
           <button title={t['stats.refresh']} onClick={() => setRefresh(value => value + 1)} style={{ display: 'grid', placeItems: 'center', width: 34, height: 34, borderRadius: 9, border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.15))', color: 'var(--dsw-text-primary)', background: 'var(--dsw-surface-sunken)', cursor: 'pointer' }}><IconRefreshOutline16 size={16} /></button>
         </div>
       </header>
@@ -288,7 +314,7 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
           <Metric label={t['metric.scoringMode']} value={compact(totals?.topLogprobScores ?? 0, lang)} note={tFormat(t['metric.scoringModeNote'], { explicit: compact(totals?.explicitTagScores ?? 0, lang) })} />
         </section>
         <section style={{ ...dashboardCard, padding: '18px 20px 16px' }}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}><strong>{t['chart.title']}</strong><span style={muted}>{sessionOnly ? t['stats.currentSession'] : t['stats.allSessions']}</span></div><TrendChart daily={data?.daily ?? []} days={days} lang={lang} /></section>
-        <section style={{ ...dashboardCard, padding: '18px 18px 8px', overflow: 'hidden' }}><div style={{ display: 'flex', justifyContent: 'space-between', margin: '0 2px 12px' }}><strong>{t['table.title']}</strong><span style={muted}>{tFormat(t['table.toolCount'], { count: data?.tools.length ?? 0 })}</span></div><div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 760 }}><thead><tr style={{ textAlign: 'left', color: 'var(--dsw-text-secondary)', background: 'var(--dsw-surface-sunken)' }}>{[t['table.colTool'], t['table.colInvocations'], t['table.colSuccessRate'], t['table.colAvgDuration'], t['table.colModelCalls'], t['table.colTokens'], t['table.colCacheHits'], t['table.colEstimatedCost']].map(value => <th key={value} style={{ padding: '10px 12px', fontWeight: 500 }}>{value}</th>)}</tr></thead><tbody>{(data?.tools ?? []).map(tool => <tr key={tool.toolName} style={{ borderTop: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.1))' }}><td style={{ padding: '13px 12px' }}><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: toolColors[tool.toolName] ?? '#8691a8', marginRight: 8 }} /><strong>{labels[tool.toolName] ?? tool.toolName}</strong><div style={{ ...muted, margin: '3px 0 0 16px' }}>{tool.toolName}</div></td><td style={{ padding: '13px 12px' }}>{compact(tool.invocations, lang)}</td><td style={{ padding: '13px 12px', color: tool.successRate >= .9 ? '#77d49b' : tool.successRate >= .7 ? '#e3bd63' : '#ed7777' }}>{(tool.successRate * 100).toFixed(1)}%</td><td style={{ padding: '13px 12px' }}>{duration(tool.averageDurationMs)}</td><td style={{ padding: '13px 12px' }}>{compact(tool.calls, lang)}</td><td style={{ padding: '13px 12px' }}>{compact(tool.tokens, lang)}</td><td style={{ padding: '13px 12px' }}>{tool.cacheHits}/{tool.cacheHits + tool.cacheMisses}</td><td style={{ padding: '13px 12px' }}>{money(tool.estimatedCostUsd)}</td></tr>)}{(data?.tools.length ?? 0) === 0 && <tr><td colSpan={8} style={{ padding: 28, textAlign: 'center', ...muted }}>{t['table.empty']}</td></tr>}</tbody></table></div></section>
+        <section style={{ ...dashboardCard, padding: '18px 18px 8px', overflow: 'hidden' }}><div style={{ display: 'flex', justifyContent: 'space-between', margin: '0 2px 12px' }}><strong>{t['table.title']}</strong><span style={muted}>{tFormat(t['table.toolCount'], { count: (data?.tools ?? []).length })}</span></div><div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 760 }}><thead><tr style={{ textAlign: 'left', color: 'var(--dsw-text-secondary)', background: 'var(--dsw-surface-sunken)' }}>{[t['table.colTool'], t['table.colInvocations'], t['table.colSuccessRate'], t['table.colAvgDuration'], t['table.colModelCalls'], t['table.colTokens'], t['table.colCacheHits'], t['table.colEstimatedCost']].map(value => <th key={value} style={{ padding: '10px 12px', fontWeight: 500 }}>{value}</th>)}</tr></thead><tbody>{(data?.tools ?? []).map(tool => <tr key={tool.toolName} style={{ borderTop: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.1))' }}><td style={{ padding: '13px 12px' }}><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: toolColors[tool.toolName] ?? '#8691a8', marginRight: 8 }} /><strong>{labels[tool.toolName] ?? tool.toolName}</strong><div style={{ ...muted, margin: '3px 0 0 16px' }}>{tool.toolName}</div></td><td style={{ padding: '13px 12px' }}>{compact(tool.invocations, lang)}</td><td style={{ padding: '13px 12px', color: tool.successRate >= .9 ? '#77d49b' : tool.successRate >= .7 ? '#e3bd63' : '#ed7777' }}>{(tool.successRate * 100).toFixed(1)}%</td><td style={{ padding: '13px 12px' }}>{duration(tool.averageDurationMs)}</td><td style={{ padding: '13px 12px' }}>{compact(tool.calls, lang)}</td><td style={{ padding: '13px 12px' }}>{compact(tool.tokens, lang)}</td><td style={{ padding: '13px 12px' }}>{tool.cacheHits}/{tool.cacheHits + tool.cacheMisses}</td><td style={{ padding: '13px 12px' }}>{money(tool.estimatedCostUsd)}</td></tr>)}{(data?.tools.length ?? 0) === 0 && <tr><td colSpan={8} style={{ padding: 28, textAlign: 'center', ...muted }}>{t['table.empty']}</td></tr>}</tbody></table></div></section>
         <section style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(290px,.45fr)', gap: 16, alignItems: 'start' }}><div style={{ ...dashboardCard, padding: '18px 18px 8px', overflow: 'hidden' }}><div style={{ display: 'flex', justifyContent: 'space-between', margin: '0 2px 12px' }}><strong>{t['recent.title']}</strong><span style={muted}>{t['recent.maxCount']}</span></div><div style={{ maxHeight: 360, overflow: 'auto' }}>{(data?.recent ?? []).map(item => <div key={item.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(170px,1fr) auto', gap: 12, padding: '11px 8px', borderTop: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.1))' }}><div><div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><span style={{ width: 7, height: 7, borderRadius: '50%', background: item.success ? '#59c985' : '#e76565' }} /><strong style={{ fontSize: 13 }}>{labels[item.toolName] ?? item.toolName}</strong><span style={muted}>{item.provider}/{item.model}</span></div>{!item.success && <div title={item.errorMessage} style={{ margin: '5px 0 0 15px', fontSize: 11, color: '#e76565', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.errorMessage ?? item.errorName}</div>}</div><div style={{ textAlign: 'right' }}><div style={{ fontSize: 12 }}>{duration(item.durationMs)}</div><div style={{ ...muted, marginTop: 3 }}>{dateTime(item.startedAt, lang)}</div></div></div>)}{(data?.recent.length ?? 0) === 0 && <div style={{ padding: 24, textAlign: 'center', ...muted }}>{t['recent.empty']}</div>}</div></div>
           <div style={{ ...dashboardCard, padding: '18px' }}><strong>{t['models.title']}</strong><div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>{(data?.models ?? []).map(model => <div key={model.provider + '\0' + model.model} style={{ padding: '11px 12px', borderRadius: 10, background: 'var(--dsw-surface-sunken)' }}><div style={{ fontWeight: 650, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis' }}>{model.model}</div><div style={{ ...muted, marginTop: 3 }}>{model.provider}</div><div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 9, fontSize: 12 }}><span>{tFormat(t['models.calls'], { calls: compact(model.calls, lang) })}</span><span>{tFormat(t['models.tokens'], { tokens: compact(model.tokens, lang) })}</span><strong>{money(model.estimatedCostUsd)}</strong></div></div>)}{(data?.models.length ?? 0) === 0 && <div style={muted}>{t['models.empty']}</div>}</div></div></section>
       </>}
@@ -333,16 +359,16 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.view',
     id: 'llm-verifier-statistics',
     order: 30,
-    label: detectLanguage() === 'zh' ? zh['slot.statistics'] : en['slot.statistics'],
+    label: () => (detectLanguage() === 'zh' ? zh['slot.statistics'] : en['slot.statistics']),
     inject: () => ({ rpc: connection.rpc }),
   }, StatisticsPage as never))
   const VERIFIER_TAB_KIND = 'llm-verifier'
   const VERIFIER_TAB_ID = 'dsh-llm-verifier'
 
-  const registerRightSidebar = (tabs: any) => {
-    if (!tabs || typeof tabs.register !== 'function') return
+  const registerRightSidebar = (tabs: any): (() => void) | undefined => {
+    if (!tabs || typeof tabs.register !== 'function') return undefined
     try {
-      tabs.register({
+      const disposer = tabs.register({
         id: VERIFIER_TAB_ID,
         kind: VERIFIER_TAB_KIND,
         priority: 'extension',
@@ -354,20 +380,28 @@ export function apply(ctx: ClientContext): void {
           icon: VerifierSidebarIcon,
         }],
       })
-    } catch {}
+      return typeof disposer === 'function' ? disposer : undefined
+    } catch (error) {
+      console.warn('[llm-verifier] sidebar tab registration failed:', error)
+      return undefined
+    }
   }
 
-  const existingTabs = typeof (ctx as any).get === 'function' ? (ctx as any).get('sidebarRightTabs') : undefined
-  if (existingTabs) {
-    registerRightSidebar(existingTabs)
-  }
+  // ctx.inject() already runs its callback as soon as the service exists, so an
+  // extra ctx.get() pre-check registered the same tab type twice; the registry
+  // throws on a duplicate id and that throw used to be swallowed. The returned
+  // disposer is owned by the injecting scope, so a reload cannot leave a stale
+  // tab definition behind.
   if (typeof (ctx as any).inject === 'function') {
     try {
       (ctx as any).inject(['sidebarRightTabs'], (subCtx: any) => {
         const subTabs = typeof subCtx?.get === 'function' ? subCtx.get('sidebarRightTabs') : (subCtx as any)?.sidebarRightTabs
-        if (subTabs) registerRightSidebar(subTabs)
+        const disposer = registerRightSidebar(subTabs)
+        if (disposer) subCtx.effect(() => disposer)
       })
-    } catch {}
+    } catch (error) {
+      console.warn('[llm-verifier] sidebar tab injection failed:', error)
+    }
   }
 
   ctx.slots.inject('sidebar.right.pane.tab' as never, () => ctx.slots.register({

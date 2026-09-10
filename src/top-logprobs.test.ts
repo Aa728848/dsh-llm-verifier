@@ -42,6 +42,15 @@ describe('TopLogprobCapabilityCache persistence', () => {
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
+  it('re-probes a mark that expires while the process is running', () => {
+    let now = 1_000_000
+    const cache = new TopLogprobCapabilityCache(undefined, () => now)
+    cache.markUnsupported('openai', 'gpt-5')
+    expect(cache.isUnsupported('openai', 'gpt-5')).toBe(true)
+    now += CAPABILITY_TTL_MS + 1
+    expect(cache.isUnsupported('openai', 'gpt-5')).toBe(false)
+  })
+
   it('ignores missing and corrupt capability files', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-caps-'))
     try {

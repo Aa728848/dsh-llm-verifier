@@ -131,6 +131,8 @@ export declare const zh: {
     'field.autoVerifyTeamTasks.help': string;
     'field.autoVerifyPlanMode.title': string;
     'field.autoVerifyPlanMode.help': string;
+    'field.autoVerifySubagents.title': string;
+    'field.autoVerifySubagents.help': string;
 };
 export type I18nDict = typeof zh;
 export declare const en: I18nDict;
@@ -268,6 +270,8 @@ export declare const dictionaries: {
         'field.autoVerifyTeamTasks.help': string;
         'field.autoVerifyPlanMode.title': string;
         'field.autoVerifyPlanMode.help': string;
+        'field.autoVerifySubagents.title': string;
+        'field.autoVerifySubagents.help': string;
     };
     en: {
         'settings.title': string;
@@ -402,6 +406,8 @@ export declare const dictionaries: {
         'field.autoVerifyTeamTasks.help': string;
         'field.autoVerifyPlanMode.title': string;
         'field.autoVerifyPlanMode.help': string;
+        'field.autoVerifySubagents.title': string;
+        'field.autoVerifySubagents.help': string;
     };
 };
 export declare const toolLabels: Record<'zh' | 'en', Record<string, string>>;

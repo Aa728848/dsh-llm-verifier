@@ -22,6 +22,15 @@ export declare const LETTERS: string[];
 export declare const SCALE_DESCRIPTION: string;
 export declare const DEFAULT_CRITERIA: Criterion[];
 export declare const DEFAULT_GROUND_TRUTH_NOTE = "**IMPORTANT:** Focus on observed tool and terminal output as ground truth. Do NOT trust the agent's self-assessment or claims of success.";
+/**
+ * Injected-content guardrail shared by every judge prompt.
+ *
+ * Trajectories embed raw tool output, file contents and model prose, so they can
+ * carry instructions aimed at the judge (including fake score tags). The
+ * delimited blocks are declared data-only; the required verdict is restated as
+ * the only thing that may follow the analysis.
+ */
+export declare const UNTRUSTED_EVIDENCE_NOTE: string;
 export declare function normalizeScoreLetter(token: string): string | undefined;
 export declare function extractScore(completion: CompletionLogprobs, tag: string): number;
 export declare function buildPairwisePrompt(problem: string, traceA: string, traceB: string, criterion: Criterion, groundTruthNote?: string): string;

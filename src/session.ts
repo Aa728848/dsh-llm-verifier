@@ -77,7 +77,14 @@ export function redactText(text: string, patterns: readonly string[] = DEFAULT_R
 export function sanitizeVerifierText(text: string, maxChars: number, patterns: readonly string[] = DEFAULT_REDACT_PATTERNS): string {
   if (!Number.isSafeInteger(maxChars) || maxChars < 1) throw new Error('llm-verifier: sanitizer maxChars must be a positive integer')
   const redacted = redactText(text, patterns).trim()
-  return redacted.length <= maxChars ? redacted : redacted.slice(0, maxChars) + '\n[Truncated ' + (redacted.length - maxChars) + ' characters]'
+  if (redacted.length <= maxChars) return redacted
+  // The truncation notice is part of the returned value, so it must fit inside
+  // the same budget. Callers such as boundDecision() treat maxChars as a hard
+  // cap, so appending the notice past the cap would reject the whole decision
+  // instead of using the truncated text.
+  const notice = '\n[Truncated ' + (redacted.length - maxChars) + ' characters]'
+  if (notice.length >= maxChars) return redacted.slice(0, maxChars)
+  return redacted.slice(0, maxChars - notice.length) + notice
 }
 
 export async function extractSession(agent: Agent, loadImage: (ref: Extract<ContentBlock, { type: 'image' }>['attachment']) => Promise<VerifierImage>, options: SessionExtractOptions = {}): Promise<SessionExtraction> {

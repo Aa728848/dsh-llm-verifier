@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { AutoVerificationBudget, analyzeAutoTask, automaticFeedback } from './auto.ts'
+import { AutoVerificationBudget, analyzeAutoTask, automaticFeedback, isSubagentSession } from './auto.ts'
 
 function taskSession() {
   const session = Session.create('session-00000000-0000-4000-8000-000000000009' as never)
@@ -68,6 +68,14 @@ describe('automatic verification policy', () => {
     call(session, 'read', 'eight')
     call(session, 'pwsh', 'nine')
     expect(budget.claim(agent, analyzeAutoTask(session.events, policy), policy)).toBe(false)
+  })
+
+  it('recognizes delegated child sessions that must not be gated by default', () => {
+    expect(isSubagentSession(undefined)).toBe(false)
+    expect(isSubagentSession({ session: {} })).toBe(false)
+    expect(isSubagentSession({ session: { header: { id: 's1' } } })).toBe(false)
+    expect(isSubagentSession({ session: { header: { id: 's2', origin: 'subagent' } } })).toBe(true)
+    expect(isSubagentSession({ session: { header: { id: 's3', parentSession: 's1' } } })).toBe(true)
   })
 
   it('builds actionable low-score feedback', () => {

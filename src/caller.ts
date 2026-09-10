@@ -71,48 +71,74 @@ function usage(attempts: number, value = {} as { inputTokens?: number; outputTok
   return { calls: 1, attempts, retries: attempts - 1, inputTokens: value.inputTokens ?? 0, cachedInputTokens: (value.cacheReadTokens ?? 0) + (value.cacheWriteTokens ?? 0), outputTokens: value.outputTokens ?? 0, reasoningTokens: value.reasoningTokens ?? 0 }
 }
 
-async function callExplicitTag(config: VerifierClientConfig, prompt: string, signal?: AbortSignal, images?: readonly VerifierImage[]): Promise<VerifierCompletion> {
+/** Transient failures worth another attempt; anything else fails fast. */
+const RETRYABLE_MESSAGE = /rate|quota|timeout|timed out|temporar|network|fetch|socket|5\d\d/i
+
+/**
+ * Run one logical verifier request under the configured timeout, retrying
+ * transient failures with exponential backoff.
+ *
+ * Every channel goes through this wrapper — including the direct top_logprobs
+ * transport, which used to bypass both the timeout and the retry budget.
+ * @param config - resolved verifier client configuration.
+ * @param signal - caller's abort signal (tool call or turn boundary).
+ * @param run - one attempt; receives its own deadline signal and 1-based attempt number.
+ * @returns The first successful completion.
+ */
+async function retrying<T>(config: VerifierClientConfig, signal: AbortSignal | undefined, run: (signal: AbortSignal, attempt: number) => Promise<T>): Promise<T> {
   let attempt = 0
   while (true) {
     attempt += 1
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(new Error('llm-verifier: request timed out')), config.timeoutMs)
+    let timedOut = false
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(new Error('llm-verifier: request timed out')) }, config.timeoutMs)
     const abort = () => controller.abort(signal?.reason)
     signal?.addEventListener('abort', abort, { once: true })
     try {
-      const content: ContentBlock[] = [{ type: 'text', text: prompt }]
-      for (const image of images ?? []) {
-        const ref = await config.attachments.saveImage({ data: image.data, mediaType: image.mediaType })
-        content.push({ type: 'image', attachment: ref })
-      }
-      const messages = [createUserMessage({ content, source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } })]
-      const assembler = new BlockAssembler()
-      const options = deepFreeze({
-        provider: config.provider,
-        model: config.model,
-        ...(config.reasoningEffort ? { reasoningEffort: ReasoningEffortId(config.reasoningEffort) } : {}),
-        messages,
-        maxTokens: config.maxTokens,
-        temperature: 1,
-        signal: controller.signal,
-      })
-      for await (const chunk of config.llm.stream(options)) assembler.push(chunk)
-      const failed = failureMessage(assembler.finish)
-      if (failed !== undefined) throw new Error('llm-verifier: model call failed: ' + failed)
-      const text = assembler.blocks().filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text').map(block => block.text).join('')
-      if (!text.trim()) throw new Error('llm-verifier: selected DSH model produced no text')
-      // DSH adapters expose provider-neutral text/usage but not top-logprob candidates.
-      // extractScore() therefore uses the model's explicit final A–T tags.
-      return { text, tokens: [], positions: [], scoringMode: 'explicit-tag', usage: usage(attempt, assembler.usage) }
+      return await run(controller.signal, attempt)
     } catch (error) {
       if (signal?.aborted) throw signal.reason
-      if (attempt > config.maxRetries || !(error instanceof Error) || !/rate|quota|timeout|timed out|temporar|network|fetch|socket|5\d\d/i.test(error.message)) throw error
+      // A deadline abort is retryable even when the adapter wraps the reason in
+      // its own error type with an unrelated message.
+      const retryable = timedOut || (error instanceof Error && RETRYABLE_MESSAGE.test(error.message))
+      if (attempt > config.maxRetries || !retryable) throw error
       await delay(Math.min(30000, config.retryBaseDelayMs * 2 ** (attempt - 1) * (0.8 + Math.random() * 0.4)), signal)
     } finally {
       clearTimeout(timeout)
       signal?.removeEventListener('abort', abort)
     }
   }
+}
+
+/** One attachment per image object per process: retries must not duplicate attachments. */
+const imageRefs = new WeakMap<VerifierImage, Promise<unknown>>()
+
+async function callExplicitTag(config: VerifierClientConfig, prompt: string, signal: AbortSignal | undefined, images: readonly VerifierImage[] | undefined, attempt: number): Promise<VerifierCompletion> {
+  const content: ContentBlock[] = [{ type: 'text', text: prompt }]
+  for (const image of images ?? []) {
+    let pending = imageRefs.get(image)
+    if (pending === undefined) { pending = config.attachments.saveImage({ data: image.data, mediaType: image.mediaType }); imageRefs.set(image, pending) }
+    content.push({ type: 'image', attachment: await pending as never })
+  }
+  const messages = [createUserMessage({ content, source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } })]
+  const assembler = new BlockAssembler()
+  const options = deepFreeze({
+    provider: config.provider,
+    model: config.model,
+    ...(config.reasoningEffort ? { reasoningEffort: ReasoningEffortId(config.reasoningEffort) } : {}),
+    messages,
+    maxTokens: config.maxTokens,
+    temperature: 1,
+    signal,
+  })
+  for await (const chunk of config.llm.stream(options)) assembler.push(chunk)
+  const failed = failureMessage(assembler.finish)
+  if (failed !== undefined) throw new Error('llm-verifier: model call failed: ' + failed)
+  const text = assembler.blocks().filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text').map(block => block.text).join('')
+  if (!text.trim()) throw new Error('llm-verifier: selected DSH model produced no text')
+  // DSH adapters expose provider-neutral text/usage but not top-logprob candidates.
+  // extractScore() therefore uses the model's explicit final A–T tags.
+  return { text, tokens: [], positions: [], scoringMode: 'explicit-tag', usage: usage(attempt, assembler.usage) }
 }
 
 export class RequestLimiter {
@@ -137,29 +163,32 @@ export async function predictScoringChannel(config: VerifierClientConfig): Promi
   return config.topLogprobCapabilities.isUnsupported(config.provider, config.model) ? 'explicit-tag' : 'top-logprobs'
 }
 
-async function callAutomatic(config: VerifierClientConfig, prompt: string, signal?: AbortSignal, images?: readonly VerifierImage[]): Promise<VerifierCompletion> {
+async function callAutomatic(config: VerifierClientConfig, prompt: string, signal: AbortSignal | undefined, images: readonly VerifierImage[] | undefined, attempt: number): Promise<VerifierCompletion> {
   await config.topLogprobCapabilities.ensureLoaded()
   if (!config.topLogprobCapabilities.isUnsupported(config.provider, config.model)) {
     const route = await resolveTopLogprobRoute(config.ctx, config.provider)
     if (route !== undefined) {
-      try { return await callTopLogprobs(route, config.model, prompt, config.maxTokens, config.reasoningEffort, signal, images) }
+      try { return await callTopLogprobs(route, config.model, prompt, config.maxTokens, config.reasoningEffort, signal, images, attempt) }
       catch (error) {
+        // Both a capability rejection and a non-retryable provider rejection of
+        // the direct transport fall back to the DSH stream instead of failing
+        // the whole verification.
         if (!(error instanceof TopLogprobsUnsupportedError)) throw error
         config.topLogprobCapabilities.markUnsupported(config.provider, config.model)
       }
     } else config.topLogprobCapabilities.markUnsupported(config.provider, config.model)
   }
-  return callExplicitTag(config, prompt, signal, images)
+  return callExplicitTag(config, prompt, signal, images, attempt)
 }
 
 export async function callVerifier(config: VerifierClientConfig, prompt: string, signal?: AbortSignal, images?: readonly VerifierImage[]): Promise<VerifierCompletion> {
-  const invoke = () => callAutomatic(config, prompt, signal, images)
+  const invoke = () => retrying(config, signal, (attemptSignal, attempt) => callAutomatic(config, prompt, attemptSignal, images, attempt))
   return config.limiter === undefined ? invoke() : config.limiter.run(invoke, signal)
 }
 
 /** Plain-text verifier call for conservative JSON routing; probability labels are intentionally bypassed. */
 export async function callVerifierText(config: VerifierClientConfig, prompt: string, signal?: AbortSignal): Promise<VerifierCompletion> {
-  const invoke = () => callExplicitTag(config, prompt, signal)
+  const invoke = () => retrying(config, signal, (attemptSignal, attempt) => callExplicitTag(config, prompt, attemptSignal, undefined, attempt))
   return config.limiter === undefined ? invoke() : config.limiter.run(invoke, signal)
 }
 export function addUsage(target: UsageStats, source: UsageStats): void { for (const key of ['calls', 'attempts', 'retries', 'inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningTokens'] as const) target[key] += source[key] }

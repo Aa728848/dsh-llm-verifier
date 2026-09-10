@@ -14,8 +14,17 @@ export interface TopLogprobCompletion extends CompletionLogprobs {
 export declare class TopLogprobsUnsupportedError extends Error {
     constructor(message: string);
 }
+/**
+ * A provider-level rejection of the direct transport that is not a logprobs
+ * capability answer (bad request, auth, quota, malformed body). It downgrades
+ * this topic to the DSH stream instead of failing the whole verification.
+ */
+export declare class TopLogprobsRouteError extends TopLogprobsUnsupportedError {
+    readonly status?: number | undefined;
+    constructor(message: string, status?: number | undefined);
+}
 export declare function resolveTopLogprobRoute(ctx: Context, provider: string): Promise<TopLogprobRoute | undefined>;
-export declare function callTopLogprobs(route: TopLogprobRoute, model: string, prompt: string, maxTokens: number, reasoningEffort: string | undefined, signal?: AbortSignal, images?: readonly VerifierImage[]): Promise<TopLogprobCompletion>;
+export declare function callTopLogprobs(route: TopLogprobRoute, model: string, prompt: string, maxTokens: number, reasoningEffort: string | undefined, signal?: AbortSignal, images?: readonly VerifierImage[], attempt?: number): Promise<TopLogprobCompletion>;
 /** Marks older than this are dropped on hydration so a provider that later gains logprobs support is re-probed. */
 export declare const CAPABILITY_TTL_MS: number;
 /** Resolves the capability memory file beside the score cache inside the topic verifier directory. */
@@ -28,6 +37,7 @@ export declare class TopLogprobCapabilityCache {
     private hydrating;
     private writing;
     constructor(file?: string | undefined, now?: () => number);
+    /** Expired marks are dropped so a provider that later gains logprobs support is re-probed. */
     isUnsupported(provider: string, model: string): boolean;
     /** Hydrates persisted marks once; in-process marks always win over file contents. */
     ensureLoaded(): Promise<void>;

@@ -88,19 +88,48 @@ interface EvidenceIndex {
     teamTasks: Map<number, TeamTaskItem[]>;
 }
 export declare function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceIndex | undefined;
-export declare function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandidates?: number, maxItemChars?: number): RouteDecision | undefined;
+export declare function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandidates?: number, maxItemChars?: number, maxInputChars?: number): RouteDecision | undefined;
 export declare function semanticRouteHint(events: readonly SessionEvent[]): boolean;
-export declare function buildSemanticRoutePrompt(problem: string, events: readonly SessionEvent[], maxCandidates: number, maxItemChars?: number): string;
+export declare function buildSemanticRoutePrompt(problem: string, events: readonly SessionEvent[], maxCandidates: number, maxItemChars?: number, maxInputChars?: number): string;
 export declare function parseSemanticRoute(text: string, maxCandidates?: number): SemanticRouteOutput | undefined;
-export declare function semanticDecision(output: SemanticRouteOutput, events: readonly SessionEvent[], maxItemChars?: number): RouteDecision | undefined;
+export declare function semanticDecision(output: SemanticRouteOutput, events: readonly SessionEvent[], maxItemChars?: number, maxInputChars?: number): RouteDecision | undefined;
+/**
+ * Estimated model calls for one routed decision.
+ *
+ * Uses the real tournament shape (ring edges + pivot-round edges x criteria x
+ * repeats) instead of a flat per-candidate constant, which over-reserved by
+ * roughly an order of magnitude and silently rejected legitimate selections.
+ * @param decision - the routed decision about to run.
+ * @param repeats - evaluation repeats per criterion.
+ * @param criteriaCount - number of criteria evaluated per comparison.
+ * @returns The planned model-call count, never below 1.
+ */
+export declare function estimateRoutedCalls(decision: RouteDecision, repeats: number, criteriaCount: number): number;
 export declare function boundDecision(decision: RouteDecision | undefined, policy: RouterPolicy): RouteDecision | undefined;
 export declare class AutoVerifierRouter {
     private readonly states;
+    /** Agent ids that already received this task's budget-exhaustion notice. */
+    private readonly exhaustedNotices;
     private serial;
     private state;
     reserve(agent: RoutedAgent, phase: RoutePhase, fingerprint: string, expectedCalls: number, policy: RouterPolicy): Reservation | undefined;
     commit(agent: RoutedAgent, reservation: Reservation, evidenceSeq?: number): boolean;
     fail(agent: RoutedAgent, reservation: Reservation, strict: boolean): void;
+    /**
+     * Claim this task's single budget-exhaustion notice.
+     *
+     * Once the task/session budget is spent no reservation can ever be granted
+     * again, so the states that demand strict verification (strictBlocked,
+     * finalRequiredFromSeq) can never be cleared by a commit. Steering on every
+     * stop boundary would then hold the turn open forever — the harness has no
+     * turn budget — so the notice is emitted at most once per task and the
+     * remaining stop boundaries close normally.
+     * @param agent - Agent whose task is out of budget.
+     * @returns True when the caller should steer the notice now.
+     */
+    claimExhaustedNotice(agent: RoutedAgent): boolean;
+    /** Whether the task or session budget cannot cover one more routed decision. */
+    budgetExhausted(agent: RoutedAgent, expectedCalls: number, policy: RouterPolicy): boolean;
     /** Whether this exact fingerprint already passed within the current task. */
     completedFingerprint(agent: RoutedAgent, fingerprint: string): boolean;
     finalRequired(agent: RoutedAgent): number | undefined;

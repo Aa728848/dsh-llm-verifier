@@ -13,6 +13,12 @@ export interface TopLogprobRoute {
 }
 export interface TopLogprobCompletion extends CompletionLogprobs { usage: UsageStats; scoringMode: 'top-logprobs' }
 export class TopLogprobsUnsupportedError extends Error { constructor(message: string) { super(message); this.name = 'TopLogprobsUnsupportedError' } }
+/**
+ * A provider-level rejection of the direct transport that is not a logprobs
+ * capability answer (bad request, auth, quota, malformed body). It downgrades
+ * this topic to the DSH stream instead of failing the whole verification.
+ */
+export class TopLogprobsRouteError extends TopLogprobsUnsupportedError { constructor(message: string, readonly status?: number) { super(message); this.name = 'TopLogprobsRouteError' } }
 
 function object(value: unknown): Record<string, unknown> | undefined { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined }
 function text(value: unknown): string | undefined { return typeof value === 'string' && value.trim() ? value.trim() : undefined }
@@ -49,7 +55,7 @@ export async function resolveTopLogprobRoute(ctx: Context, provider: string): Pr
   return { baseURL, ...(apiKey ? { apiKey } : {}), ...(headers ? { headers } : {}), deepSeekThinking: false }
 }
 
-export async function callTopLogprobs(route: TopLogprobRoute, model: string, prompt: string, maxTokens: number, reasoningEffort: string | undefined, signal?: AbortSignal, images?: readonly VerifierImage[]): Promise<TopLogprobCompletion> {
+export async function callTopLogprobs(route: TopLogprobRoute, model: string, prompt: string, maxTokens: number, reasoningEffort: string | undefined, signal?: AbortSignal, images?: readonly VerifierImage[], attempt = 1): Promise<TopLogprobCompletion> {
   const content: string | Record<string, unknown>[] = images?.length ? [{ type: 'text', text: prompt }, ...images.map(image => ({ type: 'image_url', image_url: { url: dataUrl(image) } }))] : prompt
   const thinking = route.deepSeekThinking && reasoningEffort ? reasoningEffort === 'off' ? { thinking: { type: 'disabled' } } : { thinking: { type: 'enabled' }, reasoning_effort: reasoningEffort } : {}
   const response = await fetch(endpoint(route.baseURL), {
@@ -60,11 +66,15 @@ export async function callTopLogprobs(route: TopLogprobRoute, model: string, pro
   const raw = await response.text()
   if (!response.ok) {
     const excerpt = raw.slice(0, 1000)
+    const message = 'llm-verifier: top_logprobs request failed with HTTP ' + response.status + ': ' + excerpt
     if ([400, 404, 405, 415, 422].includes(response.status) && /logprob|top_logprobs|unsupported|unknown (?:field|parameter)|unrecognized (?:field|parameter)|not support/i.test(excerpt)) throw new TopLogprobsUnsupportedError('provider rejected top_logprobs: HTTP ' + response.status + ' ' + excerpt)
-    throw new Error('llm-verifier: top_logprobs request failed with HTTP ' + response.status + ': ' + excerpt)
+    // Throttling and server faults stay generic so the shared retry wrapper can
+    // attempt again; every other rejection downgrades to the DSH stream.
+    if (response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500) throw new Error(message)
+    throw new TopLogprobsRouteError(message, response.status)
   }
   let body: Record<string, unknown>
-  try { body = object(JSON.parse(raw)) ?? {} } catch { throw new Error('llm-verifier: top_logprobs endpoint returned invalid JSON') }
+  try { body = object(JSON.parse(raw)) ?? {} } catch { throw new TopLogprobsRouteError('llm-verifier: top_logprobs endpoint returned invalid JSON', response.status) }
   const choices = Array.isArray(body.choices) ? body.choices : []
   const choice = object(choices[0])
   const message = object(choice?.message)
@@ -88,7 +98,7 @@ export async function callTopLogprobs(route: TopLogprobRoute, model: string, pro
   const completionDetails = object(rawUsage.completion_tokens_details) ?? {}
   const cached = Number(rawUsage.prompt_cache_hit_tokens ?? promptDetails.cached_tokens ?? 0) || 0
   const input = Number(rawUsage.prompt_tokens ?? 0) || 0
-  return { text: answer, tokens, positions, scoringMode: 'top-logprobs', usage: { calls: 1, attempts: 1, retries: 0, inputTokens: Math.max(0, input - cached), cachedInputTokens: cached, outputTokens: Number(rawUsage.completion_tokens ?? 0) || 0, reasoningTokens: Number(completionDetails.reasoning_tokens ?? 0) || 0 } }
+  return { text: answer, tokens, positions, scoringMode: 'top-logprobs', usage: { calls: 1, attempts: attempt, retries: attempt - 1, inputTokens: Math.max(0, input - cached), cachedInputTokens: cached, outputTokens: Number(rawUsage.completion_tokens ?? 0) || 0, reasoningTokens: Number(completionDetails.reasoning_tokens ?? 0) || 0 } }
 }
 
 /** Marks older than this are dropped on hydration so a provider that later gains logprobs support is re-probed. */
@@ -110,7 +120,14 @@ export class TopLogprobCapabilityCache {
 
   constructor(private readonly file?: string, private readonly now: () => number = Date.now) {}
 
-  isUnsupported(provider: string, model: string): boolean { return this.unsupported.has(provider + '\0' + model) }
+  /** Expired marks are dropped so a provider that later gains logprobs support is re-probed. */
+  isUnsupported(provider: string, model: string): boolean {
+    const key = provider + '\0' + model
+    const markedAt = this.unsupported.get(key)
+    if (markedAt === undefined) return false
+    if (this.now() - markedAt > CAPABILITY_TTL_MS) { this.unsupported.delete(key); return false }
+    return true
+  }
 
   /** Hydrates persisted marks once; in-process marks always win over file contents. */
   async ensureLoaded(): Promise<void> {

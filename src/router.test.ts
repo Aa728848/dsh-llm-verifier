@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { analyzeStructuredRoute, AutoVerifierRouter, buildSemanticRoutePrompt, parseSemanticRoute, semanticDecision, semanticRouteHint, type RouterPolicy } from './router.ts'
+import { analyzeStructuredRoute, AutoVerifierRouter, boundDecision, buildSemanticRoutePrompt, estimateRoutedCalls, parseSemanticRoute, semanticDecision, semanticRouteHint, type RouterPolicy } from './router.ts'
+import { sanitizeVerifierText } from './session.ts'
 
 function session() {
   const value = Session.create('session-00000000-0000-4000-8000-000000000077' as never)
@@ -27,6 +28,23 @@ describe('production structured routing', () => {
     expect(analyzeStructuredRoute(value.events)).toBeUndefined()
     expect(semanticRouteHint(value.events)).toBe(true)
   })
+  it('attaches the latest observed tool output to every progress checkpoint', () => {
+    const value = session()
+    const todos = [{ content: 'Implement', status: 'pending' as const }, { content: 'Test', status: 'pending' as const }]
+    value.append('todo/write', { todos })
+    tool(value, 'pwsh', 'run', 'all tests passed: 91 passed')
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    const decision = analyzeStructuredRoute(value.events, 8, 400, 800)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind === 'track') {
+      // A checkpoint rendered from todo text alone can never clear the threshold.
+      // Checkpoint 1 precedes any tool output, so it carries none; checkpoint 2
+      // must carry the run that proves the todos were actually completed.
+      expect(decision.steps[0]).not.toContain('Latest observed tool output')
+      expect(decision.steps[1]).toContain('all tests passed')
+      expect(decision.steps.every(step => step.length <= 400)).toBe(true)
+    }
+  })
   it('deduplicates identical todo snapshots', () => {
     const value = session()
     const todos = [{ content: 'Implement', status: 'in_progress' as const }, { content: 'Test', status: 'pending' as const }]
@@ -34,6 +52,17 @@ describe('production structured routing', () => {
     expect(analyzeStructuredRoute(value.events)).toBeUndefined()
     value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'in_progress' }] })
     expect(analyzeStructuredRoute(value.events)).toMatchObject({ kind: 'track', evidenceSeqs: expect.any(Array) })
+  })
+  it('keeps a decision whose items were truncated exactly to the per-item cap', () => {
+    const value = session()
+    const long = 'x'.repeat(900)
+    tool(value, 'workflow', 'w', JSON.stringify({ protocol: 'dsh-verifier-candidates', version: 1, groupId: 'g', candidates: [0, 1, 2].map(index => ({ id: 'c' + index, status: 'completed', content: long })) }))
+    const decision = analyzeStructuredRoute(value.events, 8, 200)
+    expect(decision).toBeDefined()
+    // The truncation notice is part of the sanitized value, so it must still fit
+    // inside the same cap — otherwise boundDecision() drops the whole route.
+    expect(sanitizeVerifierText(long, 200).length).toBeLessThanOrEqual(200)
+    expect(boundDecision(decision, { ...policy, maxItemChars: 200 })).toBeDefined()
   })
   it('redacts and bounds trusted candidate content', () => {
     const value = session(); tool(value, 'workflow', 'w', JSON.stringify({ protocol: 'dsh-verifier-candidates', version: 1, groupId: 'g', candidates: [{ id: 'a', status: 'completed', content: 'token = abc ' + 'x'.repeat(100) }, { id: 'b', status: 'completed', content: 'password: secret ' + 'y'.repeat(100) }] }))
@@ -49,6 +78,10 @@ describe('semantic evidence references', () => {
     expect(parseSemanticRoute(valid)).toMatchObject({ kind: 'compare', candidateCallIds: ['a', 'b'] })
     expect(parseSemanticRoute('```json\n' + valid + '\n```')).toBeUndefined()
     expect(parseSemanticRoute(JSON.stringify({ ...JSON.parse(valid), extra: true }))).toBeUndefined()
+    // A verbose justification is formatting noise, not a routing failure.
+    const verbose = parseSemanticRoute(JSON.stringify({ ...JSON.parse(valid), reason: 'because '.repeat(200) }))
+    expect(verbose?.kind).toBe('compare')
+    expect(verbose!.reason.length).toBe(500)
   })
   it('resolves only real paired call ids', () => {
     const value = session(); tool(value, 'subagent', 'a', 'candidate A'); tool(value, 'subagent', 'b', 'candidate B')
@@ -98,6 +131,32 @@ describe('transactional router state', () => {
     const first = router.reserve(agent, 'compare', 'route-a', 4, { ...policy, mode: 'strict' })!
     router.fail(agent, first, true); expect(router.strictBlocked(agent)).toBe(true)
     expect(router.reserve(agent, 'compare', 'route-b', 4, { ...policy, mode: 'strict' })).toBeDefined()
+  })
+  it('delivers the budget-exhaustion notice at most once per task', () => {
+    const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
+    expect(router.claimExhaustedNotice(agent)).toBe(true)
+    expect(router.claimExhaustedNotice(agent)).toBe(false)
+    // A new direct user task starts a fresh task budget and may notify again.
+    value.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'next task' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+    expect(router.claimExhaustedNotice(agent)).toBe(true)
+  })
+  it('estimates routed calls from the real tournament shape', () => {
+    const candidate = { id: 'c', groupId: 'g', label: 'c', content: 'x', callId: 'a', fromSeq: 1, toSeq: 2 }
+    const base = { source: 'structured' as const, confidence: 1, reason: 'r', fingerprint: 'f' }
+    expect(estimateRoutedCalls({ ...base, kind: 'compare', candidates: [candidate, candidate] }, 1, 3)).toBe(3)
+    expect(estimateRoutedCalls({ ...base, kind: 'track', steps: ['a', 'b'], checkpoints: [1, 2], evidenceSeqs: [1, 2] }, 2, 3)).toBe(2)
+    // 8 candidates: 8 ring edges + 10 pivot-round edges = 18 comparisons x 3 criteria.
+    const many = Array.from({ length: 8 }, () => candidate)
+    expect(estimateRoutedCalls({ ...base, kind: 'select', candidates: many }, 1, 3)).toBe(54)
+  })
+  it('reports budget exhaustion without touching reservations', () => {
+    const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
+    // policy caps the task at 48 model calls.
+    expect(router.budgetExhausted(agent, 48, policy)).toBe(false)
+    expect(router.budgetExhausted(agent, 49, policy)).toBe(true)
+    // The shipped default (64) covers a full 8-candidate tournament: 54 calls.
+    expect(router.budgetExhausted(agent, 54, { ...policy, maxModelCallsPerTask: 64 })).toBe(false)
+    expect(router.budgetExhausted(agent, 65, { ...policy, maxModelCallsPerTask: 64 })).toBe(true)
   })
   it('enforces manual mode and unified model-call budgets', () => {
     const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()

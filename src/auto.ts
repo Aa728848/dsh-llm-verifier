@@ -34,6 +34,18 @@ const CONSEQUENTIAL_TOOLS = new Set([
   'job_kill', 'workbench_session_delete', 'create_goal', 'update_goal',
 ])
 
+/**
+ * Whether an agent session is a delegated child rather than the operator's own
+ * topic. Child sessions are seeded with a real user message, so they look like
+ * a fresh task to {@link analyzeAutoTask}; gate them only when asked.
+ * @param agent - Agent (or any object exposing its session).
+ * @returns True for subagent and forked-child sessions.
+ */
+export function isSubagentSession(agent: { session?: unknown } | undefined): boolean {
+  const header = (agent?.session as { header?: { origin?: string; parentSession?: unknown } } | undefined)?.header
+  return header?.origin === 'subagent' || header?.parentSession !== undefined
+}
+
 function latestDirectUserSeq(events: readonly SessionEvent[]): number | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
@@ -100,6 +112,14 @@ interface SessionBudget {
   lastEvaluatedSeq: number
 }
 
+/**
+ * Session/task acceptance budget.
+ *
+ * The automatic verifier enforces its per-task and per-session budget through
+ * {@link AutoVerifierRouter} reservations, which also count the routing phases;
+ * this standalone counter is kept as a public utility for orchestrators that
+ * need the same accounting outside the router.
+ */
 export class AutoVerificationBudget {
   private readonly states = new Map<string, SessionBudget>()
 
