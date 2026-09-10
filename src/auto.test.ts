@@ -83,4 +83,13 @@ describe('automatic verification policy', () => {
     session.append('tool/code-dispatch', { subCallId: 'c3' as never, name: 'edit', arguments: '{}', isError: false, content: [{ type: 'text', text: 'done' }] })
     expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: true, toolCalls: 3, consequentialToolCalls: 1 })
   })
+
+  it('counts DSH 0.1.5 tool/ptc-dispatch events the same way', () => {
+    const session = taskSession()
+    session.append('tool/ptc-dispatch' as never, { subCallId: 'p1', name: 'read', arguments: '{}', isError: false, content: [{ type: 'text', text: 'data' }] } as never)
+    session.append('tool/ptc-dispatch' as never, { subCallId: 'p2', name: 'grep', arguments: '{}', isError: false, content: [{ type: 'text', text: 'match' }] } as never)
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work' })
+    session.append('tool/ptc-dispatch' as never, { subCallId: 'p3', name: 'edit', arguments: '{}', isError: false, content: [{ type: 'text', text: 'done' }] } as never)
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: true, toolCalls: 3, consequentialToolCalls: 1 })
+  })
 })

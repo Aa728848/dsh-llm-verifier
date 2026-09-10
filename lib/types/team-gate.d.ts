@@ -1,8 +1,17 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
 import type { TeamTaskItem } from './router.ts';
+/** One completed task and the sequence number of its completion. */
+export interface CompletedTeamTask {
+    task: TeamTaskItem;
+    seq: number;
+}
 export interface TeamTaskInspection {
+    /** Latest completion in the window; kept for callers that only need one. */
     latestCompletedTask?: TeamTaskItem;
     completedSeq?: number;
+    /** Every task completed in the window, one entry per task id, oldest first. */
+    completedTasks: CompletedTeamTask[];
+    /** Known non-deleted tasks, including completed ones. */
     activeTasks: TeamTaskItem[];
     hasRecentCompletedTask: boolean;
 }

@@ -3,6 +3,21 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { VerifierImage } from './caller.ts'
 
+/**
+ * Read one session's event log.
+ *
+ * DSH 0.1.5 replaced the `events` array with `snapshotEvents()`; older hosts
+ * expose the array directly. Both shapes are accepted so the plugin keeps
+ * working across the versions it declares support for.
+ * @param session - Agent session, or any object exposing one of the two shapes.
+ * @returns The session's events in log order, or an empty array.
+ */
+export function sessionEvents(session: unknown): readonly SessionEvent[] {
+  const candidate = session as { snapshotEvents?: () => readonly SessionEvent[]; events?: readonly SessionEvent[] } | undefined
+  if (typeof candidate?.snapshotEvents === 'function') return candidate.snapshotEvents()
+  return candidate?.events ?? []
+}
+
 export interface SessionExtractOptions {
   fromSeq?: number
   toSeq?: number
@@ -66,7 +81,7 @@ export function sanitizeVerifierText(text: string, maxChars: number, patterns: r
 }
 
 export async function extractSession(agent: Agent, loadImage: (ref: Extract<ContentBlock, { type: 'image' }>['attachment']) => Promise<VerifierImage>, options: SessionExtractOptions = {}): Promise<SessionExtraction> {
-  const all = agent.session.events as readonly SessionEvent[]
+  const all = sessionEvents(agent.session)
   const from = options.fromSeq ?? 0
   const to = options.toSeq ?? Number.MAX_SAFE_INTEGER
   const events = all.filter(event => event.seq >= from && event.seq <= to)

@@ -1,52 +1,25 @@
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { sanitizeVerifierText } from './session.ts'
 
-export interface PlanModeDetection {
-  hasExitPlanMode: boolean
-  callSeq?: number
-  planText?: string
+export interface PlanVerdict {
+  verdict: string
+  score: number
+  feedback: string
 }
 
-export function detectPlanExit(events: readonly SessionEvent[], fromSeq = 0): PlanModeDetection {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i]
-    if (event.seq < fromSeq) break
-    if (event.type === 'tool/call' && event.data.name === 'exit_plan_mode') {
-      let planText = ''
-      try {
-        const parsed = JSON.parse(event.data.arguments) as Record<string, unknown>
-        if (typeof parsed.plan === 'string' && parsed.plan.trim()) {
-          planText = parsed.plan.trim()
-        }
-      } catch {}
-      if (!planText) {
-        for (let j = i - 1; j >= 0; j--) {
-          const prev = events[j]
-          if (prev.seq < fromSeq) break
-          if (prev.type === 'assistant/message') {
-            const msg = (prev.data as { message?: { content?: readonly ContentBlock[] } }).message
-            if (Array.isArray(msg?.content)) {
-              const texts = msg.content
-                .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
-                .map(b => b.text)
-              if (texts.length > 0) {
-                planText = texts.join('\n').trim()
-                break
-              }
-            }
-          }
-        }
-      }
-      return { hasExitPlanMode: true, callSeq: event.seq, planText }
-    }
-  }
-  return { hasExitPlanMode: false }
+/**
+ * Read the plan markdown out of one `exit_plan_mode` argument object.
+ * @param args - Parsed tool arguments; anything but `{ plan: string }` yields ''.
+ * @returns Trimmed plan markdown, or '' when the call carries no plan.
+ */
+export function planFromArguments(args: unknown): string {
+  if (typeof args !== 'object' || args === null) return ''
+  const plan = (args as { plan?: unknown }).plan
+  return typeof plan === 'string' ? plan.trim() : ''
 }
 
 export function buildPlanPreReviewPrompt(problem: string, planText: string, maxChars = 20000): string {
   return [
-    'You are an expert independent technical plan verifier. A candidate implementation plan was submitted for human review.',
+    'You are an expert independent technical plan verifier. A candidate implementation plan is about to be submitted to the human for approval.',
     'Evaluate whether the plan is sound, executable, and comprehensive.',
     'Scoring criteria:',
     'A: Flawless, thorough, with clear steps, rigorous verification, edge cases handled.',
@@ -61,17 +34,33 @@ export function buildPlanPreReviewPrompt(problem: string, planText: string, maxC
     sanitizeVerifierText(planText, maxChars),
     '',
     'Output format:',
-    'Line 1: Verdict: <Single uppercase letter A-T>',
+    'The first line must be exactly "Verdict: <single uppercase letter A-T>" — one letter, nothing else on the line.',
     'Line 2: Summary: <One sentence assessment>',
     'Line 3+: Key strengths, blind spots, and verification guidance.',
   ].join('\n\n')
 }
 
-export function parsePlanReviewVerdict(text: string): { verdict: string; score: number; feedback: string } {
-  const match = /Verdict:\s*([A-T])/i.exec(text)
-  const verdict = match ? match[1].toUpperCase() : 'B'
-  // A is 1.0, T is 0.0
-  const index = verdict.charCodeAt(0) - 65
-  const score = Math.max(0, Math.min(1, 1 - index / 19))
-  return { verdict, score, feedback: text.trim() }
+/**
+ * Parse the `Verdict: <A-T>` line the judge prompts require.
+ *
+ * Markdown decoration around the required line is stripped first, so "**Verdict:
+ * A**", "- Verdict: B." or a numbered list marker still produce a grade — a
+ * formatting habit must never silently switch the gate off. Prose that is not a
+ * grade is still rejected: "Verdict: Failed" and "Verdict: Approved" carry no
+ * verdict letter, and an answer without a verdict line has no score at all —
+ * callers must skip such a review, never treat it as a pass. A is 1.0 and T is
+ * 0.0, matching the top-logprob A-T scale used by the judge prompts.
+ * @param text - Raw judge model output.
+ * @returns The parsed verdict, or undefined when no verdict line is present.
+ */
+export function parseVerdictLetter(text: string): PlanVerdict | undefined {
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.replace(/[*_`~#>]/g, ' ').replace(/^\s*(?:[-+]|\d+[.)])\s+/, ' ').trim()
+    const match = /^verdict\s*:\s*([A-Ta-t])\s*[.)]?$/i.exec(line)
+    if (match === null) continue
+    const verdict = (match[1] as string).toUpperCase()
+    const score = Math.max(0, Math.min(1, 1 - (verdict.charCodeAt(0) - 65) / 19))
+    return { verdict, score, feedback: text.trim() }
+  }
+  return undefined
 }

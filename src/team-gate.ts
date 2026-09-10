@@ -2,17 +2,29 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { TeamTaskItem } from './router.ts'
 import { sanitizeVerifierText } from './session.ts'
 
+/** One completed task and the sequence number of its completion. */
+export interface CompletedTeamTask {
+  task: TeamTaskItem
+  seq: number
+}
+
 export interface TeamTaskInspection {
+  /** Latest completion in the window; kept for callers that only need one. */
   latestCompletedTask?: TeamTaskItem
   completedSeq?: number
+  /** Every task completed in the window, one entry per task id, oldest first. */
+  completedTasks: CompletedTeamTask[]
+  /** Known non-deleted tasks, including completed ones. */
   activeTasks: TeamTaskItem[]
   hasRecentCompletedTask: boolean
 }
 
 export function inspectTeamTasks(events: readonly SessionEvent[], fromSeq = 0): TeamTaskInspection {
-  let latestCompletedTask: TeamTaskItem | undefined
-  let completedSeq: number | undefined
   const taskMap = new Map<string, TeamTaskItem>()
+  // Sequence of the newest completion per task id. Reopening or deleting a task
+  // clears its entry, so a stale completion can never outlive the task status it
+  // came from; completing the same task again records the new sequence.
+  const completionSeq = new Map<string, number>()
 
   for (const rawEvent of events) {
     const event = rawEvent as unknown as { type: string; seq: number; data: any }
@@ -20,19 +32,24 @@ export function inspectTeamTasks(events: readonly SessionEvent[], fromSeq = 0): 
       const data = event.data as { task?: TeamTaskItem }
       if (data?.task) {
         taskMap.set(data.task.id, { ...data.task })
-        if (event.seq >= fromSeq && data.task.status === 'completed') {
-          latestCompletedTask = { ...data.task }
-          completedSeq = event.seq
-        }
+        if (data.task.status === 'completed') completionSeq.set(data.task.id, event.seq)
+        else completionSeq.delete(data.task.id)
       }
     }
   }
 
+  const completedTasks: CompletedTeamTask[] = [...completionSeq.entries()]
+    .filter(([id, seq]) => seq >= fromSeq && taskMap.get(id)?.status === 'completed')
+    .map(([id, seq]) => ({ task: { ...(taskMap.get(id) as TeamTaskItem) }, seq }))
+    .sort((left, right) => left.seq - right.seq)
+  const latest = completedTasks.at(-1)
+
   return {
-    latestCompletedTask,
-    completedSeq,
+    latestCompletedTask: latest?.task,
+    completedSeq: latest?.seq,
+    completedTasks,
     activeTasks: [...taskMap.values()].filter(t => t.status !== 'deleted'),
-    hasRecentCompletedTask: latestCompletedTask !== undefined,
+    hasRecentCompletedTask: latest !== undefined,
   }
 }
 
@@ -56,7 +73,7 @@ export function buildTeamTaskVerificationPrompt(task: TeamTaskItem, executionTra
     'T: Unfulfilled, failed, or contradictory evidence.',
     '',
     'Output format:',
-    'Line 1: Verdict: <Single uppercase letter A-T>',
+    'The first line must be exactly "Verdict: <single uppercase letter A-T>" — one letter, nothing else on the line.',
     'Line 2: Summary: <One sentence evaluation of task fulfillment>',
     'Line 3+: Remaining gaps or next steps for the team.',
   ].filter(Boolean).join('\n\n')

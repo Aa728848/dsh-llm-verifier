@@ -1,5 +1,15 @@
-import type { SessionEvent, TodoItem } from '@deepseek-ai/dsh-session';
+import type { SessionEvent } from '@deepseek-ai/dsh-session';
 import type { AutoVerifyMode } from './auto.ts';
+/** One durable todo entry carried by `todo/write` snapshots (DSH 0.1.5 dropped the exported type). */
+export interface TodoItem {
+    content: string;
+    status: string;
+}
+/** The agent surface this router needs: an id and whatever the host exposes as its session. */
+interface RoutedAgent {
+    id: unknown;
+    session: unknown;
+}
 export type RoutedVerifierKind = 'compare' | 'select' | 'track';
 export type RoutePhase = 'semantic' | RoutedVerifierKind | 'final' | 'plan_review' | 'team_task';
 export interface CandidateArtifact {
@@ -88,36 +98,13 @@ export declare class AutoVerifierRouter {
     private readonly states;
     private serial;
     private state;
-    reserve(agent: {
-        id: unknown;
-        session: {
-            events: readonly SessionEvent[];
-        };
-    }, phase: RoutePhase, fingerprint: string, expectedCalls: number, policy: RouterPolicy): Reservation | undefined;
-    commit(agent: {
-        id: unknown;
-        session: {
-            events: readonly SessionEvent[];
-        };
-    }, reservation: Reservation, evidenceSeq?: number): boolean;
-    fail(agent: {
-        id: unknown;
-        session: {
-            events: readonly SessionEvent[];
-        };
-    }, reservation: Reservation, strict: boolean): void;
-    finalRequired(agent: {
-        id: unknown;
-        session: {
-            events: readonly SessionEvent[];
-        };
-    }): number | undefined;
-    strictBlocked(agent: {
-        id: unknown;
-        session: {
-            events: readonly SessionEvent[];
-        };
-    }): boolean;
+    reserve(agent: RoutedAgent, phase: RoutePhase, fingerprint: string, expectedCalls: number, policy: RouterPolicy): Reservation | undefined;
+    commit(agent: RoutedAgent, reservation: Reservation, evidenceSeq?: number): boolean;
+    fail(agent: RoutedAgent, reservation: Reservation, strict: boolean): void;
+    /** Whether this exact fingerprint already passed within the current task. */
+    completedFingerprint(agent: RoutedAgent, fingerprint: string): boolean;
+    finalRequired(agent: RoutedAgent): number | undefined;
+    strictBlocked(agent: RoutedAgent): boolean;
     release(agent: {
         id: unknown;
     }): void;

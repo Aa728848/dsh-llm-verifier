@@ -13,7 +13,7 @@ import {
 export { zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage, compact, money, duration, dateTime, type I18nDict }
 
 const NS = 'llm-verifier'
-interface Values { enabled: boolean; autoVerifyMode: 'manual'|'smart'|'strict'; autoVerifyThreshold: number; autoVerifyRepeats: number; autoVerifyMinToolCalls: number; autoVerifyMaxChars: number; autoVerifyMaxPerTask: number; autoVerifyMaxPerSession: number; autoRouteSemantic: boolean; autoRouteMinConfidence: number; autoRouteMaxCandidates: number; autoRouteMaxPerTask: number; autoRouteMaxPerSession: number; autoTrackCompletionThreshold: number; autoRouteMaxItemChars: number; autoRouteMaxInputChars: number; autoMaxModelCallsPerTask: number; autoMaxModelCallsPerSession: number; autoVerifyTeamTasks?: boolean; autoVerifyPlanMode?: boolean; provider: string; model: string; reasoningEffort?: string; maxTokens: number; maxConcurrency: number; maxRetries: number; timeoutMs: number; cacheMaxEntries: number; estimatedInputUsdPerMillion: number; estimatedOutputUsdPerMillion: number }
+interface Values { enabled: boolean; autoVerifyMode: 'manual'|'smart'|'strict'; autoVerifyThreshold: number; autoVerifyRepeats: number; autoVerifyMinToolCalls: number; autoVerifyMaxChars: number; autoVerifyMaxPerTask: number; autoVerifyMaxPerSession: number; autoRouteSemantic: boolean; autoRouteMinConfidence: number; autoRouteMaxCandidates: number; autoRouteMaxPerTask: number; autoRouteMaxPerSession: number; autoTrackCompletionThreshold: number; autoRouteMaxItemChars: number; autoRouteMaxInputChars: number; autoMaxModelCallsPerTask: number; autoMaxModelCallsPerSession: number; autoVerifyTeamTasks: boolean; autoVerifyPlanMode: boolean; provider: string; model: string; reasoningEffort?: string; maxTokens: number; maxConcurrency: number; maxRetries: number; timeoutMs: number; cacheMaxEntries: number; estimatedInputUsdPerMillion: number; estimatedOutputUsdPerMillion: number }
 interface Loaded { groups: readonly ModelProviderGroup[]; settings: SettingsNamespaceView; writable: boolean; failures: string[] }
 interface RunStats { calls: number; attempts: number; retries: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningTokens: number; cacheHits: number; cacheMisses: number; estimatedCostUsd: number; topLogprobScores: number; explicitTagScores: number }
 interface InvocationRecord { id: string; toolName: string; sessionId?: string; startedAt: number; finishedAt: number; durationMs: number; success: boolean; errorName?: string; errorMessage?: string; provider: string; model: string; stats: RunStats }
@@ -71,7 +71,7 @@ const muted: React.CSSProperties = { color: 'var(--dsw-text-secondary)', fontSiz
 const toolColors: Record<string, string> = { verifier_route_classify: '#d97706', verifier_compare: '#4f8cff', verifier_select: '#8b6df6', verifier_track: '#2fc5c9', verifier_current_session: '#f5a524' }
 
 function record(value: unknown): Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {} }
-function values(view: SettingsNamespaceView): Values { const v=record(view.value); const mode=v.autoVerifyMode==='manual'||v.autoVerifyMode==='strict'?v.autoVerifyMode:'smart'; return { enabled:v.enabled!==false,autoVerifyMode:mode,autoVerifyThreshold:Number(v.autoVerifyThreshold??.65),autoVerifyRepeats:Number(v.autoVerifyRepeats??1),autoVerifyMinToolCalls:Number(v.autoVerifyMinToolCalls??3),autoVerifyMaxChars:Number(v.autoVerifyMaxChars??80000),autoVerifyMaxPerTask:Number(v.autoVerifyMaxPerTask??2),autoVerifyMaxPerSession:Number(v.autoVerifyMaxPerSession??8),autoRouteSemantic:v.autoRouteSemantic!==false,autoRouteMinConfidence:Number(v.autoRouteMinConfidence??.9),autoRouteMaxCandidates:Number(v.autoRouteMaxCandidates??8),autoRouteMaxPerTask:Number(v.autoRouteMaxPerTask??2),autoRouteMaxPerSession:Number(v.autoRouteMaxPerSession??8),autoTrackCompletionThreshold:Number(v.autoTrackCompletionThreshold??.8),autoRouteMaxItemChars:Number(v.autoRouteMaxItemChars??20000),autoRouteMaxInputChars:Number(v.autoRouteMaxInputChars??60000),autoMaxModelCallsPerTask:Number(v.autoMaxModelCallsPerTask??48),autoMaxModelCallsPerSession:Number(v.autoMaxModelCallsPerSession??160),provider:String(v.provider??''),model:String(v.model??''),...(typeof v.reasoningEffort==='string'?{reasoningEffort:v.reasoningEffort}:{}),maxTokens:Number(v.maxTokens??32768),maxConcurrency:Number(v.maxConcurrency??8),maxRetries:Number(v.maxRetries??3),timeoutMs:Number(v.timeoutMs??300000),cacheMaxEntries:Number(v.cacheMaxEntries??10000),estimatedInputUsdPerMillion:Number(v.estimatedInputUsdPerMillion??0),estimatedOutputUsdPerMillion:Number(v.estimatedOutputUsdPerMillion??0) } }
+function values(view: SettingsNamespaceView): Values { const v=record(view.value); const mode=v.autoVerifyMode==='manual'||v.autoVerifyMode==='strict'?v.autoVerifyMode:'smart'; return { enabled:v.enabled!==false,autoVerifyMode:mode,autoVerifyThreshold:Number(v.autoVerifyThreshold??.65),autoVerifyRepeats:Number(v.autoVerifyRepeats??1),autoVerifyMinToolCalls:Number(v.autoVerifyMinToolCalls??3),autoVerifyMaxChars:Number(v.autoVerifyMaxChars??80000),autoVerifyMaxPerTask:Number(v.autoVerifyMaxPerTask??2),autoVerifyMaxPerSession:Number(v.autoVerifyMaxPerSession??8),autoRouteSemantic:v.autoRouteSemantic!==false,autoRouteMinConfidence:Number(v.autoRouteMinConfidence??.9),autoRouteMaxCandidates:Number(v.autoRouteMaxCandidates??8),autoRouteMaxPerTask:Number(v.autoRouteMaxPerTask??2),autoRouteMaxPerSession:Number(v.autoRouteMaxPerSession??8),autoTrackCompletionThreshold:Number(v.autoTrackCompletionThreshold??.8),autoRouteMaxItemChars:Number(v.autoRouteMaxItemChars??20000),autoRouteMaxInputChars:Number(v.autoRouteMaxInputChars??60000),autoMaxModelCallsPerTask:Number(v.autoMaxModelCallsPerTask??48),autoMaxModelCallsPerSession:Number(v.autoMaxModelCallsPerSession??160),autoVerifyTeamTasks:v.autoVerifyTeamTasks!==false,autoVerifyPlanMode:v.autoVerifyPlanMode!==false,provider:String(v.provider??''),model:String(v.model??''),...(typeof v.reasoningEffort==='string'?{reasoningEffort:v.reasoningEffort}:{}),maxTokens:Number(v.maxTokens??32768),maxConcurrency:Number(v.maxConcurrency??8),maxRetries:Number(v.maxRetries??3),timeoutMs:Number(v.timeoutMs??300000),cacheMaxEntries:Number(v.cacheMaxEntries??10000),estimatedInputUsdPerMillion:Number(v.estimatedInputUsdPerMillion??0),estimatedOutputUsdPerMillion:Number(v.estimatedOutputUsdPerMillion??0) } }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 function Label({title,help}:{title:string;help:string}) { return <div style={{minWidth:0}}><div style={{fontSize:14,fontWeight:400,lineHeight:'22px',color:'var(--dsw-alias-label-primary)'}}>{title}</div><div style={{fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-label-tertiary)',marginTop:2}}>{help}</div></div> }
 function GroupTitle({children}:{children:React.ReactNode}) { return <h3 style={groupTitle}>{children}</h3> }
@@ -102,8 +102,8 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     <section style={group}><GroupTitle>{t['section.autoVerify']}</GroupTitle>
       <div style={row}><Label title={t['field.autoVerifyMode.title']} help={t['field.autoVerifyMode.help']}/><select style={selectStyle} value={draft.autoVerifyMode} onChange={e=>patch('autoVerifyMode',e.target.value as Values['autoVerifyMode'])}><option value="manual">{t['field.autoVerifyMode.manual']}</option><option value="smart">{t['field.autoVerifyMode.smart']}</option><option value="strict">{t['field.autoVerifyMode.strict']}</option></select></div>
       <div style={row}><Label title={t['field.autoRouteSemantic.title']} help={t['field.autoRouteSemantic.help']}/><button type="button" role="switch" aria-checked={draft.autoRouteSemantic} aria-label={t['field.autoRouteSemantic.title']} onClick={()=>patch('autoRouteSemantic',!draft.autoRouteSemantic)} style={toggleStyle(draft.autoRouteSemantic)}><span style={toggleThumbStyle(draft.autoRouteSemantic)}/></button></div>
-      <div style={row}><Label title={t['field.autoVerifyTeamTasks.title']} help={t['field.autoVerifyTeamTasks.help']}/><button type="button" role="switch" aria-checked={draft.autoVerifyTeamTasks??true} aria-label={t['field.autoVerifyTeamTasks.title']} onClick={()=>patch('autoVerifyTeamTasks',!(draft.autoVerifyTeamTasks??true))} style={toggleStyle(draft.autoVerifyTeamTasks??true)}><span style={toggleThumbStyle(draft.autoVerifyTeamTasks??true)}/></button></div>
-      <div style={row}><Label title={t['field.autoVerifyPlanMode.title']} help={t['field.autoVerifyPlanMode.help']}/><button type="button" role="switch" aria-checked={draft.autoVerifyPlanMode??true} aria-label={t['field.autoVerifyPlanMode.title']} onClick={()=>patch('autoVerifyPlanMode',!(draft.autoVerifyPlanMode??true))} style={toggleStyle(draft.autoVerifyPlanMode??true)}><span style={toggleThumbStyle(draft.autoVerifyPlanMode??true)}/></button></div>
+      <div style={row}><Label title={t['field.autoVerifyTeamTasks.title']} help={t['field.autoVerifyTeamTasks.help']}/><button type="button" role="switch" aria-checked={draft.autoVerifyTeamTasks} aria-label={t['field.autoVerifyTeamTasks.title']} onClick={()=>patch('autoVerifyTeamTasks',!(draft.autoVerifyTeamTasks))} style={toggleStyle(draft.autoVerifyTeamTasks)}><span style={toggleThumbStyle(draft.autoVerifyTeamTasks)}/></button></div>
+      <div style={row}><Label title={t['field.autoVerifyPlanMode.title']} help={t['field.autoVerifyPlanMode.help']}/><button type="button" role="switch" aria-checked={draft.autoVerifyPlanMode} aria-label={t['field.autoVerifyPlanMode.title']} onClick={()=>patch('autoVerifyPlanMode',!(draft.autoVerifyPlanMode))} style={toggleStyle(draft.autoVerifyPlanMode)}><span style={toggleThumbStyle(draft.autoVerifyPlanMode)}/></button></div>
       <div style={row}><Label title={t['field.autoRouteMinConfidence.title']} help={t['field.autoRouteMinConfidence.help']}/>{numeric('autoRouteMinConfidence',0)}</div>
       <div style={row}><Label title={t['field.autoRouteMaxCandidates.title']} help={t['field.autoRouteMaxCandidates.help']}/>{numeric('autoRouteMaxCandidates',3)}</div>
       <div style={row}><Label title={t['field.autoRouteMaxPerTask.title']} help={t['field.autoRouteMaxPerTask.help']}/>{numeric('autoRouteMaxPerTask',1)}</div>
@@ -204,23 +204,33 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
         }
       }
 
-      const response = await fetch('/api/llm-verifier/statistics', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(queryPayload),
-        signal: controller.signal,
-      })
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText || t['stats.requestFailed']}`)
+      try {
+        const response = await fetch('/api/llm-verifier/statistics', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(queryPayload),
+          signal: controller.signal,
+        })
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText || t['stats.requestFailed']}`)
+        }
+        const data = await response.json()
+        if (data && data.ok === true) {
+          return data.value as StatisticsOverview
+        }
+        if (data && data.type === 'server-response' && data.result?.ok === true) {
+          return data.result.value as StatisticsOverview
+        }
+        throw new Error(data?.error?.message ?? data?.result?.error?.message ?? t['stats.requestFailed'])
+      } catch (fetchError) {
+        if (controller.signal.aborted) throw fetchError
+        // Hosts without the exact Fetch route registry only answer on the plugin's own channel.
+        if (rpc && typeof rpc.call === 'function') {
+          const legacy = await rpc.call('/llm-verifier', 'statistics', queryPayload, controller.signal)
+          if (legacy && legacy.ok) return legacy.value as StatisticsOverview
+        }
+        throw fetchError
       }
-      const data = await response.json()
-      if (data && data.ok === true) {
-        return data.value as StatisticsOverview
-      }
-      if (data && data.type === 'server-response' && data.result?.ok === true) {
-        return data.result.value as StatisticsOverview
-      }
-      throw new Error(data?.error?.message ?? data?.result?.error?.message ?? t['stats.requestFailed'])
     }
 
     void fetchOverview()
@@ -326,18 +336,6 @@ export function apply(ctx: ClientContext): void {
     label: detectLanguage() === 'zh' ? zh['slot.statistics'] : en['slot.statistics'],
     inject: () => ({ rpc: connection.rpc }),
   }, StatisticsPage as never))
-  ctx.slots.inject('sidebar.panellist' as never, () => ctx.slots.register({
-    name: 'sidebar.panellist' as never,
-    id: 'llm-verifier',
-    order: 40,
-    label: detectLanguage() === 'zh' ? zh['slot.globalDashboard'] : en['slot.globalDashboard'],
-  } as never, VerifierSidebarIcon as never))
-  ctx.slots.inject('main' as never, () => ctx.slots.register({
-    name: 'main' as never,
-    key: 'llm-verifier',
-    inject: () => ({ rpc: connection.rpc }),
-  } as never, GlobalVerifierDashboard as never))
-
   const VERIFIER_TAB_KIND = 'llm-verifier'
   const VERIFIER_TAB_ID = 'dsh-llm-verifier'
 

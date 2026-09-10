@@ -73,6 +73,33 @@ import {
 } from 'dsh-llm-verifier/core'
 ```
 
+## 本地开发
+
+```bash
+pnpm install
+pnpm run build      # 生成 lib/，宿主加载的就是这份产物
+pnpm run typecheck  # 按 package.json 里锁定的 @deepseek-ai/dsh-* 版本检查类型
+pnpm test           # vitest 单元测试
+```
+
+当 DSH 本体是本地 checkout（默认位于同级目录 `../deepseek-harness`）时，用下面的命令按**实际运行版本**检查类型：
+
+```bash
+pnpm run typecheck:local   # 依据 tsconfig.local.json，把 @deepseek-ai/dsh-* 解析到本地 checkout 的 lib/types
+```
+
+两套类型定义可能不同步：例如 `Session.events` 在 DSH 0.1.5 已被 `snapshotEvents()` 取代，`tool/code-dispatch` 也已改名 `tool/ptc-dispatch`。插件内部的 `sessionEvents()` 同时兼容两种会话形态，两类派发事件都会计入证据，因此 0.1.1 与 0.1.5 宿主都可以运行。
+
+### 发布到 npm
+
+`pnpm publish`（或 `npm publish`）会先触发 `prepublishOnly` → `pnpm run verify:release`，即**按 npm 锁定版本**执行 typecheck、单元测试并重新构建 `lib/`，确保发出去的产物来自 npm 依赖而非本地 checkout 的类型；`typecheck:local` 只在本机核对，不参与发布。
+
+发布内容由 `package.json` 的 `files` 字段决定：`lib`（构建产物、source map 与 `lib/types` 类型声明）、`src`、`cordis.patch.yml`、`README.md`。`tsconfig.local.json` 之类的本机文件不会进入 tarball。
+
+`peerDependencies` 中逐个列出的 `^0.1.5-alpha.1`、`^0.1.5-rc.1` 等预发布范围是必需的：按 semver 规则，预发布版本只有在同一 `x.y.z` 段存在带预发布的比较符时才算满足，因此不能简化成 `>=0.1.1-rc.2 <0.2.0`（那样会漏掉 `0.1.2-alpha.*`、`0.1.5-rc.*` 等宿主）。
+
+统计数据有两条传输路径：优先走 `/api/llm-verifier/statistics`（Connection 的 exact Fetch 路由，带 Host/Origin 栅栏与浏览器鉴权），宿主较旧时回落到插件自己的 `/llm-verifier` RPC 通道（同样经过鉴权）。裸的 webServer 路由已被移除。
+
 ## 迁移来源
 
 本插件的核心评估理论、A–T 评分标尺、进度判定算法以及概率基准锦标赛（Probabilistic Pivot Tournament）均源自开源项目：

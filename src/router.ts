@@ -1,8 +1,17 @@
-import type { SessionEvent, TodoItem } from '@deepseek-ai/dsh-session'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { stableHash } from './cache.ts'
 import type { AutoVerifyMode } from './auto.ts'
-import { sanitizeVerifierText } from './session.ts'
+import { sanitizeVerifierText, sessionEvents } from './session.ts'
+
+/** One durable todo entry carried by `todo/write` snapshots (DSH 0.1.5 dropped the exported type). */
+export interface TodoItem {
+  content: string
+  status: string
+}
+
+/** The agent surface this router needs: an id and whatever the host exposes as its session. */
+interface RoutedAgent { id: unknown; session: unknown }
 
 export type RoutedVerifierKind = 'compare' | 'select' | 'track'
 export type RoutePhase = 'semantic' | RoutedVerifierKind | 'final' | 'plan_review' | 'team_task'
@@ -309,8 +318,8 @@ export class AutoVerifierRouter {
   private readonly states = new Map<string, RouterState>()
   private serial = 0
 
-  private state(agent: { id: unknown; session: { events: readonly SessionEvent[] } }): RouterState | undefined {
-    const taskStartSeq = latestDirectUserSeq(agent.session.events)
+  private state(agent: RoutedAgent): RouterState | undefined {
+    const taskStartSeq = latestDirectUserSeq(sessionEvents(agent.session))
     if (taskStartSeq === undefined) return undefined
     const id = String(agent.id)
     const state = this.states.get(id) ?? { taskStartSeq, taskAttempts: 0, sessionAttempts: 0, taskModelCalls: 0, sessionModelCalls: 0, completed: new Set(), failed: new Set(), strictBlocked: false }
@@ -319,7 +328,7 @@ export class AutoVerifierRouter {
     return state
   }
 
-  reserve(agent: { id: unknown; session: { events: readonly SessionEvent[] } }, phase: RoutePhase, fingerprint: string, expectedCalls: number, policy: RouterPolicy): Reservation | undefined {
+  reserve(agent: RoutedAgent, phase: RoutePhase, fingerprint: string, expectedCalls: number, policy: RouterPolicy): Reservation | undefined {
     if (policy.mode === 'manual') return undefined
     const state = this.state(agent)
     if (!state || state.inFlight || state.completed.has(fingerprint) || state.taskAttempts >= policy.maxPerTask || state.sessionAttempts >= policy.maxPerSession || state.taskModelCalls + expectedCalls > policy.maxModelCallsPerTask || state.sessionModelCalls + expectedCalls > policy.maxModelCallsPerSession) return undefined
@@ -328,7 +337,7 @@ export class AutoVerifierRouter {
     return reservation
   }
 
-  commit(agent: { id: unknown; session: { events: readonly SessionEvent[] } }, reservation: Reservation, evidenceSeq?: number): boolean {
+  commit(agent: RoutedAgent, reservation: Reservation, evidenceSeq?: number): boolean {
     const state = this.state(agent)
     if (!state || state.inFlight?.id !== reservation.id || state.taskStartSeq !== reservation.taskStartSeq) return false
     state.inFlight = undefined; state.completed.add(reservation.fingerprint); state.strictBlocked = false
@@ -337,13 +346,16 @@ export class AutoVerifierRouter {
     return true
   }
 
-  fail(agent: { id: unknown; session: { events: readonly SessionEvent[] } }, reservation: Reservation, strict: boolean): void {
+  fail(agent: RoutedAgent, reservation: Reservation, strict: boolean): void {
     const state = this.state(agent)
     if (!state || state.inFlight?.id !== reservation.id) return
     state.inFlight = undefined; state.failed.add(reservation.fingerprint); if (strict) state.strictBlocked = true
   }
 
-  finalRequired(agent: { id: unknown; session: { events: readonly SessionEvent[] } }): number | undefined { return this.state(agent)?.finalRequiredFromSeq }
-  strictBlocked(agent: { id: unknown; session: { events: readonly SessionEvent[] } }): boolean { return this.state(agent)?.strictBlocked ?? false }
+  /** Whether this exact fingerprint already passed within the current task. */
+  completedFingerprint(agent: RoutedAgent, fingerprint: string): boolean { return this.state(agent)?.completed.has(fingerprint) ?? false }
+
+  finalRequired(agent: RoutedAgent): number | undefined { return this.state(agent)?.finalRequiredFromSeq }
+  strictBlocked(agent: RoutedAgent): boolean { return this.state(agent)?.strictBlocked ?? false }
   release(agent: { id: unknown }): void { this.states.delete(String(agent.id)) }
 }

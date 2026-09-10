@@ -1,6 +1,17 @@
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
+import type { SessionEvent } from '@deepseek-ai/dsh-session';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { VerifierImage } from './caller.ts';
+/**
+ * Read one session's event log.
+ *
+ * DSH 0.1.5 replaced the `events` array with `snapshotEvents()`; older hosts
+ * expose the array directly. Both shapes are accepted so the plugin keeps
+ * working across the versions it declares support for.
+ * @param session - Agent session, or any object exposing one of the two shapes.
+ * @returns The session's events in log order, or an empty array.
+ */
+export declare function sessionEvents(session: unknown): readonly SessionEvent[];
 export interface SessionExtractOptions {
     fromSeq?: number;
     toSeq?: number;

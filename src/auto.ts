@@ -1,5 +1,6 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { sessionEvents } from './session.ts'
 
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict'
 
@@ -55,6 +56,9 @@ interface CodeDispatchData {
   content?: readonly { isError?: boolean }[]
 }
 
+/** Event names that carry one settled PTC/code dispatch, across the hosts the plugin supports. */
+const CODE_DISPATCH_TYPES = new Set(['tool/code-dispatch', 'tool/ptc-dispatch'])
+
 function isSuccessfulCodeDispatch(data: CodeDispatchData): boolean {
   if (data.isError === true) return false
   if (Array.isArray(data.content) && data.content.some(b => b.isError === true)) return false
@@ -70,7 +74,10 @@ export function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVer
   const successfulResults = new Set(relevant.filter((event): event is SessionEvent<'tool/result'> => event.type === 'tool/result' && event.data.error === undefined && event.data.message.content.every(block => block.isError !== true)).map(event => String(event.data.message.source.callId)))
   const pairedCalls = calls.filter(event => successfulResults.has(String(event.data.callId)))
 
-  const codeDispatches = relevant.filter(event => event.type === 'tool/code-dispatch').map(event => event.data as CodeDispatchData)
+  // Both names exist in the wild: 0.1.5 emits tool/ptc-dispatch, older hosts tool/code-dispatch.
+  const codeDispatches = relevant
+    .filter(event => CODE_DISPATCH_TYPES.has(event.type as string))
+    .map(event => (event as unknown as { data: CodeDispatchData }).data)
   const successfulDispatches = codeDispatches.filter(isSuccessfulCodeDispatch)
 
   const toolCalls = calls.filter(event => !VERIFIER_TOOLS.has(event.data.name)).length + codeDispatches.filter(d => !VERIFIER_TOOLS.has(d.name)).length
@@ -106,7 +113,7 @@ export class AutoVerificationBudget {
       state.taskAttempts = 0
       state.lastEvaluatedSeq = -1
     }
-    const lastSeq = agent.session.events.at(-1)?.seq ?? -1
+    const lastSeq = sessionEvents(agent.session).at(-1)?.seq ?? -1
     if (lastSeq <= state.lastEvaluatedSeq || state.taskAttempts >= policy.maxPerTask || state.sessionAttempts >= policy.maxPerSession) {
       this.states.set(id, state)
       return false

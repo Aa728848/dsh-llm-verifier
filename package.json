@@ -1,6 +1,6 @@
 {
   "name": "dsh-llm-verifier",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "Configurable DSH-native LLM verifier with a Web settings page",
   "repository": {
     "type": "git",
@@ -97,8 +97,7 @@
     "@deepseek-ai/dsh-credentials": "^0.1.1-rc.2"
   },
   "files": [
-    "lib/**/*.js",
-    "lib/**/*.d.ts",
+    "lib",
     "src",
     "cordis.patch.yml",
     "README.md"
@@ -106,7 +105,10 @@
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && tsdown",
     "typecheck": "tsc --noEmit -p tsconfig.build.json",
-    "test": "vitest run"
+    "typecheck:local": "tsc --noEmit -p tsconfig.local.json",
+    "test": "vitest run",
+    "verify:release": "pnpm run typecheck && pnpm test && pnpm run build",
+    "prepublishOnly": "pnpm run verify:release"
   },
   "license": "MIT"
 }
