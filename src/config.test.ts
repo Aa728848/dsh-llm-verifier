@@ -408,3 +408,26 @@ describe('config - temperature', () => {
     expect(() => resolveConfig({ temperature: NaN })).toThrow('llm-verifier: temperature must be between 0 and 2')
   })
 })
+describe('config - automatic verification repeats and budget', () => {
+  it('scores routing once and the final acceptance twice by default', () => {
+    const resolved = resolveConfig({})
+    // Routing stays a cheap single round; the gate that decides turn completion runs
+    // two rounds so the second one swaps A/B positions and cancels position bias.
+    expect(resolved.autoVerifyRepeats).toBe(1)
+    expect(resolved.autoVerifyFinalRepeats).toBe(2)
+  })
+
+  it('accepts an explicit final repeat count', () => {
+    expect(resolveConfig({ autoVerifyFinalRepeats: 4 }).autoVerifyFinalRepeats).toBe(4)
+    expect(Config({ autoVerifyFinalRepeats: 3 }).autoVerifyFinalRepeats).toBe(3)
+  })
+
+  it('rejects a non-positive final repeat count', () => {
+    expect(() => resolveConfig({ autoVerifyFinalRepeats: 0 })).toThrow(/autoVerifyFinalRepeats must be a positive safe integer/)
+  })
+
+  it('leaves headroom in the task model-call budget for the final acceptance', () => {
+    // 54 calls for an eight-candidate tournament + 6 for the final acceptance per judge.
+    expect(resolveConfig({}).autoMaxModelCallsPerTask).toBe(96)
+  })
+})

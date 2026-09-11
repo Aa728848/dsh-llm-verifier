@@ -4,6 +4,11 @@ export type AutoVerifyMode = 'manual' | 'smart' | 'strict';
 export interface AutoVerifyPolicy {
     mode: AutoVerifyMode;
     minToolCalls: number;
+    /**
+     * Attempt caps. {@link analyzeAutoTask} deliberately ignores them: it only
+     * answers "is this task eligible", while the caps are enforced by
+     * {@link AutoVerificationBudget} and by the router's reservation state.
+     */
     maxPerTask: number;
     maxPerSession: number;
     /** Acceptance threshold a manual `verifier_current_session` result must reach to count. */

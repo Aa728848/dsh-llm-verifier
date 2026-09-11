@@ -13,7 +13,7 @@ import { VerifierEngine, normalizeCriteria, type JudgeScore, type RunStats } fro
 import { loadVerifierImages } from './images.ts'
 import { extractSession, sanitizeVerifierText, sessionEvents } from './session.ts'
 import { analyzeAutoTask, automaticFeedback, isSubagentSession } from './auto.ts'
-import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRoutePrompt, estimateRoutedCalls, parseSemanticRoute, semanticDecision, semanticRouteHint, type RouteDecision } from './router.ts'
+import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRoutePrompt, estimateRoutedCalls, parseSemanticRoute, semanticDecision, semanticRouteHint, type RouteDecision, type RoutedVerifierKind } from './router.ts'
 import { DEFAULT_CRITERIA } from './core.ts'
 import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from './plan-gate.ts'
 import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from './team-gate.ts'
@@ -185,6 +185,33 @@ export function apply(ctx: Context, config: Config = {}): void {
       await statistics.record({ toolName, sessionId: String(agent.id), startedAt, success: false, ...details, provider: selected.provider, model: selected.model, stats: emptyRunStats(), verdict: { phase, outcome: 'error' } }).catch(() => {})
       throw error
     }
+  }
+  /** The registered tool each routable decision kind maps to. */
+  const ROUTED_TOOL_BY_KIND: Record<RoutedVerifierKind, VerifierToolName> = { compare: 'verifier_compare', select: 'verifier_select', track: 'verifier_track' }
+  /**
+   * Record a routed decision the plugin built but could not execute.
+   *
+   * A decision rejected by the evidence caps (or one whose semantic references
+   * disappeared) used to vanish without a trace: the dashboard showed a task that
+   * was never verified and gave no reason why. Nothing failed here — no model call
+   * was made — so the row is a successful invocation carrying an explanatory verdict.
+   * @param agent - Agent whose task produced the decision.
+   * @param kind - The routed decision kind that was dropped.
+   * @param phase - Routing phase that produced it (structured | semantic).
+   * @param outcome - Why it was dropped.
+   */
+  const recordSkippedRoute = async (agent: Agent, kind: RoutedVerifierKind, phase: string, outcome: string): Promise<void> => {
+    const selected = current()
+    await topic(agent.session.header).statistics.record({
+      toolName: ROUTED_TOOL_BY_KIND[kind],
+      sessionId: String(agent.id),
+      startedAt: Date.now(),
+      success: true,
+      provider: selected.provider,
+      model: selected.model,
+      stats: emptyRunStats(),
+      verdict: { phase, outcome },
+    }).catch(() => {})
   }
   const verifySession = async (agent: Agent, options: SessionVerificationOptions, signal: AbortSignal, phase = 'explicit'): Promise<SessionVerificationResult & { provider: string; model: string }> => record('verifier_current_session', agent, async () => {
     const extracted = await extractSession(agent, async (ref: ImageAttachmentRef) => { const stored = await services.attachments.readImage(ref, signal); return { data: stored.data, mediaType: stored.ref.mediaType } }, { fromSeq: options.fromSeq, toSeq: options.toSeq, includeAssistantText: options.includeAssistantText, redactPatterns: options.redactPatterns, maxChars: options.maxChars })
@@ -395,7 +422,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
     }
 
-    let decision = boundDecision(analyzeStructuredRoute(snapshot, selected.autoRouteMaxCandidates, selected.autoRouteMaxItemChars, selected.autoRouteMaxInputChars) as RouteDecision, policy)
+    const structured = analyzeStructuredRoute(snapshot, selected.autoRouteMaxCandidates, selected.autoRouteMaxItemChars, selected.autoRouteMaxInputChars) as RouteDecision
+    let decision = boundDecision(structured, policy)
+    if (structured !== undefined && decision === undefined) {
+      ctx.logger.warn('llm-verifier automatic ' + structured.kind + ' route dropped: its evidence exceeds the per-item/total routing caps (' + selected.autoRouteMaxItemChars + '/' + selected.autoRouteMaxInputChars + ' characters)')
+      await recordSkippedRoute(agent, structured.kind, 'structured', 'dropped-over-budget')
+    }
 
     if (decision === undefined && selected.autoRouteSemantic && (selected.autoVerifyMode === 'strict' || semanticRouteHint(snapshot))) {
       const fingerprint = stableHash({ phase: 'semantic', from: evidence.taskStartSeq, to: admittedLastSeq, model: selected.provider + '/' + selected.model })
@@ -407,7 +439,17 @@ export function apply(ctx: Context, config: Config = {}): void {
           if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return }
           const parsed = parseSemanticRoute(classified.text, selected.autoRouteMaxCandidates)
           if (!parsed) throw new Error('semantic router returned invalid strict JSON')
-          decision = parsed.confidence >= selected.autoRouteMinConfidence ? boundDecision(semanticDecision(parsed, snapshot, selected.autoRouteMaxItemChars, selected.autoRouteMaxInputChars) as RouteDecision, policy) : undefined
+          if (parsed.confidence >= selected.autoRouteMinConfidence) {
+            const resolved = semanticDecision(parsed, snapshot, selected.autoRouteMaxItemChars, selected.autoRouteMaxInputChars) as RouteDecision
+            decision = boundDecision(resolved, policy)
+            if (resolved !== undefined && decision === undefined) {
+              ctx.logger.warn('llm-verifier semantic ' + resolved.kind + ' route dropped: its evidence exceeds the per-item/total routing caps (' + selected.autoRouteMaxItemChars + '/' + selected.autoRouteMaxInputChars + ' characters)')
+              await recordSkippedRoute(agent, resolved.kind, 'semantic', 'dropped-over-budget')
+            } else if (resolved === undefined && parsed.kind !== 'none') {
+              ctx.logger.warn('llm-verifier semantic router returned ' + parsed.kind + ' but referenced evidence missing from the session snapshot')
+              await recordSkippedRoute(agent, parsed.kind, 'semantic', 'invalid-references')
+            }
+          }
           autoRouter.commit(agent, reservation)
         } catch (error) {
           autoRouter.fail(agent, reservation, selected.autoVerifyMode === 'strict')
@@ -425,8 +467,13 @@ export function apply(ctx: Context, config: Config = {}): void {
       const reservation = autoRouter.reserve(agent, decision.kind, decision.fingerprint, expectedCalls, policy)
       if (reservation === undefined) {
         // A refused reservation used to drop the whole routed decision silently.
+        // Three different refusals used to share one misleading message.
         const exhausted = autoRouter.budgetExhausted(agent, expectedCalls, policy)
-        ctx.logger.warn('llm-verifier automatic ' + decision.kind + ' route skipped: ' + (exhausted ? 'the task/session budget cannot cover ' + expectedCalls + ' model calls' : 'another verifier is active or this decision already ran'))
+        const alreadyRan = autoRouter.completedFingerprint(agent, decision.fingerprint)
+        const refusal = exhausted
+          ? 'the task/session budget cannot cover ' + expectedCalls + ' model calls'
+          : alreadyRan ? 'this exact evidence was already routed' : 'another verifier is active'
+        ctx.logger.warn('llm-verifier automatic ' + decision.kind + ' route skipped: ' + refusal)
         if (exhausted && selected.autoVerifyMode === 'strict' && autoRouter.claimExhaustedNotice(agent)) {
           agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier routing]\nA routed ' + decision.kind + ' check was skipped because the task/session model-call budget is exhausted. Do not conclude until directly relevant verification succeeds.' }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
           return
@@ -480,7 +527,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     const finalFromSeq = forcedFromSeq === undefined ? evidence.taskStartSeq : Math.min(evidence.taskStartSeq, forcedFromSeq)
     const finalFingerprint = stableHash({ phase: 'final', from: finalFromSeq, to: admittedLastSeq })
-    const finalReservation = autoRouter.reserve(agent, 'final', finalFingerprint, Math.max(1, 4 * selected.autoVerifyRepeats) * selected.judges.length, policy)
+    // Exact planning instead of a flat 4-per-repeat guess: one comparison per
+    // criterion per repeat, repeated for every judge in the ensemble.
+    const finalReservation = autoRouter.reserve(agent, 'final', finalFingerprint, Math.max(1, DEFAULT_CRITERIA.length * selected.autoVerifyFinalRepeats) * selected.judges.length, policy)
     if (!finalReservation) {
       // Same one-shot rule: a spent budget never grants another reservation, so
       // an unconditional steer here would livelock the turn.
@@ -491,7 +540,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       return
     }
     try {
-      const result = await verifySession(agent, { fromSeq: finalFromSeq, toSeq: admittedLastSeq, includeAssistantText: true, maxChars: selected.autoVerifyMaxChars, repeats: selected.autoVerifyRepeats }, signal, 'final')
+      const result = await verifySession(agent, { fromSeq: finalFromSeq, toSeq: admittedLastSeq, includeAssistantText: true, maxChars: selected.autoVerifyMaxChars, repeats: selected.autoVerifyFinalRepeats }, signal, 'final')
       if (!stillCurrent()) { autoRouter.fail(agent, finalReservation, false); return }
       const passed = result.winner === 'A' && result.score >= selected.autoVerifyThreshold
       if (passed) autoRouter.commit(agent, finalReservation)

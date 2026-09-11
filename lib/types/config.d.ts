@@ -22,6 +22,14 @@ export interface Config {
     autoVerifyMode?: AutoVerifyMode;
     autoVerifyThreshold?: number;
     autoVerifyRepeats?: number;
+    /**
+     * Scoring repeats for the FINAL session acceptance only.
+     *
+     * Even rounds swap A/B positions, and the final acceptance is the one automatic
+     * decision that gates turn completion, so it defaults to 2 even though the
+     * intermediate routes stay at 1 repeat for cost.
+     */
+    autoVerifyFinalRepeats?: number;
     autoVerifyMinToolCalls?: number;
     autoVerifyMaxChars?: number;
     autoVerifyMaxPerTask?: number;
@@ -60,6 +68,7 @@ export interface ResolvedConfig {
     autoVerifyMode: AutoVerifyMode;
     autoVerifyThreshold: number;
     autoVerifyRepeats: number;
+    autoVerifyFinalRepeats: number;
     autoVerifyMinToolCalls: number;
     autoVerifyMaxChars: number;
     autoVerifyMaxPerTask: number;

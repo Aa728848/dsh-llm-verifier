@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { zh, en, toolLabels, tFormat, detectLanguage, compact, dateTime } from './client-i18n.ts'
 import {
   resolveCacheDirOnSave,
+  WORST_CASE_ROUTE_CALLS_PER_JUDGE,
+  WORST_CASE_FINAL_CALLS_PER_JUDGE,
   WORST_CASE_TASK_PER_JUDGE,
   WORST_CASE_SESSION_PER_JUDGE,
   computeJudgeCount,
@@ -365,7 +367,10 @@ describe('resolveCacheDirOnSave rule', () => {
 
 describe('budget worst case and sanity warnings', () => {
   it('defines correct constants for worst case calls per judge', () => {
-    expect(WORST_CASE_TASK_PER_JUDGE).toBe(54)
+    // Routing (54) plus the final acceptance (3 criteria x 2 repeats) per judge.
+    expect(WORST_CASE_ROUTE_CALLS_PER_JUDGE).toBe(54)
+    expect(WORST_CASE_FINAL_CALLS_PER_JUDGE).toBe(6)
+    expect(WORST_CASE_TASK_PER_JUDGE).toBe(60)
     expect(WORST_CASE_SESSION_PER_JUDGE).toBe(160)
   })
 
@@ -377,9 +382,10 @@ describe('budget worst case and sanity warnings', () => {
   })
 
   it('computes worst case budgets proportional to judge count', () => {
-    expect(computeWorstCaseBudget(1)).toEqual({ worstCaseTask: 54, worstCaseSession: 160 })
-    expect(computeWorstCaseBudget(2)).toEqual({ worstCaseTask: 108, worstCaseSession: 320 })
-    expect(computeWorstCaseBudget(3)).toEqual({ worstCaseTask: 162, worstCaseSession: 480 })
+    // 54 routing calls (eight-candidate tournament) + 6 final-acceptance calls per judge.
+    expect(computeWorstCaseBudget(1)).toEqual({ worstCaseTask: 60, worstCaseSession: 160 })
+    expect(computeWorstCaseBudget(2)).toEqual({ worstCaseTask: 120, worstCaseSession: 320 })
+    expect(computeWorstCaseBudget(3)).toEqual({ worstCaseTask: 180, worstCaseSession: 480 })
   })
 
   it('suppresses budget warnings in manual mode', () => {
@@ -388,20 +394,20 @@ describe('budget worst case and sanity warnings', () => {
   })
 
   it('returns null when budgets meet or exceed worst case requirements', () => {
-    // 1 judge (0 extra): task worst case 54, session worst case 160
-    expect(evaluateBudgetWarning('smart', 0, 64, 240)).toBeNull()
-    // 2 judges (1 extra): task worst case 108, session worst case 320
-    expect(evaluateBudgetWarning('smart', 1, 108, 320)).toBeNull()
+    // 1 judge (0 extra): task worst case 60, session worst case 160
+    expect(evaluateBudgetWarning('smart', 0, 96, 240)).toBeNull()
+    // 2 judges (1 extra): task worst case 120, session worst case 320
+    expect(evaluateBudgetWarning('smart', 1, 120, 320)).toBeNull()
   })
 
   it('warns on task budget below worst case requirement', () => {
-    // 2 judges (1 extra): task worst case 108, session worst case 320
+    // 2 judges (1 extra): task worst case 120, session worst case 320
     const warning = evaluateBudgetWarning('smart', 1, 64, 350)
     expect(warning).not.toBeNull()
     expect(warning?.warnTask).toBe(true)
     expect(warning?.warnSession).toBe(false)
     expect(warning?.judgeCount).toBe(2)
-    expect(warning?.worstCaseTask).toBe(108)
+    expect(warning?.worstCaseTask).toBe(120)
     expect(warning?.worstCaseSession).toBe(320)
   })
 
@@ -420,7 +426,7 @@ describe('budget worst case and sanity warnings', () => {
     expect(warning?.warnTask).toBe(true)
     expect(warning?.warnSession).toBe(true)
     expect(warning?.judgeCount).toBe(3)
-    expect(warning?.worstCaseTask).toBe(162)
+    expect(warning?.worstCaseTask).toBe(180)
     expect(warning?.worstCaseSession).toBe(480)
   })
 })

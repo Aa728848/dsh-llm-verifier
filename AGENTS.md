@@ -33,7 +33,7 @@ pnpm run verify:release  # typecheck + test + build，prepublishOnly 会自动�
 | `cache.ts` | 评分持久化缓存、in-flight 合并、`stableHash` |
 | `engine.ts` | compare / select / track 编排、位置交换、统计汇总 |
 | `session.ts` | 会话提取、脱敏、`sanitizeVerifierText` 限长、事件访问兼容层 |
-| `router.ts` | 结构化 + 语义路由、证据索引、reservation/commit/fail 状态机、预算估算 |
+| `router.ts` | 结构化 + 语义路由、证据索引、reservation/commit/fail 状态机、预算估算、检查点渲染上限 |
 | `auto.ts` | 自动验收策略判定、预算计数、子 Agent 识别、低分反馈文案 |
 | `plan-gate.ts` / `team-gate.ts` | `exit_plan_mode` 预审 / Agent Teams 任务验收 |
 | `statistics.ts` | 调用记录持久化与多话题聚合 |
@@ -47,7 +47,7 @@ pnpm run verify:release  # typecheck + test + build，prepublishOnly 会自动�
 1. **改 `src/` 必须 `pnpm run build` 并连同 `lib/` 一起提交**。`lib/` 是入库产物（81 个文件），宿主加载它；只提交源码会让线上行为与源码脱节。
 2. **提交前跑 `pnpm run verify:release`**。提交信息用英文 conventional commits（`fix:` / `feat:` / `chore:`），版本号单独一次 `chore: bump ...`。
 3. **`sanitizeVerifierText` 的返回值必须 ≤ `maxChars`**，截断提示文字也算在预算内——`boundDecision` 用它做硬上限，超一个字符就会把整条自动路由丢掉。
-4. **凡进入提示词的证据都要限长**：单项 + 总量，自动路径与显式工具路径都要。新增字段时先问"它有没有上限、超了会怎样"。
+4. **凡进入提示词的证据都要限长**：单项 + 总量，自动路径与显式工具路径都要。新增字段时先问"它有没有上限、超了会怎样"。自动 `track` 的检查点数还要遵守 `router.ts` 的 `MAX_ROUTED_CHECKPOINTS`。**任何新增候选/检查点来源都必须走 `itemBudget()` 分摊总预算**，保持"Σ items ≤ autoRouteMaxInputChars 且单项 ≤ autoRouteMaxItemChars"，不要再用裸 `maxItemChars` 逐项截断——否则 `boundDecision` 会把整条决策丢掉（`index.ts` 现在会记一条 `dropped-over-budget` 并告警，但门控已经不生效了）。
 5. **每一次自动 steering 都必须消耗预算**。DSH 没有轮次预算（`agent/turn-stopping` 里的 steer 只会在同一轮里再开一步），预算耗尽后再无条件 steer = 活锁；只能用 `claimExhaustedNotice` 那样的一次性通知。
 6. **改缓存身份字段要同时升 `cache.ts` 里的 `version`**。提示词文本变化会自然失效，但 provider/model/effort/maxTokens/repeat 这类字段改了不升版会读到脏缓存。
 7. **评分通道能力必须运行时探测，禁止按厂商或模型名预设**；探测失败要能优雅降级，而不是让整次验收失败。
@@ -68,11 +68,12 @@ pnpm run verify:release  # typecheck + test + build，prepublishOnly 会自动�
 
 - **最终验收用固定字符串当基线**（`'(No useful work or verification was performed.)'`）且要求 `winner === 'A'`。语义待定，改动等于重新定义验收松紧，需要产品决策。
 - **概率期望没有质量下限**：只要 A–T 候选概率质量 > 0 就归一化。当前用户判官走显式标签通道，这条不生效。
-- **自动验收默认 1 轮**（不交换 A/B 位置），显式工具默认 2 轮。改默认值是成本决策。
+- **自动路由默认 1 轮、最终验收默认 2 轮**（`autoVerifyFinalRepeats`）：最终验收是唯一决定 turn 能否结束的自动判决，偶数轮会交换 A/B 位置以抵消位置偏好；`compare/select/track` 仍保持 1 轮控成本。改这两个默认值都是成本决策，且会同时改变 `client-i18n.ts` 里 `WORST_CASE_TASK_PER_JUDGE` 的含义与 UI 预算告警阈值。
+- **任务模型调用预算默认 96**（会话 240）：8 候选锦标赛 54 次 + 最终验收 6 次/裁判，64 的旧默认值会把最终验收挤到余量不足。
 - **验收期间会阻塞 turn 关闭**、**`engine.track` 不参与评分缓存**、**`resolveCallConfig` 每次调用做一次适配器 I/O**：都是已知取舍。
 - **子 Agent 会话默认不门控**（`autoVerifySubagents=false`）。子会话用真实用户消息播种，门控它们会额外消耗预算并反复 steering 子 Agent。
 - **同一字母的多个 token 变体概率必须相加**（`extractScore`）：`" A"` 与 `"A"` 是同一次采样的互斥事件，取 `max` 会系统性压低被拆分的字母并可能翻转判决。**这是与上游唯一的刻意偏差**：上游 `fine_grained_reward.py:678` 用的是 `max`（已核对源码而非猜测），因此 `parity.test.ts` 的 fixture 有意不含同字母多变体用例，新增 fixture 时不要往里面塞这种输入。要退回上游语义就改 `core.ts` 那一行，并同步改 README「与上游的一处已知差异」与本节；改这条评分语义必须同时升 `engine.ts` 里缓存身份的 `version`。
-- **判官温度默认 0.2**（旧版硬编码 1）：自动验收默认只跑 1 轮，低温度让同一次判决更可复现。温度是评分缓存身份的一部分，改默认值或改这个字段必须同时升 `engine.ts` 的缓存 `version`。
+- **判官温度默认 0.2**（旧版硬编码 1）：自动路由默认只跑 1 轮，低温度让同一次判决更可复现。温度是评分缓存身份的一部分，改默认值或改这个字段必须同时升 `engine.ts` 的缓存 `version`。
 - **统计的 `verdict` 是增量可选字段**：旧记录没有它也必须能加载（`isRecord` 只做宽松校验），看板对缺字段的行按旧样式渲染；`success` 恒为"模型调用是否抛错"，不要把它当验收结果。
 - **显式证据有硬上限**：一次显式调用合计 ≤ 24 万字符（`EXPLICIT_MAX_TOTAL_CHARS`），超出直接报错。放宽它要重新评估判官模型上下文。
 - **显式 `verifier_current_session` 不等于"已验收"**：只有该次复核达到阈值（`winner === 'A'` 且分数 ≥ 阈值）**并且之后没有实质工作**时才解除自动门控。判决失败、低于阈值、结果解析不出、或通过之后又改动过，都照常验收。别简化回"调用过即放行"。

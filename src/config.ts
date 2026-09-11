@@ -28,6 +28,14 @@ export interface Config {
   autoVerifyMode?: AutoVerifyMode
   autoVerifyThreshold?: number
   autoVerifyRepeats?: number
+  /**
+   * Scoring repeats for the FINAL session acceptance only.
+   *
+   * Even rounds swap A/B positions, and the final acceptance is the one automatic
+   * decision that gates turn completion, so it defaults to 2 even though the
+   * intermediate routes stay at 1 repeat for cost.
+   */
+  autoVerifyFinalRepeats?: number
   autoVerifyMinToolCalls?: number
   autoVerifyMaxChars?: number
   autoVerifyMaxPerTask?: number
@@ -67,6 +75,7 @@ export interface ResolvedConfig {
   autoVerifyMode: AutoVerifyMode
   autoVerifyThreshold: number
   autoVerifyRepeats: number
+  autoVerifyFinalRepeats: number
   autoVerifyMinToolCalls: number
   autoVerifyMaxChars: number
   autoVerifyMaxPerTask: number
@@ -113,6 +122,7 @@ export const Config: z<Config> = z.object({
   autoVerifyMode: z.union(['manual', 'smart', 'strict']).default('smart'),
   autoVerifyThreshold: z.number().min(0).max(1).default(0.65),
   autoVerifyRepeats: z.number().step(1).min(1).default(1),
+  autoVerifyFinalRepeats: z.number().step(1).min(1).default(2),
   autoVerifyMinToolCalls: z.number().step(1).min(1).default(3),
   autoVerifyMaxChars: z.number().step(1).min(1000).default(80000),
   autoVerifyMaxPerTask: z.number().step(1).min(1).default(2),
@@ -125,7 +135,7 @@ export const Config: z<Config> = z.object({
   autoTrackCompletionThreshold: z.number().min(0).max(1).default(0.8),
   autoRouteMaxItemChars: z.number().step(1).min(100).default(20000),
   autoRouteMaxInputChars: z.number().step(1).min(1000).default(60000),
-  autoMaxModelCallsPerTask: z.number().step(1).min(1).default(64),
+  autoMaxModelCallsPerTask: z.number().step(1).min(1).default(96),
   autoMaxModelCallsPerSession: z.number().step(1).min(1).default(240),
   autoVerifyTeamTasks: z.boolean().default(true),
   autoVerifyPlanMode: z.boolean().default(true),
@@ -191,6 +201,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) throw new Error('llm-verifier: temperature must be between 0 and 2')
   const values = {
     autoVerifyRepeats: config.autoVerifyRepeats ?? 1,
+    autoVerifyFinalRepeats: config.autoVerifyFinalRepeats ?? 2,
     autoVerifyMinToolCalls: config.autoVerifyMinToolCalls ?? 3,
     autoVerifyMaxChars: config.autoVerifyMaxChars ?? 80000,
     autoVerifyMaxPerTask: config.autoVerifyMaxPerTask ?? 2,
@@ -200,7 +211,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     autoRouteMaxPerSession: config.autoRouteMaxPerSession ?? 8,
     autoRouteMaxItemChars: config.autoRouteMaxItemChars ?? 20000,
     autoRouteMaxInputChars: config.autoRouteMaxInputChars ?? 60000,
-    autoMaxModelCallsPerTask: config.autoMaxModelCallsPerTask ?? 64,
+    autoMaxModelCallsPerTask: config.autoMaxModelCallsPerTask ?? 96,
     autoMaxModelCallsPerSession: config.autoMaxModelCallsPerSession ?? 240,
     maxTokens: config.maxTokens ?? 32768,
     timeoutMs: config.timeoutMs ?? 300000,

@@ -174,20 +174,22 @@ export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceInd
   return { problemSeq: taskStartSeq, calls: paired, todos, teamTasks }
 }
 
-function parseTrustedWorkflow(value: unknown, callId: string, callSeq: number, resultSeq: number, maxCandidates: number, maxItemChars: number): CandidateArtifact[] {
+function parseTrustedWorkflow(value: unknown, callId: string, callSeq: number, resultSeq: number, maxCandidates: number, maxItemChars: number, maxInputChars: number): CandidateArtifact[] {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return []
   const envelope = value as Record<string, unknown>
   if (envelope.protocol !== 'dsh-verifier-candidates' || envelope.version !== TRUSTED_WORKFLOW_VERSION || typeof envelope.groupId !== 'string' || !envelope.groupId.trim() || !Array.isArray(envelope.candidates)) return []
   const groupId = envelope.groupId.trim()
   const seen = new Set<string>()
   const candidates: CandidateArtifact[] = []
-  for (const item of envelope.candidates.slice(0, maxCandidates)) {
+  const considered = envelope.candidates.slice(0, maxCandidates)
+  const perItem = itemBudget(considered.length, maxItemChars, maxInputChars)
+  for (const item of considered) {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) return []
     const row = item as Record<string, unknown>
     if (row.status !== 'completed' || typeof row.id !== 'string' || !row.id.trim() || seen.has(row.id.trim()) || typeof row.content !== 'string' || !row.content.trim()) return []
     const id = row.id.trim(); seen.add(id)
     const label = typeof row.label === 'string' && row.label.trim() ? row.label.trim() : id
-    candidates.push({ id, groupId, label: sanitizeVerifierText(label, 120), content: sanitizeVerifierText(row.content, maxItemChars), callId, fromSeq: callSeq, toSeq: resultSeq })
+    candidates.push({ id, groupId, label: sanitizeVerifierText(label, Math.min(120, perItem)), content: sanitizeVerifierText(row.content, perItem), callId, fromSeq: callSeq, toSeq: resultSeq })
   }
   return candidates.length >= 2 ? candidates : []
 }
@@ -244,18 +246,58 @@ function checkpointEvidence(index: EvidenceIndex, seq: number, budget: number): 
 }
 
 /**
- * Render one checkpoint step as "state + the output that proves it".
- * @param index - evidence index of the current task.
- * @param label - checkpoint heading.
- * @param body - todo/team task rendering.
- * @param seq - checkpoint sequence number.
+ * Per-item character budget for a decision with a known item count.
+ *
+ * boundDecision() enforces the COMBINED cap, so spending maxItemChars per item
+ * drops the whole decision as soon as the items are numerous or large. Splitting
+ * the combined budget keeps both caps satisfied by construction; a single item
+ * still gets the full maxItemChars.
+ * @param count - number of items that will be rendered.
  * @param maxItemChars - hard per-item cap enforced by boundDecision().
- * @returns A step that always fits the per-item cap.
+ * @param maxInputChars - hard combined cap enforced by boundDecision().
+ * @returns The per-item character budget, never below 1.
  */
-function checkpointStep(index: EvidenceIndex, label: string, body: string, seq: number, maxItemChars: number, maxInputChars: number): string {
-  const evidence = checkpointEvidence(index, seq, Math.max(0, Math.min(Math.floor(maxInputChars / 2), Math.floor(maxItemChars / 2))))
-  const head = sanitizeVerifierText(label + body, Math.max(1, maxItemChars - evidence.length))
-  return head + evidence
+function itemBudget(count: number, maxItemChars: number, maxInputChars: number): number {
+  return Math.max(1, Math.min(maxItemChars, Math.floor(maxInputChars / Math.max(1, count))))
+}
+
+/**
+ * Upper bound on the checkpoints rendered into one routed track decision.
+ *
+ * boundDecision() rejects the WHOLE decision once the rendered steps exceed
+ * maxInputChars, while the number of durable snapshots is unbounded (every changed
+ * todo/team snapshot becomes a checkpoint). A long task therefore used to lose
+ * progress routing exactly when it needed it, so only the most recent checkpoints
+ * are kept and the combined input budget is split across them.
+ */
+export const MAX_ROUTED_CHECKPOINTS = 6
+
+interface CheckpointSource { seq: number; label: string; body: string }
+
+/**
+ * Render progress checkpoints as "state + the output that proves it".
+ *
+ * The result fits both caps by construction: each step is at most min(maxItemChars,
+ * maxInputChars / kept.length) characters, so the combined length can never exceed
+ * maxInputChars and boundDecision() no longer drops the whole route.
+ * @param index - evidence index of the current task.
+ * @param sources - checkpoints in chronological order.
+ * @param maxItemChars - hard per-item cap enforced by boundDecision().
+ * @param maxInputChars - hard combined cap enforced by boundDecision().
+ * @returns The rendered steps plus the sequence numbers they were built from.
+ */
+function renderCheckpointSteps(index: EvidenceIndex, sources: readonly CheckpointSource[], maxItemChars: number, maxInputChars: number): { steps: string[]; evidenceSeqs: number[]; omitted: number } {
+  const kept = sources.slice(-MAX_ROUTED_CHECKPOINTS)
+  const omitted = sources.length - kept.length
+  if (kept.length === 0) return { steps: [], evidenceSeqs: [], omitted: 0 }
+  const stepCap = itemBudget(kept.length, maxItemChars, maxInputChars)
+  const evidenceBudget = Math.max(0, Math.min(Math.floor(maxInputChars / 2), Math.floor(maxItemChars / 2), Math.floor(stepCap / 2)))
+  const steps = kept.map((source, position) => {
+    const note = position === 0 && omitted > 0 ? 'Earlier ' + omitted + ' checkpoint(s) omitted; showing the ' + kept.length + ' most recent.\n' : ''
+    const evidence = checkpointEvidence(index, source.seq, evidenceBudget)
+    return sanitizeVerifierText(note + source.label + source.body, Math.max(1, stepCap - evidence.length)) + evidence
+  })
+  return { steps, evidenceSeqs: kept.map(source => source.seq), omitted }
 }
 
 function canonicalTeamTaskSnapshots(index: EvidenceIndex): Array<{ seq: number; tasks: TeamTaskItem[] }> {
@@ -276,7 +318,7 @@ export function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandi
   const groups: CandidateArtifact[][] = []
   for (const [callId, pair] of index.calls) {
     if (pair.name !== 'workflow') continue
-    const candidates = parseTrustedWorkflow(strictJson(pair.text), callId, pair.callSeq, pair.resultSeq, maxCandidates, maxItemChars)
+    const candidates = parseTrustedWorkflow(strictJson(pair.text), callId, pair.callSeq, pair.resultSeq, maxCandidates, maxItemChars, maxInputChars)
     if (candidates.length >= 2) groups.push(candidates)
   }
   groups.sort((a, b) => b.length - a.length || b[0]!.toSeq - a[0]!.toSeq)
@@ -286,15 +328,13 @@ export function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandi
   if (!explicit.has('track')) {
     const snapshots = canonicalTodoSnapshots(index)
     if (snapshots.length >= 2 && snapshots.some(snapshot => snapshot.todos.length >= 2)) {
-      const steps = snapshots.map(snapshot => checkpointStep(index, 'Todo checkpoint seq ' + snapshot.seq + ':\n', snapshot.todos.map(todo => '- [' + todo.status + '] ' + todo.content).join('\n'), snapshot.seq, maxItemChars, maxInputChars))
-      const checkpoints = steps.map((_, i) => i + 1)
-      return { kind: 'track', source: 'structured', confidence: 1, reason: 'changed durable todo snapshots', fingerprint: stableHash({ kind: 'track', snapshots }), steps, checkpoints, evidenceSeqs: snapshots.map(snapshot => snapshot.seq) }
+      const rendered = renderCheckpointSteps(index, snapshots.map(snapshot => ({ seq: snapshot.seq, label: 'Todo checkpoint seq ' + snapshot.seq + ':\n', body: snapshot.todos.map(todo => '- [' + todo.status + '] ' + todo.content).join('\n') })), maxItemChars, maxInputChars)
+      return { kind: 'track', source: 'structured', confidence: 1, reason: 'changed durable todo snapshots', fingerprint: stableHash({ kind: 'track', snapshots }), steps: rendered.steps, checkpoints: rendered.steps.map((_, i) => i + 1), evidenceSeqs: rendered.evidenceSeqs }
     }
     const teamSnapshots = canonicalTeamTaskSnapshots(index)
     if (teamSnapshots.length >= 2) {
-      const steps = teamSnapshots.map(snapshot => checkpointStep(index, 'Team task checkpoint seq ' + snapshot.seq + ':\n', snapshot.tasks.map(task => '- [' + task.status + '] ' + task.subject + (task.description ? ' (' + task.description + ')' : '')).join('\n'), snapshot.seq, maxItemChars, maxInputChars))
-      const checkpoints = steps.map((_, i) => i + 1)
-      return { kind: 'track', source: 'structured', confidence: 1, reason: 'changed durable team tasks', fingerprint: stableHash({ kind: 'track', teamSnapshots }), steps, checkpoints, evidenceSeqs: teamSnapshots.map(snapshot => snapshot.seq) }
+      const rendered = renderCheckpointSteps(index, teamSnapshots.map(snapshot => ({ seq: snapshot.seq, label: 'Team task checkpoint seq ' + snapshot.seq + ':\n', body: snapshot.tasks.map(task => '- [' + task.status + '] ' + task.subject + (task.description ? ' (' + task.description + ')' : '')).join('\n') })), maxItemChars, maxInputChars)
+      return { kind: 'track', source: 'structured', confidence: 1, reason: 'changed durable team tasks', fingerprint: stableHash({ kind: 'track', teamSnapshots }), steps: rendered.steps, checkpoints: rendered.steps.map((_, i) => i + 1), evidenceSeqs: rendered.evidenceSeqs }
     }
   }
   return undefined
@@ -370,12 +410,13 @@ export function semanticDecision(output: SemanticRouteOutput, events: readonly S
   if (output.kind === 'track') {
     const snapshots = output.checkpointSeqs.map(seq => ({ seq, todos: index.todos.get(seq) })).filter((item): item is { seq: number; todos: TodoItem[] } => item.todos !== undefined)
     if (snapshots.length !== output.checkpointSeqs.length) return undefined
-    const steps = snapshots.map(snapshot => checkpointStep(index, 'Todo checkpoint seq ' + snapshot.seq + ':\n', snapshot.todos.map(todo => '- [' + todo.status + '] ' + todo.content).join('\n'), snapshot.seq, maxItemChars, maxInputChars))
-    return { kind: 'track', source: 'semantic', confidence: output.confidence, reason: output.reason, fingerprint: stableHash({ kind: 'track', seqs: output.checkpointSeqs, steps }), steps, checkpoints: steps.map((_, i) => i + 1), evidenceSeqs: output.checkpointSeqs }
+    const rendered = renderCheckpointSteps(index, snapshots.map(snapshot => ({ seq: snapshot.seq, label: 'Todo checkpoint seq ' + snapshot.seq + ':\n', body: snapshot.todos.map(todo => '- [' + todo.status + '] ' + todo.content).join('\n') })), maxItemChars, maxInputChars)
+    return { kind: 'track', source: 'semantic', confidence: output.confidence, reason: output.reason, fingerprint: stableHash({ kind: 'track', seqs: output.checkpointSeqs, steps: rendered.steps }), steps: rendered.steps, checkpoints: rendered.steps.map((_, i) => i + 1), evidenceSeqs: rendered.evidenceSeqs }
   }
+  const perItem = itemBudget(output.candidateCallIds.length, maxItemChars, maxInputChars)
   const candidates = output.candidateCallIds.map((callId, i) => {
     const pair = index.calls.get(callId)
-    return pair ? { id: callId, groupId: 'semantic', label: pair.name + ' ' + (i + 1), content: sanitizeVerifierText(pair.text, maxItemChars), callId, fromSeq: pair.callSeq, toSeq: pair.resultSeq } : undefined
+    return pair ? { id: callId, groupId: 'semantic', label: pair.name + ' ' + (i + 1), content: sanitizeVerifierText(pair.text, perItem), callId, fromSeq: pair.callSeq, toSeq: pair.resultSeq } : undefined
   }).filter((candidate): candidate is CandidateArtifact => candidate !== undefined)
   if (candidates.length !== output.candidateCallIds.length) return undefined
   const fingerprint = stableHash({ kind: output.kind, candidates })

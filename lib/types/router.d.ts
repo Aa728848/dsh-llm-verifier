@@ -98,6 +98,16 @@ interface EvidenceIndex {
     teamTasks: Map<number, TeamTaskItem[]>;
 }
 export declare function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceIndex | undefined;
+/**
+ * Upper bound on the checkpoints rendered into one routed track decision.
+ *
+ * boundDecision() rejects the WHOLE decision once the rendered steps exceed
+ * maxInputChars, while the number of durable snapshots is unbounded (every changed
+ * todo/team snapshot becomes a checkpoint). A long task therefore used to lose
+ * progress routing exactly when it needed it, so only the most recent checkpoints
+ * are kept and the combined input budget is split across them.
+ */
+export declare const MAX_ROUTED_CHECKPOINTS = 6;
 export declare function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandidates?: number, maxItemChars?: number, maxInputChars?: number): RouteDecision | undefined;
 export declare function semanticRouteHint(events: readonly SessionEvent[]): boolean;
 export declare function buildSemanticRoutePrompt(problem: string, events: readonly SessionEvent[], maxCandidates: number, maxItemChars?: number, maxInputChars?: number): string;

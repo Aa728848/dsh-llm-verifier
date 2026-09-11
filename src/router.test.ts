@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { analyzeStructuredRoute, AutoVerifierRouter, boundDecision, buildSemanticRoutePrompt, estimateRoutedCalls, latestDirectUserSeq, parseSemanticRoute, semanticDecision, semanticRouteHint, type RouterPolicy } from './router.ts'
+import { analyzeStructuredRoute, AutoVerifierRouter, boundDecision, buildSemanticRoutePrompt, estimateRoutedCalls, latestDirectUserSeq, MAX_ROUTED_CHECKPOINTS, parseSemanticRoute, semanticDecision, semanticRouteHint, type RouterPolicy } from './router.ts'
 import { sanitizeVerifierText } from './session.ts'
 
 function session() {
@@ -126,6 +126,84 @@ describe('semantic evidence references', () => {
         for (const step of decision.steps) expect(step.length, 'maxItemChars=' + maxItemChars).toBeLessThanOrEqual(maxItemChars)
       }
     }
+  })
+
+  it('caps routed checkpoints so a long task keeps its progress route', () => {
+    // Regression: every changed todo snapshot used to become a step, and once their
+    // combined length passed maxInputChars, boundDecision() dropped the whole route —
+    // so long tasks silently lost progress verification (smart mode even paid for a
+    // semantic classification that produced the same oversized decision).
+    const value = session()
+    for (let index = 0; index < 20; index += 1) {
+      tool(value, 'pwsh', 'run-' + index, 'output-' + index + ' ' + 'x'.repeat(5000))
+      value.append('todo/write', { todos: [{ content: 'Step ' + index, status: index === 19 ? 'completed' : 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    }
+    const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(decision).toMatchObject({ kind: 'track' })
+    if (decision?.kind !== 'track') return
+    expect(decision.steps).toHaveLength(MAX_ROUTED_CHECKPOINTS)
+    expect(decision.evidenceSeqs).toHaveLength(MAX_ROUTED_CHECKPOINTS)
+    // Only the most recent checkpoints survive, and the oldest kept one says so.
+    expect(decision.steps.join('\n')).not.toContain('Step 0')
+    expect(decision.steps[0]).toContain('Earlier 14 checkpoint(s) omitted')
+    expect(decision.steps.at(-1)).toContain('Step 19')
+    expect(decision.steps.every(step => step.length <= 20000)).toBe(true)
+    expect(decision.steps.reduce((sum, step) => sum + step.length, 0)).toBeLessThanOrEqual(60000)
+    expect(boundDecision(decision, { ...policy, maxItemChars: 20000, maxInputChars: 60000 })).toBeDefined()
+  })
+
+  it('splits the route input budget across candidates so a wide select survives', () => {
+    // Same failure class as the checkpoint cap: 8 candidates x maxItemChars exceeded
+    // the combined cap, and boundDecision() dropped the whole select.
+    const value = session()
+    tool(value, 'workflow', 'w', JSON.stringify({
+      protocol: 'dsh-verifier-candidates',
+      version: 1,
+      groupId: 'wide',
+      candidates: Array.from({ length: 8 }, (_, i) => ({ id: 'c' + i, label: 'C' + i, status: 'completed', content: 'candidate ' + i + ' ' + 'z'.repeat(20000) })),
+    }))
+    const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(decision?.kind).toBe('select')
+    if (decision?.kind !== 'select') return
+    expect(decision.candidates).toHaveLength(8)
+    expect(decision.candidates.every(candidate => candidate.content.length <= 20000)).toBe(true)
+    expect(decision.candidates.reduce((sum, candidate) => sum + candidate.content.length, 0)).toBeLessThanOrEqual(60000)
+    expect(boundDecision(decision, { ...policy, maxItemChars: 20000, maxInputChars: 60000 })).toBeDefined()
+  })
+
+  it('splits the route input budget across semantic candidates', () => {
+    // The classification call is already paid for here, so dropping the decision
+    // instead of routing it is pure waste.
+    const value = session()
+    const ids = Array.from({ length: 8 }, (_, i) => 'sem-' + i)
+    ids.forEach((id, i) => tool(value, 'workflow', id, 'semantic candidate ' + i + ' ' + 'q'.repeat(20000)))
+    const parsed = parseSemanticRoute(JSON.stringify({ kind: 'select', confidence: 0.95, reason: 'alternatives', candidateCallIds: ids, checkpointSeqs: [] }), 8)
+    expect(parsed?.kind).toBe('select')
+    const decision = semanticDecision(parsed!, value.events, 20000, 60000)
+    expect(decision?.kind).toBe('select')
+    if (decision?.kind !== 'select') return
+    expect(decision.candidates).toHaveLength(8)
+    expect(decision.candidates.reduce((sum, candidate) => sum + candidate.content.length, 0)).toBeLessThanOrEqual(60000)
+    expect(boundDecision(decision, { ...policy, maxItemChars: 20000, maxInputChars: 60000 })).toBeDefined()
+  })
+
+    it('caps semantic checkpoints with the same budget split', () => {
+    const value = session()
+    const seqs: number[] = []
+    for (let index = 0; index < 9; index += 1) {
+      tool(value, 'pwsh', 'run-' + index, 'output-' + index + ' ' + 'y'.repeat(4000))
+      value.append('todo/write', { todos: [{ content: 'Step ' + index, status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+      seqs.push(value.events.at(-1)!.seq)
+    }
+    const parsed = parseSemanticRoute(JSON.stringify({ kind: 'track', confidence: 0.95, reason: 'progress', candidateCallIds: [], checkpointSeqs: seqs }), 8)
+    expect(parsed?.kind).toBe('track')
+    const decision = semanticDecision(parsed!, value.events, 20000, 60000)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind !== 'track') return
+    expect(decision.steps).toHaveLength(MAX_ROUTED_CHECKPOINTS)
+    expect(decision.steps[0]).toContain('Earlier 3 checkpoint(s) omitted')
+    expect(decision.steps.reduce((sum, step) => sum + step.length, 0)).toBeLessThanOrEqual(60000)
+    expect(boundDecision(decision, { ...policy, maxItemChars: 20000, maxInputChars: 60000 })).toBeDefined()
   })
 
   it('routes progress tracking based on changed team/task snapshots', () => {

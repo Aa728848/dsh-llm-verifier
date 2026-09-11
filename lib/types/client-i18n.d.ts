@@ -39,6 +39,8 @@ export declare const zh: {
     'field.autoVerifyThreshold.help': string;
     'field.autoVerifyRepeats.title': string;
     'field.autoVerifyRepeats.help': string;
+    'field.autoVerifyFinalRepeats.title': string;
+    'field.autoVerifyFinalRepeats.help': string;
     'field.autoVerifyMinToolCalls.title': string;
     'field.autoVerifyMinToolCalls.help': string;
     'field.autoVerifyMaxChars.title': string;
@@ -127,6 +129,8 @@ export declare const zh: {
     'stats.outcome.below-threshold': string;
     'stats.outcome.tie': string;
     'stats.outcome.error': string;
+    'stats.outcome.dropped-over-budget': string;
+    'stats.outcome.invalid-references': string;
     'stats.winner.tie': string;
     'stats.verdict.winner': string;
     'stats.verdict.scoreThreshold': string;
@@ -218,6 +222,8 @@ export declare const dictionaries: {
         'field.autoVerifyThreshold.help': string;
         'field.autoVerifyRepeats.title': string;
         'field.autoVerifyRepeats.help': string;
+        'field.autoVerifyFinalRepeats.title': string;
+        'field.autoVerifyFinalRepeats.help': string;
         'field.autoVerifyMinToolCalls.title': string;
         'field.autoVerifyMinToolCalls.help': string;
         'field.autoVerifyMaxChars.title': string;
@@ -306,6 +312,8 @@ export declare const dictionaries: {
         'stats.outcome.below-threshold': string;
         'stats.outcome.tie': string;
         'stats.outcome.error': string;
+        'stats.outcome.dropped-over-budget': string;
+        'stats.outcome.invalid-references': string;
         'stats.winner.tie': string;
         'stats.verdict.winner': string;
         'stats.verdict.scoreThreshold': string;
@@ -394,6 +402,8 @@ export declare const dictionaries: {
         'field.autoVerifyThreshold.help': string;
         'field.autoVerifyRepeats.title': string;
         'field.autoVerifyRepeats.help': string;
+        'field.autoVerifyFinalRepeats.title': string;
+        'field.autoVerifyFinalRepeats.help': string;
         'field.autoVerifyMinToolCalls.title': string;
         'field.autoVerifyMinToolCalls.help': string;
         'field.autoVerifyMaxChars.title': string;
@@ -482,6 +492,8 @@ export declare const dictionaries: {
         'stats.outcome.below-threshold': string;
         'stats.outcome.tie': string;
         'stats.outcome.error': string;
+        'stats.outcome.dropped-over-budget': string;
+        'stats.outcome.invalid-references': string;
         'stats.winner.tie': string;
         'stats.verdict.winner': string;
         'stats.verdict.scoreThreshold': string;
@@ -547,7 +559,11 @@ export interface VerdictSummary {
     threshold?: number;
 }
 export declare function resolveCacheDirOnSave(draft: string | undefined | null, previous?: string | null): string | undefined;
-export declare const WORST_CASE_TASK_PER_JUDGE = 54;
+/** An eight-candidate select: ring + pivot rounds (18 pairs) x three criteria, one repeat. */
+export declare const WORST_CASE_ROUTE_CALLS_PER_JUDGE = 54;
+/** Final acceptance: three criteria x the default two repeats (one per A/B position). */
+export declare const WORST_CASE_FINAL_CALLS_PER_JUDGE = 6;
+export declare const WORST_CASE_TASK_PER_JUDGE: number;
 export declare const WORST_CASE_SESSION_PER_JUDGE = 160;
 export declare function computeJudgeCount(extraJudgesCount: number): number;
 export declare function computeWorstCaseBudget(judgeCount: number): {
