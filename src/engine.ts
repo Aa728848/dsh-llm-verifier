@@ -2,7 +2,7 @@ import { addUsage, callVerifier, emptyUsage, predictScoringChannel, type Scoring
 import { ScoreCache, SingleFlight, stableHash, type CachedPairScore } from './cache.ts'
 import {
   DEFAULT_CRITERIA, DEFAULT_GROUND_TRUTH_NOTE, accumulatePairs, buildPairwisePrompt, buildProgressPrompt,
-  extractProgressScore, extractScore, rankScores, selectPairs, type Criterion,
+  extractProgressScore, extractScore, pivotRoundPairs, rankScores, ringCycle, topPivots, type Criterion,
 } from './core.ts'
 
 export interface CompareOptions { problem: string; candidateA: string; candidateB: string; criteria?: readonly Criterion[]; groundTruthNote?: string; repeats?: number; images?: readonly VerifierImage[] }
@@ -58,6 +58,7 @@ function median(values: readonly number[]): number {
 }
 
 function blankStats(): RunStats { return { ...emptyUsage(), cacheHits: 0, cacheMisses: 0, estimatedCostUsd: 0, topLogprobScores: 0, explicitTagScores: 0 } }
+function unorderedPair(a: number, b: number): string { return a < b ? a + ',' + b : b + ',' + a }
 
 function judgeLabel(client: VerifierClientConfig): string {
   return client.label?.trim() || client.provider + '/' + client.model
@@ -453,13 +454,17 @@ export class VerifierEngine {
       })
       return { index, best: options.candidates[index]!, scores: wins.map((value, candidate) => value / (counts[candidate] || 1)), ranking: ranked.map(value => value.index), pivots: [], comparisons: 1, calls: stats.calls, stats, judges }
     }
-    // One shared plan decides which pairs are judged AND what that costs: a fresh pivot
-    // round re-lists every ring edge that touches a pivot, and those duplicates are
-    // dropped so each unordered pair is judged once (see selectPairs). Estimating the
-    // count separately is what let the router's reservation drift away from reality.
-    const { ring, pivots, pairs } = selectPairs(options.candidates.length, options.seed ?? 0, options.pivots ?? 2)
+    const ring = ringCycle(options.candidates.length, options.seed ?? 0)
     const ringScores = await this.scorePairs(options, ring, signal)
-    const rounds = pairs.slice(ring.length)
+    const firstWins = new Array<number>(options.candidates.length).fill(0)
+    const firstCounts = new Array<number>(options.candidates.length).fill(0)
+    accumulatePairs(ring, ringScores.rewards, firstWins, firstCounts)
+    const pivots = topPivots(firstWins, firstCounts, options.pivots ?? 2)
+    // pivotRoundPairs regenerates every ring edge that touches a pivot (reversed for
+    // pivot→neighbour edges). Dropping those duplicates keeps each unordered pair to a
+    // single match so wins/counts are not double-weighted and no pair is judged twice.
+    const ringPairs = new Set(ring.map(pair => unorderedPair(pair[0], pair[1])))
+    const rounds = pivotRoundPairs(options.candidates.length, pivots).filter(pair => !ringPairs.has(unorderedPair(pair[0], pair[1])))
     const roundScores = await this.scorePairs(options, rounds, signal)
     const allRewards = new Map([...ringScores.rewards, ...roundScores.rewards])
     const wins = new Array<number>(options.candidates.length).fill(0)
@@ -508,7 +513,7 @@ export class VerifierEngine {
       }
     })
 
-    return { index, best: options.candidates[index]!, scores: Array.from({ length: options.candidates.length }, (_, candidate) => wins[candidate]! / (counts[candidate] || 1)), ranking: ranked.map(value => value.index), pivots, comparisons: pairs.length, calls: stats.calls, stats: this.finishStats(stats), judges }
+    return { index, best: options.candidates[index]!, scores: Array.from({ length: options.candidates.length }, (_, candidate) => wins[candidate]! / (counts[candidate] || 1)), ranking: ranked.map(value => value.index), pivots, comparisons: ring.length + rounds.length, calls: stats.calls, stats: this.finishStats(stats), judges }
   }
 }
 

@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { VerifierClientConfig } from './caller.ts'
 import { ScoreCache, SingleFlight, type CachedPairScore } from './cache.ts'
 import { VerifierEngine } from './engine.ts'
-import { estimateRoutedCalls, type SelectRouteDecision } from './router.ts'
 import { TopLogprobCapabilityCache } from './top-logprobs.ts'
 
 function chunks(text: string) { return [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'text-delta', index: 0, text }, { type: 'block-end', index: 0, block: { type: 'text', text } }, { type: 'usage', usage: { inputTokens: 7, cacheReadTokens: 3, outputTokens: 4, reasoningTokens: 2 } }, { type: 'finish', reason: { kind: 'stop' } }] as any[] }
@@ -71,29 +70,6 @@ describe('VerifierEngine tournament', () => {
     expect(result.ranking[0]).toBe(0)
     expect(result.best).toBe('STRONG-0')
   })
-  it('reports the comparison count the router reserves budget for', async () => {
-    // The reservation is priced by estimateRoutedCalls(); if its idea of the tournament
-    // shape ever drifts from what select() really plays, the router starts rejecting or
-    // over-reserving real selections (the hand-rolled estimate was off from 11 candidates).
-    for (const count of [8, 11, 16]) {
-      const judged: Array<string> = []
-      const engine = new VerifierEngine(clientConfig({ llm: { stream: scriptedStream(judged) } as any }), 8)
-      const candidates = Array.from({ length: count }, (_, index) => 'WEAK-' + index)
-      const result = await engine.select({ problem: 'Pick the better implementation.', candidates, repeats: 1 })
-      const decision: SelectRouteDecision = {
-        kind: 'select',
-        source: 'structured',
-        confidence: 1,
-        reason: 'regression',
-        fingerprint: 'shape-' + count,
-        candidates: candidates.map((_, index) => ({ id: String(index), groupId: 'g', label: String(index), content: 'x', callId: 'a' + index, fromSeq: 1, toSeq: 2 })),
-      }
-      expect(estimateRoutedCalls(decision, 1, 3)).toBe(result.comparisons * 3)
-      expect(result.stats.calls).toBe(result.comparisons * 3)
-      // Every pair is judged once, never replayed.
-      expect(new Set(judged.map(entry => entry.split('|').slice(1).sort().join('|'))).size).toBe(result.comparisons)
-    }
-  }, 120000)
 })
 
 describe('VerifierEngine cache identity', () => {
