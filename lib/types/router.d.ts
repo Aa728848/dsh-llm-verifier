@@ -109,6 +109,16 @@ export declare function semanticDecision(output: SemanticRouteOutput, events: re
  * Uses the real tournament shape (ring edges + pivot-round edges x criteria x
  * repeats) instead of a flat per-candidate constant, which over-reserved by
  * roughly an order of magnitude and silently rejected legitimate selections.
+ *
+ * The select branch counts the pairs `VerifierEngine.select` will actually judge by
+ * calling the same {@link selectPairs} planner. Re-deriving that number here used to
+ * over-count from 11 candidates onward: the pivot round lists a ring edge once per
+ * pivot, and the pivot-pivot edge only repeats when the final round happens to draw
+ * the two pivots next to each other, so the subtraction is not the constant the old
+ * formula assumed. The router then reserved a few more calls than the run consumed
+ * (harmless but wrong in the direction that rejects work) and the two estimators
+ * disagreed with each other. A routed decision always uses the default seed and
+ * pivot count, which is why the planner is called with its own defaults.
  * @param decision - the routed decision about to run.
  * @param repeats - evaluation repeats per criterion.
  * @param criteriaCount - number of criteria evaluated per comparison.

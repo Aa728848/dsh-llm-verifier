@@ -261,6 +261,39 @@ export function topPivots(wins: readonly number[], counts: readonly number[], re
     .slice(0, Math.min(requested, wins.length))
 }
 
+/**
+ * Every unordered candidate pair one tournament judges, in the order it plays them:
+ * the ring edges, then the pivot round with its ring duplicates removed.
+ *
+ * This is the single source of truth for the tournament SHAPE. `select()` drives its
+ * model calls from the returned pairs, and `estimateRoutedCalls()` prices a routed
+ * decision from `pairs.length`; when the estimator re-derived the count with its own
+ * arithmetic the two drifted (the number of pivot-round edges that duplicate a ring
+ * edge depends on whether the two pivots happen to sit next to each other on the
+ * shuffled ring, so no constant works for every candidate count), and the router
+ * reserved the wrong budget from 11 candidates onward.
+ *
+ * At most `pivots.length` ring edges can repeat: one per pivot, plus the pivot-pivot
+ * edge when the final scoring round happens to draw the two pivots adjacent.
+ * @param count - number of candidates (at least 2).
+ * @param seed - ring shuffle seed; the ring changes with it, so the duplicate count can too.
+ * @param requestedPivots - pivots to advance; clamped like {@link topPivots} does.
+ * @returns The ring edges, the chosen pivots and every unique pair to judge.
+ */
+export function selectPairs(count: number, seed = 0, requestedPivots = 2): { ring: Array<[number, number]>; pivots: number[]; pairs: Array<[number, number]> } {
+  if (count <= 2) return { ring: [[0, 1]], pivots: [], pairs: [[0, 1]] }
+  const ring = ringCycle(count, seed)
+  const counts = new Array<number>(count).fill(1)
+  const wins = new Array<number>(count).fill(0)
+  accumulatePairs(ring, new Map(), wins, counts)
+  const pivots = topPivots(wins, counts, requestedPivots)
+  const ringPairs = new Set(ring.map(pair => unorderedPair(pair[0], pair[1])))
+  const rounds = pivotRoundPairs(count, pivots).filter(pair => !ringPairs.has(unorderedPair(pair[0], pair[1])))
+  return { ring, pivots, pairs: [...ring, ...rounds] }
+}
+
+function unorderedPair(a: number, b: number): string { return a < b ? a + ',' + b : b + ',' + a }
+
 export function rankScores(wins: readonly number[], counts: readonly number[]): CandidateScore[] {
   return Array.from({ length: wins.length }, (_, index) => ({ index, score: (wins[index] ?? 0) / (counts[index] || 1) }))
     .sort((a, b) => b.score - a.score || a.index - b.index)

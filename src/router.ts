@@ -1,6 +1,7 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { stableHash } from './cache.ts'
+import { selectPairs } from './core.ts'
 import type { AutoVerifyMode } from './auto.ts'
 import { sanitizeVerifierText, sessionEvents } from './session.ts'
 
@@ -389,6 +390,16 @@ export function semanticDecision(output: SemanticRouteOutput, events: readonly S
  * Uses the real tournament shape (ring edges + pivot-round edges x criteria x
  * repeats) instead of a flat per-candidate constant, which over-reserved by
  * roughly an order of magnitude and silently rejected legitimate selections.
+ *
+ * The select branch counts the pairs `VerifierEngine.select` will actually judge by
+ * calling the same {@link selectPairs} planner. Re-deriving that number here used to
+ * over-count from 11 candidates onward: the pivot round lists a ring edge once per
+ * pivot, and the pivot-pivot edge only repeats when the final round happens to draw
+ * the two pivots next to each other, so the subtraction is not the constant the old
+ * formula assumed. The router then reserved a few more calls than the run consumed
+ * (harmless but wrong in the direction that rejects work) and the two estimators
+ * disagreed with each other. A routed decision always uses the default seed and
+ * pivot count, which is why the planner is called with its own defaults.
  * @param decision - the routed decision about to run.
  * @param repeats - evaluation repeats per criterion.
  * @param criteriaCount - number of criteria evaluated per comparison.
@@ -397,13 +408,7 @@ export function semanticDecision(output: SemanticRouteOutput, events: readonly S
 export function estimateRoutedCalls(decision: RouteDecision, repeats: number, criteriaCount: number): number {
   if (decision.kind === 'compare') return Math.max(1, criteriaCount * repeats)
   if (decision.kind === 'track') return Math.max(1, repeats)
-  const count = decision.candidates.length
-  const pivots = Math.min(2, count)
-  const ring = count <= 2 ? 1 : count
-  // pivotRoundPairs() minus the ring edges incident to a pivot (at most two per
-  // pivot; the pivot-pivot edge may itself be a ring edge, hence the -1).
-  const pivotRound = count <= 2 ? 0 : Math.max(0, (count - pivots) * pivots + (pivots * (pivots - 1)) / 2 - (2 * pivots - 1))
-  return Math.max(1, (ring + pivotRound) * criteriaCount * repeats)
+  return Math.max(1, selectPairs(decision.candidates.length).pairs.length * criteriaCount * repeats)
 }
 
 export function boundDecision(decision: RouteDecision | undefined, policy: RouterPolicy): RouteDecision | undefined {

@@ -12,6 +12,7 @@ import {
   rankScores,
   renderDelimitedBlock,
   ringCycle,
+  selectPairs,
   topPivots,
 } from './core.ts'
 
@@ -134,6 +135,30 @@ describe('pivot tournament', () => {
   })
   it('generates linear pivot rounds', () => {
     expect(pivotRoundPairs(5, [1, 3])).toEqual([[0, 1], [0, 3], [2, 1], [2, 3], [4, 1], [4, 3], [1, 3]])
+  })
+  it('plays exactly one match for two candidates', () => {
+    expect(selectPairs(2)).toEqual({ ring: [[0, 1]], pivots: [], pairs: [[0, 1]] })
+  })
+  it('plans every pair once and prices the shape the engine really plays', () => {
+    // Pairs, not model calls: this is the number the router reserves budget for and the
+    // number VerifierEngine.select() reports as `comparisons`.
+    const expected = [1, 3, 6, 9, 12, 15, 18, 21, 24, 26, 29, 32, 35, 38, 41]
+    for (let count = 2; count <= 16; count += 1) {
+      const { ring, pivots, pairs } = selectPairs(count)
+      const keys = pairs.map(pair => Math.min(pair[0]!, pair[1]!) + ',' + Math.max(pair[0]!, pair[1]!))
+      expect(new Set(keys).size).toBe(pairs.length)
+      expect(pairs.length).toBe(expected[count - 2])
+      // The plan is still the shipped tournament: a full ring plus the pivot round.
+      // Two candidates are the one special case: a single match, no pivots (ringCycle(2)
+      // would otherwise judge the same unordered pair in both directions).
+      expect(ring).toHaveLength(count <= 2 ? 1 : count)
+      expect(pivots).toEqual(count <= 2 ? [] : [0, 1])
+    }
+    // Pairs that the pivot round re-lists are the ring duplicates it exists to drop.
+    expect(selectPairs(8).pairs.length).toBe(18)
+    // The seed decides which pairs the pivot round re-lists, so two seeds of the same size
+    // can differ by one pair. That is exactly why a caller must not re-derive the count.
+    expect([selectPairs(8, 0).pairs.length, selectPairs(8, 1).pairs.length]).toEqual([18, 17])
   })
   it('ranks soft wins', () => {
     expect(bradleyTerry(0.9, 0.1)).toBeGreaterThan(0.5)

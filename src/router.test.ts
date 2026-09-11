@@ -187,6 +187,23 @@ describe('transactional router state', () => {
     const many = Array.from({ length: 8 }, () => candidate)
     expect(estimateRoutedCalls({ ...base, kind: 'select', candidates: many }, 1, 3)).toBe(54)
   })
+  it('counts the pairs the engine will judge instead of re-deriving the tournament count', () => {
+    const candidate = { id: 'c', groupId: 'g', label: 'c', content: 'x', callId: 'a', fromSeq: 1, toSeq: 2 }
+    const base = { source: 'structured' as const, confidence: 1, reason: 'r', fingerprint: 'f' }
+    const decision = (count: number) => ({ ...base, kind: 'select' as const, candidates: Array.from({ length: count }, () => candidate) })
+    // Pairs per candidate count as VerifierEngine.select() reports them.
+    const pairs = [1, 3, 6, 9, 12, 15, 18, 21, 24, 26, 29, 32, 35, 38, 41]
+    for (let count = 2; count <= 16; count += 1) {
+      expect(estimateRoutedCalls(decision(count), 1, 3)).toBe(pairs[count - 2]! * 3)
+    }
+    // The hand-rolled count this replaced claimed 27 x 3 for 11 candidates and 42 x 3 for
+    // 16; the pivot round re-lists a ring edge once per pivot, and the pivot-pivot edge
+    // only repeats when the final round draws the pivots adjacent, so the reservation
+    // drifted above what the run consumed.
+    expect(estimateRoutedCalls(decision(11), 1, 3)).toBe(78)
+    expect(estimateRoutedCalls(decision(16), 1, 3)).toBe(123)
+    expect(estimateRoutedCalls(decision(16), 2, 3)).toBe(246)
+  })
   it('reports budget exhaustion without touching reservations', () => {
     const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
     // policy caps the task at 48 model calls.
