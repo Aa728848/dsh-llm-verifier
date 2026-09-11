@@ -70,10 +70,23 @@ const ROUTED_TOOLS = new Set(['verifier_compare', 'verifier_select', 'verifier_t
 const TRUSTED_WORKFLOW_VERSION = 1
 const KNOWN_ROUTE_KEYS = new Set(['kind', 'confidence', 'reason', 'candidateCallIds', 'checkpointSeqs'])
 
+/**
+ * Sequence number of the message that opened the current task.
+ *
+ * Team messages count as well: an Agent Teams teammate is handed its task by a team
+ * message, and without this the router would see no task boundary in that session and
+ * silently refuse every reservation — including team task gating. This helper is the
+ * single definition shared with {@link analyzeAutoTask}.
+ * @param events - Session event log.
+ * @returns The seq of the newest task-assigning message, or undefined.
+ */
 export function latestDirectUserSeq(events: readonly SessionEvent[]): number | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
-    if (event?.type === 'user/message' && event.data.source.kind === 'user') return event.seq
+    if (event?.type !== 'user/message') continue
+    // Widened like session.ts does: older host types do not declare the team source.
+    const kind = event.data.source.kind as string
+    if (kind === 'user' || kind === 'team-message') return event.seq
   }
   return undefined
 }
@@ -424,7 +437,10 @@ export class AutoVerifierRouter {
     const state = this.state(agent)
     if (!state || state.inFlight?.id !== reservation.id || state.taskStartSeq !== reservation.taskStartSeq) return false
     state.inFlight = undefined; state.completed.add(reservation.fingerprint); state.strictBlocked = false
-    if (reservation.phase !== 'semantic' && reservation.phase !== 'final') state.finalRequiredFromSeq = Math.max(state.finalRequiredFromSeq ?? 0, evidenceSeq ?? reservation.taskStartSeq)
+    // Approving a plan is not completed work: arming finalRequiredFromSeq here would force
+    // a full session verification at the very next stop boundary, before anything was built
+    // (and, in strict mode, burn an attempt and set strictBlocked on that empty review).
+    if (reservation.phase !== 'semantic' && reservation.phase !== 'final' && reservation.phase !== 'plan_review') state.finalRequiredFromSeq = Math.max(state.finalRequiredFromSeq ?? 0, evidenceSeq ?? reservation.taskStartSeq)
     if (reservation.phase === 'final') state.finalRequiredFromSeq = undefined
     return true
   }

@@ -6,13 +6,18 @@ export interface AutoVerifyPolicy {
     minToolCalls: number;
     maxPerTask: number;
     maxPerSession: number;
+    /** Acceptance threshold a manual `verifier_current_session` result must reach to count. */
+    threshold: number;
 }
 export interface AutoTaskEvidence {
     taskStartSeq: number;
     toolCalls: number;
     completedToolResults: number;
     consequentialToolCalls: number;
+    /** A completed `verifier_current_session` call exists (whatever its verdict). */
     hasManualSessionVerification: boolean;
+    /** That verification passed the threshold and no consequential work happened since. */
+    manualVerificationAccepted: boolean;
     eligible: boolean;
     reason: string;
 }

@@ -2,6 +2,21 @@ import type { Context } from '@deepseek-ai/cordis';
 import z from 'schemastery';
 export declare const VERIFIER_SETTINGS_NAMESPACE: never;
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict';
+export interface JudgeConfig {
+    provider?: string;
+    model?: string;
+    reasoningEffort?: string;
+    maxTokens?: number;
+    label?: string;
+}
+export interface ResolvedJudge {
+    provider: string;
+    model: string;
+    reasoningEffort?: string;
+    maxTokens: number;
+    label: string;
+}
+export declare const MAX_EXTRA_JUDGES = 4;
 export interface Config {
     enabled?: boolean;
     autoVerifyMode?: AutoVerifyMode;
@@ -28,6 +43,7 @@ export interface Config {
     model?: string;
     reasoningEffort?: string;
     maxTokens?: number;
+    label?: string;
     timeoutMs?: number;
     maxConcurrency?: number;
     maxRetries?: number;
@@ -36,6 +52,7 @@ export interface Config {
     cacheMaxEntries?: number;
     estimatedInputUsdPerMillion?: number;
     estimatedOutputUsdPerMillion?: number;
+    extraJudges?: JudgeConfig[];
 }
 export interface ResolvedConfig {
     enabled: boolean;
@@ -71,7 +88,9 @@ export interface ResolvedConfig {
     cacheMaxEntries: number;
     estimatedInputUsdPerMillion: number;
     estimatedOutputUsdPerMillion: number;
+    judges: ResolvedJudge[];
 }
+export declare const JudgeConfig: z<JudgeConfig>;
 export declare const Config: z<Config>;
 export declare function resolveConfig(config?: Config): ResolvedConfig;
 export declare function installVerifierSettings(ctx: Context, entry: ResolvedConfig, onChange: () => void): () => ResolvedConfig;

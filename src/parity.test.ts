@@ -31,6 +31,11 @@ function python(payload: unknown): unknown {
 
 describe('Python parity fixtures', () => {
   it.skipIf(!hasPythonUpstream)('matches literal and distribution score extraction', () => {
+    // Deliberately no fixture puts two surface variants of the SAME letter in one
+    // position (" A" + "A") under the distribution path: this port sums them while
+    // upstream keeps the max (fine_grained_reward.py:678), so such a fixture would
+    // fail by design. That divergence is documented in README
+    // 「与上游的一处已知差异」and pinned by core.test.ts.
     const fixtures = [
       { text: '<score_A> A </score_A>', tokens: [], positions: [], tag: '<score_A>' },
       { text: '<score_A> A </score_A> then <score_A> T </score_A>', tokens: [], positions: [], tag: '<score_A>' },

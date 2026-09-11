@@ -5,6 +5,24 @@ export const VERIFIER_SETTINGS_NAMESPACE = 'llm-verifier' as never
 
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict'
 
+export interface JudgeConfig {
+  provider?: string
+  model?: string
+  reasoningEffort?: string
+  maxTokens?: number
+  label?: string
+}
+
+export interface ResolvedJudge {
+  provider: string
+  model: string
+  reasoningEffort?: string
+  maxTokens: number
+  label: string
+}
+
+export const MAX_EXTRA_JUDGES = 4
+
 export interface Config {
   enabled?: boolean
   autoVerifyMode?: AutoVerifyMode
@@ -31,6 +49,7 @@ export interface Config {
   model?: string
   reasoningEffort?: string
   maxTokens?: number
+  label?: string
   timeoutMs?: number
   maxConcurrency?: number
   maxRetries?: number
@@ -39,6 +58,7 @@ export interface Config {
   cacheMaxEntries?: number
   estimatedInputUsdPerMillion?: number
   estimatedOutputUsdPerMillion?: number
+  extraJudges?: JudgeConfig[]
 }
 
 export interface ResolvedConfig {
@@ -75,7 +95,16 @@ export interface ResolvedConfig {
   cacheMaxEntries: number
   estimatedInputUsdPerMillion: number
   estimatedOutputUsdPerMillion: number
+  judges: ResolvedJudge[]
 }
+
+export const JudgeConfig: z<JudgeConfig> = z.object({
+  provider: z.string(),
+  model: z.string(),
+  reasoningEffort: z.string(),
+  maxTokens: z.number().step(1).min(1),
+  label: z.string(),
+})
 
 export const Config: z<Config> = z.object({
   enabled: z.boolean().default(true),
@@ -103,6 +132,7 @@ export const Config: z<Config> = z.object({
   model: z.string().default('deepseek-flash'),
   reasoningEffort: z.string(),
   maxTokens: z.number().step(1).min(1).default(32768),
+  label: z.string(),
   timeoutMs: z.number().step(1).min(1).default(300000),
   maxConcurrency: z.number().step(1).min(1).default(8),
   maxRetries: z.number().step(1).min(0).default(3),
@@ -111,7 +141,39 @@ export const Config: z<Config> = z.object({
   cacheMaxEntries: z.number().step(1).min(1).default(10000),
   estimatedInputUsdPerMillion: z.number().min(0).default(0),
   estimatedOutputUsdPerMillion: z.number().min(0).default(0),
+  extraJudges: z.array(z.object({
+    provider: z.string(),
+    model: z.string(),
+    reasoningEffort: z.string(),
+    maxTokens: z.number().step(1).min(1),
+    label: z.string(),
+  })).default([]),
 })
+
+function resolveJudgeLabel(
+  rawLabel: string | undefined,
+  provider: string,
+  model: string,
+  takenLabels: Set<string>,
+): string {
+  const initial = rawLabel?.trim() || model
+  if (!takenLabels.has(initial)) {
+    takenLabels.add(initial)
+    return initial
+  }
+  const fallback = `${provider}/${model}`
+  if (!takenLabels.has(fallback)) {
+    takenLabels.add(fallback)
+    return fallback
+  }
+  let index = 2
+  while (takenLabels.has(`${fallback}#${index}`)) {
+    index++
+  }
+  const resolved = `${fallback}#${index}`
+  takenLabels.add(resolved)
+  return resolved
+}
 
 export function resolveConfig(config: Config = {}): ResolvedConfig {
   const provider = (config.provider ?? 'deepseek-official').trim()
@@ -158,7 +220,89 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   const estimatedOutputUsdPerMillion = config.estimatedOutputUsdPerMillion ?? 0
   if (![estimatedInputUsdPerMillion, estimatedOutputUsdPerMillion].every(value => Number.isFinite(value) && value >= 0)) throw new Error('llm-verifier: estimated token prices must be finite non-negative numbers')
   const reasoningEffort = config.reasoningEffort?.trim()
-  return { enabled: config.enabled ?? true, autoVerifyMode, autoVerifyThreshold, autoRouteSemantic: config.autoRouteSemantic ?? true, autoRouteMinConfidence, autoTrackCompletionThreshold, autoVerifyTeamTasks: config.autoVerifyTeamTasks ?? true, autoVerifyPlanMode: config.autoVerifyPlanMode ?? true, autoVerifySubagents: config.autoVerifySubagents ?? false, provider, model, ...(reasoningEffort ? { reasoningEffort } : {}), maxRetries, cacheDir, estimatedInputUsdPerMillion, estimatedOutputUsdPerMillion, ...values }
+
+  const extraJudges = config.extraJudges ?? []
+  if (!Array.isArray(extraJudges)) throw new Error('llm-verifier: extraJudges must be an array')
+  if (extraJudges.length > MAX_EXTRA_JUDGES) {
+    throw new Error(`llm-verifier: extraJudges cannot exceed ${MAX_EXTRA_JUDGES}`)
+  }
+
+  const seenJudges = new Set<string>([`${provider}\u0000${model}`])
+  const takenLabels = new Set<string>()
+  const primaryLabel = resolveJudgeLabel(config.label, provider, model, takenLabels)
+
+  const primaryJudge: ResolvedJudge = {
+    provider,
+    model,
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    maxTokens: values.maxTokens,
+    label: primaryLabel,
+  }
+
+  const judges: ResolvedJudge[] = [primaryJudge]
+
+  for (let i = 0; i < extraJudges.length; i++) {
+    const extra = extraJudges[i]
+    if (!extra || typeof extra !== 'object') {
+      throw new Error(`llm-verifier: extraJudges[${i}] must be an object`)
+    }
+    const extraProvider = (extra.provider ?? '').trim()
+    if (!extraProvider) {
+      throw new Error(`llm-verifier: extraJudges[${i}].provider must be non-empty`)
+    }
+    const extraModel = (extra.model ?? '').trim()
+    if (!extraModel) {
+      throw new Error(`llm-verifier: extraJudges[${i}].model must be non-empty`)
+    }
+
+    const identityKey = `${extraProvider}\u0000${extraModel}`
+    if (seenJudges.has(identityKey)) {
+      throw new Error(`llm-verifier: duplicate judge: ${extraProvider}/${extraModel}`)
+    }
+    seenJudges.add(identityKey)
+
+    let extraMaxTokens = values.maxTokens
+    if (extra.maxTokens !== undefined) {
+      if (typeof extra.maxTokens !== 'number' || !Number.isSafeInteger(extra.maxTokens) || extra.maxTokens <= 0) {
+        throw new Error(`llm-verifier: extraJudges[${i}].maxTokens must be a positive safe integer`)
+      }
+      extraMaxTokens = extra.maxTokens
+    }
+
+    // Do NOT inherit the primary judge's reasoning effort; an empty or absent effort
+    // allows the adapter to use the judge model's own default.
+    const extraEffort = extra.reasoningEffort?.trim()
+    const extraLabel = resolveJudgeLabel(extra.label, extraProvider, extraModel, takenLabels)
+
+    judges.push({
+      provider: extraProvider,
+      model: extraModel,
+      ...(extraEffort ? { reasoningEffort: extraEffort } : {}),
+      maxTokens: extraMaxTokens,
+      label: extraLabel,
+    })
+  }
+
+  return {
+    enabled: config.enabled ?? true,
+    autoVerifyMode,
+    autoVerifyThreshold,
+    autoRouteSemantic: config.autoRouteSemantic ?? true,
+    autoRouteMinConfidence,
+    autoTrackCompletionThreshold,
+    autoVerifyTeamTasks: config.autoVerifyTeamTasks ?? true,
+    autoVerifyPlanMode: config.autoVerifyPlanMode ?? true,
+    autoVerifySubagents: config.autoVerifySubagents ?? false,
+    provider,
+    model,
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    maxRetries,
+    cacheDir,
+    estimatedInputUsdPerMillion,
+    estimatedOutputUsdPerMillion,
+    ...values,
+    judges,
+  }
 }
 
 export function installVerifierSettings(ctx: Context, entry: ResolvedConfig, onChange: () => void): () => ResolvedConfig {

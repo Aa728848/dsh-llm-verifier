@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { analyzeStructuredRoute, AutoVerifierRouter, boundDecision, buildSemanticRoutePrompt, estimateRoutedCalls, parseSemanticRoute, semanticDecision, semanticRouteHint, type RouterPolicy } from './router.ts'
+import { analyzeStructuredRoute, AutoVerifierRouter, boundDecision, buildSemanticRoutePrompt, estimateRoutedCalls, latestDirectUserSeq, parseSemanticRoute, semanticDecision, semanticRouteHint, type RouterPolicy } from './router.ts'
 import { sanitizeVerifierText } from './session.ts'
 
 function session() {
@@ -125,6 +125,24 @@ describe('transactional router state', () => {
     expect(router.commit(agent, route, 9)).toBe(true); expect(router.finalRequired(agent)).toBe(9)
     const final = router.reserve(agent, 'final', 'final', 4, policy)!
     expect(router.commit(agent, final)).toBe(true); expect(router.finalRequired(agent)).toBeUndefined()
+  })
+  it('does not arm final verification when a plan pre-review passes', () => {
+    const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
+    const plan = router.reserve(agent, 'plan_review', 'plan', 1, policy)!
+    expect(router.commit(agent, plan)).toBe(true)
+    // Approving a plan is not completed work: the next stop boundary must go through the
+    // normal eligibility check instead of a forced full-session verification.
+    expect(router.finalRequired(agent)).toBeUndefined()
+    const route = router.reserve(agent, 'compare', 'route', 4, policy)!
+    expect(router.commit(agent, route, 9)).toBe(true); expect(router.finalRequired(agent)).toBe(9)
+  })
+  it('treats a team message as the task boundary so teammate sessions can reserve', () => {
+    const value = Session.create('session-00000000-0000-4000-8000-000000000078' as never)
+    value.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Implement the assigned team task' }], source: { kind: 'team-message' } as never }), { surfaceOp: 'append' })
+    expect(latestDirectUserSeq(value.events)).toBe(value.events.at(-1)!.seq)
+    const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
+    // Without the team-message boundary the router state is undefined and this is refused.
+    expect(router.reserve(agent, 'team_task', 'task-1', 1, policy)).toBeDefined()
   })
   it('releases in-flight state after failure and strict remains blocked', () => {
     const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()

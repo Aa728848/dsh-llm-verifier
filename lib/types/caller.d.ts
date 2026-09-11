@@ -10,6 +10,8 @@ export interface VerifierClientConfig {
     topLogprobCapabilities: TopLogprobCapabilityCache;
     provider: string;
     model: string;
+    /** User-facing judge name for tool output; cosmetic only, never part of the scoring cache identity. */
+    label?: string;
     reasoningEffort?: string;
     maxTokens: number;
     timeoutMs: number;

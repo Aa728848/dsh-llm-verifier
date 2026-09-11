@@ -26,6 +26,8 @@ export interface VerifierClientConfig {
   topLogprobCapabilities: TopLogprobCapabilityCache
   provider: string
   model: string
+  /** User-facing judge name for tool output; cosmetic only, never part of the scoring cache identity. */
+  label?: string
   reasoningEffort?: string
   maxTokens: number
   timeoutMs: number
@@ -146,12 +148,16 @@ export class RequestLimiter {
   private readonly queue: Array<() => void> = []
   constructor(readonly limit: number) { if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('llm-verifier: request concurrency limit must be a positive integer') }
   async run<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) throw signal.reason
     if (this.active >= this.limit) await new Promise<void>((resolve, reject) => {
       const enter = () => { signal?.removeEventListener('abort', abort); resolve() }
       const abort = () => { const index = this.queue.indexOf(enter); if (index >= 0) this.queue.splice(index, 1); reject(signal?.reason) }
       this.queue.push(enter); signal?.addEventListener('abort', abort, { once: true })
     })
-    if (signal?.aborted) throw signal.reason
+    if (signal?.aborted) {
+      this.queue.shift()?.()
+      throw signal.reason
+    }
     this.active += 1
     try { return await operation() } finally { this.active -= 1; this.queue.shift()?.() }
   }

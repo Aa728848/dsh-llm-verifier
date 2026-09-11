@@ -1,5 +1,6 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
 import type { TeamTaskItem } from './router.ts';
+export declare const MAX_TEAM_TASK_METADATA_CHARS = 4000;
 /** One completed task and the sequence number of its completion. */
 export interface CompletedTeamTask {
     task: TeamTaskItem;

@@ -66,6 +66,16 @@ interface Reservation {
     fingerprint: string;
     taskStartSeq: number;
 }
+/**
+ * Sequence number of the message that opened the current task.
+ *
+ * Team messages count as well: an Agent Teams teammate is handed its task by a team
+ * message, and without this the router would see no task boundary in that session and
+ * silently refuse every reservation — including team task gating. This helper is the
+ * single definition shared with {@link analyzeAutoTask}.
+ * @param events - Session event log.
+ * @returns The seq of the newest task-assigning message, or undefined.
+ */
 export declare function latestDirectUserSeq(events: readonly SessionEvent[]): number | undefined;
 export interface EvidenceCall {
     name: string;

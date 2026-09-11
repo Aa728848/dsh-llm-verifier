@@ -23,6 +23,22 @@ export declare const SCALE_DESCRIPTION: string;
 export declare const DEFAULT_CRITERIA: Criterion[];
 export declare const DEFAULT_GROUND_TRUTH_NOTE = "**IMPORTANT:** Focus on observed tool and terminal output as ground truth. Do NOT trust the agent's self-assessment or claims of success.";
 /**
+ * Deterministic per-prompt delimiter token.
+ *
+ * MUST NOT BE RANDOM: the score cache keys on the rendered prompt (`promptHash`),
+ * so a random nonce would make every identical verification a cache miss and
+ * break in-flight de-duplication. Deriving the token deterministically from the
+ * prompt content ensures identical inputs yield an identical prompt (cache hits)
+ * while injected untrusted text cannot predict the terminator because the token
+ * depends on the entire content including any injection.
+ */
+export declare function evidenceNonce(...parts: readonly string[]): string;
+/**
+ * Render an untrusted content block wrapped with deterministic nonce-tagged delimiters.
+ * Emits `<<<TAG:token>>>\n${content}\n<<<END_TAG:token>>>`.
+ */
+export declare function renderDelimitedBlock(tag: string, token: string, content: string): string;
+/**
  * Injected-content guardrail shared by every judge prompt.
  *
  * Trajectories embed raw tool output, file contents and model prose, so they can

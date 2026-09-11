@@ -9,11 +9,21 @@ import {
   zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage,
   compact, money, duration, dateTime, type I18nDict,
 } from './client-i18n.ts'
+import {
+  type ExtraJudgeDraft,
+  MAX_EXTRA_JUDGES,
+  normalizeExtraJudges,
+  judgeIdentity,
+  judgeConflict,
+  addExtraJudge,
+  removeExtraJudge,
+  serializeExtraJudges,
+} from './client-judges.ts'
 
 export { zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage, compact, money, duration, dateTime, type I18nDict }
 
 const NS = 'llm-verifier'
-interface Values { enabled: boolean; autoVerifyMode: 'manual'|'smart'|'strict'; autoVerifyThreshold: number; autoVerifyRepeats: number; autoVerifyMinToolCalls: number; autoVerifyMaxChars: number; autoVerifyMaxPerTask: number; autoVerifyMaxPerSession: number; autoRouteSemantic: boolean; autoRouteMinConfidence: number; autoRouteMaxCandidates: number; autoRouteMaxPerTask: number; autoRouteMaxPerSession: number; autoTrackCompletionThreshold: number; autoRouteMaxItemChars: number; autoRouteMaxInputChars: number; autoMaxModelCallsPerTask: number; autoMaxModelCallsPerSession: number; autoVerifyTeamTasks: boolean; autoVerifyPlanMode: boolean; provider: string; model: string; reasoningEffort?: string; maxTokens: number; maxConcurrency: number; maxRetries: number; timeoutMs: number; cacheMaxEntries: number; estimatedInputUsdPerMillion: number; estimatedOutputUsdPerMillion: number; autoVerifySubagents: boolean }
+interface Values { enabled: boolean; autoVerifyMode: 'manual'|'smart'|'strict'; autoVerifyThreshold: number; autoVerifyRepeats: number; autoVerifyMinToolCalls: number; autoVerifyMaxChars: number; autoVerifyMaxPerTask: number; autoVerifyMaxPerSession: number; autoRouteSemantic: boolean; autoRouteMinConfidence: number; autoRouteMaxCandidates: number; autoRouteMaxPerTask: number; autoRouteMaxPerSession: number; autoTrackCompletionThreshold: number; autoRouteMaxItemChars: number; autoRouteMaxInputChars: number; autoMaxModelCallsPerTask: number; autoMaxModelCallsPerSession: number; autoVerifyTeamTasks: boolean; autoVerifyPlanMode: boolean; provider: string; model: string; reasoningEffort?: string; maxTokens: number; label?: string; maxConcurrency: number; maxRetries: number; timeoutMs: number; cacheMaxEntries: number; estimatedInputUsdPerMillion: number; estimatedOutputUsdPerMillion: number; autoVerifySubagents: boolean; extraJudges: ExtraJudgeDraft[] }
 interface Loaded { groups: readonly ModelProviderGroup[]; settings: SettingsNamespaceView; writable: boolean; failures: string[] }
 interface RunStats { calls: number; attempts: number; retries: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningTokens: number; cacheHits: number; cacheMisses: number; estimatedCostUsd: number; topLogprobScores: number; explicitTagScores: number }
 interface InvocationRecord { id: string; toolName: string; sessionId?: string; startedAt: number; finishedAt: number; durationMs: number; success: boolean; errorName?: string; errorMessage?: string; provider: string; model: string; stats: RunStats }
@@ -71,7 +81,7 @@ const muted: React.CSSProperties = { color: 'var(--dsw-text-secondary)', fontSiz
 const toolColors: Record<string, string> = { verifier_route_classify: '#d97706', verifier_compare: '#4f8cff', verifier_select: '#8b6df6', verifier_track: '#2fc5c9', verifier_current_session: '#f5a524' }
 
 function record(value: unknown): Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {} }
-function values(view: SettingsNamespaceView): Values { const v=record(view.value); const mode=v.autoVerifyMode==='manual'||v.autoVerifyMode==='strict'?v.autoVerifyMode:'smart'; return { enabled:v.enabled!==false,autoVerifyMode:mode,autoVerifyThreshold:Number(v.autoVerifyThreshold??.65),autoVerifyRepeats:Number(v.autoVerifyRepeats??1),autoVerifyMinToolCalls:Number(v.autoVerifyMinToolCalls??3),autoVerifyMaxChars:Number(v.autoVerifyMaxChars??80000),autoVerifyMaxPerTask:Number(v.autoVerifyMaxPerTask??2),autoVerifyMaxPerSession:Number(v.autoVerifyMaxPerSession??8),autoRouteSemantic:v.autoRouteSemantic!==false,autoRouteMinConfidence:Number(v.autoRouteMinConfidence??.9),autoRouteMaxCandidates:Number(v.autoRouteMaxCandidates??8),autoRouteMaxPerTask:Number(v.autoRouteMaxPerTask??2),autoRouteMaxPerSession:Number(v.autoRouteMaxPerSession??8),autoTrackCompletionThreshold:Number(v.autoTrackCompletionThreshold??.8),autoRouteMaxItemChars:Number(v.autoRouteMaxItemChars??20000),autoRouteMaxInputChars:Number(v.autoRouteMaxInputChars??60000),autoMaxModelCallsPerTask:Number(v.autoMaxModelCallsPerTask??64),autoMaxModelCallsPerSession:Number(v.autoMaxModelCallsPerSession??240),autoVerifyTeamTasks:v.autoVerifyTeamTasks!==false,autoVerifyPlanMode:v.autoVerifyPlanMode!==false,provider:String(v.provider??''),model:String(v.model??''),...(typeof v.reasoningEffort==='string'?{reasoningEffort:v.reasoningEffort}:{}),maxTokens:Number(v.maxTokens??32768),maxConcurrency:Number(v.maxConcurrency??8),maxRetries:Number(v.maxRetries??3),timeoutMs:Number(v.timeoutMs??300000),cacheMaxEntries:Number(v.cacheMaxEntries??10000),estimatedInputUsdPerMillion:Number(v.estimatedInputUsdPerMillion??0),estimatedOutputUsdPerMillion:Number(v.estimatedOutputUsdPerMillion??0),autoVerifySubagents:v.autoVerifySubagents===true } }
+function values(view: SettingsNamespaceView): Values { const v=record(view.value); const mode=v.autoVerifyMode==='manual'||v.autoVerifyMode==='strict'?v.autoVerifyMode:'smart'; return { enabled:v.enabled!==false,autoVerifyMode:mode,autoVerifyThreshold:Number(v.autoVerifyThreshold??.65),autoVerifyRepeats:Number(v.autoVerifyRepeats??1),autoVerifyMinToolCalls:Number(v.autoVerifyMinToolCalls??3),autoVerifyMaxChars:Number(v.autoVerifyMaxChars??80000),autoVerifyMaxPerTask:Number(v.autoVerifyMaxPerTask??2),autoVerifyMaxPerSession:Number(v.autoVerifyMaxPerSession??8),autoRouteSemantic:v.autoRouteSemantic!==false,autoRouteMinConfidence:Number(v.autoRouteMinConfidence??.9),autoRouteMaxCandidates:Number(v.autoRouteMaxCandidates??8),autoRouteMaxPerTask:Number(v.autoRouteMaxPerTask??2),autoRouteMaxPerSession:Number(v.autoRouteMaxPerSession??8),autoTrackCompletionThreshold:Number(v.autoTrackCompletionThreshold??.8),autoRouteMaxItemChars:Number(v.autoRouteMaxItemChars??20000),autoRouteMaxInputChars:Number(v.autoRouteMaxInputChars??60000),autoMaxModelCallsPerTask:Number(v.autoMaxModelCallsPerTask??64),autoMaxModelCallsPerSession:Number(v.autoMaxModelCallsPerSession??240),autoVerifyTeamTasks:v.autoVerifyTeamTasks!==false,autoVerifyPlanMode:v.autoVerifyPlanMode!==false,provider:String(v.provider??''),model:String(v.model??''),...(typeof v.reasoningEffort==='string'?{reasoningEffort:v.reasoningEffort}:{}),maxTokens:Number(v.maxTokens??32768),...(typeof v.label==='string'&&v.label.trim()?{label:v.label.trim()}:{}),maxConcurrency:Number(v.maxConcurrency??8),maxRetries:Number(v.maxRetries??3),timeoutMs:Number(v.timeoutMs??300000),cacheMaxEntries:Number(v.cacheMaxEntries??10000),estimatedInputUsdPerMillion:Number(v.estimatedInputUsdPerMillion??0),estimatedOutputUsdPerMillion:Number(v.estimatedOutputUsdPerMillion??0),autoVerifySubagents:v.autoVerifySubagents===true,extraJudges:normalizeExtraJudges(v.extraJudges) } }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 /** The endpoint answered but rejected the request: a transport fallback would only repeat it. */
 class EndpointError extends Error {}
@@ -89,7 +99,31 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
   const models=useMemo(()=>loaded?.groups.find(g=>g.id===draft?.provider)?.models??[],[loaded,draft?.provider])
   const selected=models.find(m=>m.id===draft?.model); const efforts=selected?.reasoning?.efforts??[]
   const patch=<K extends keyof Values>(key:K,value:Values[K])=>{setSaved(false);setDraft(v=>v?{...v,[key]:value}:v)}
-  const save=async()=>{if(!loaded||!draft)return;setBusy(true);setSaved(false);setError(null);try{const section={...record(loaded.settings.user),...draft};if(!draft.reasoningEffort)delete section.reasoningEffort;const res=await remote.settings.update(NS,section as never,loaded.settings.revision);if(!res.ok)throw new Error(res.error.message);setLoaded(v=>v?{...v,settings:res.value}:v);setDraft(values(res.value));setEditing({});setSaved(true)}catch(e){setError(message(e))}finally{setBusy(false)}}
+  const conflict = useMemo(() => (draft ? judgeConflict({ provider: draft.provider, model: draft.model }, draft.extraJudges) : undefined), [draft?.provider, draft?.model, draft?.extraJudges])
+  const addJudge = () => {
+    if (!loaded || !draft || draft.extraJudges.length >= MAX_EXTRA_JUDGES) return
+    const firstGroup = loaded.groups[0]
+    const firstProvider = firstGroup?.id ?? ''
+    const firstModelObj = firstGroup?.models[0]
+    const firstModel = firstModelObj?.id ?? ''
+    const defaultEffort = firstModelObj?.reasoning?.defaultEffort
+    const newJudge: ExtraJudgeDraft = {
+      provider: firstProvider,
+      model: firstModel,
+      ...(defaultEffort ? { reasoningEffort: defaultEffort } : {}),
+    }
+    patch('extraJudges', addExtraJudge(draft.extraJudges, newJudge))
+  }
+  const removeJudge = (idx: number) => {
+    if (!draft) return
+    patch('extraJudges', removeExtraJudge(draft.extraJudges, idx))
+  }
+  const updateJudge = (idx: number, updates: Partial<ExtraJudgeDraft>) => {
+    if (!draft) return
+    const next = draft.extraJudges.map((j, i) => (i === idx ? { ...j, ...updates } : j))
+    patch('extraJudges', next)
+  }
+  const save=async()=>{if(!loaded||!draft||conflict)return;setBusy(true);setSaved(false);setError(null);try{const section={...record(loaded.settings.user),...draft,extraJudges:serializeExtraJudges(draft.extraJudges)};if(!draft.reasoningEffort)delete section.reasoningEffort;if(!draft.label||!draft.label.trim())delete section.label;else section.label=draft.label.trim();const res=await remote.settings.update(NS,section as never,loaded.settings.revision);if(!res.ok)throw new Error(res.error.message);setLoaded(v=>v?{...v,settings:res.value}:v);setDraft(values(res.value));setEditing({});setSaved(true)}catch(e){setError(message(e))}finally{setBusy(false)}}
   if(!loaded||!draft)return <div style={shell}><h2 style={settingsHeading}>{t['settings.title']}</h2><p style={settingsIntro}>{error??t['settings.loading']}</p>{error&&<div><Button variant="outline" onClick={()=>void load()}>{t['settings.retry']}</Button></div>}</div>
   // Fractional settings are typed character by character, so the raw text is
   // kept while the field has focus: a controlled type="number" input rewrites
@@ -143,6 +177,56 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
       <div style={row}><Label title={t['field.model.title']} help={t['field.model.help']}/><select style={selectStyle} disabled={busy} aria-label={t['field.model.title']} value={draft.model} onChange={e=>{const model=e.target.value;const found=models.find(m=>m.id===model);setDraft({...draft,model,...(found?.reasoning?.defaultEffort?{reasoningEffort:found.reasoning.defaultEffort}:{reasoningEffort:undefined})})}}>{models.map(m=><option key={m.id} value={m.id}>{m.name} · {m.id}</option>)}</select></div>
       <div style={row}><Label title={t['field.reasoningEffort.title']} help={t['field.reasoningEffort.help']}/><select style={selectStyle} disabled={busy} aria-label={t['field.reasoningEffort.title']} value={draft.reasoningEffort??''} onChange={e=>patch('reasoningEffort',e.target.value||undefined)}><option value="">{t['field.reasoningEffort.default']}</option>{efforts.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</select></div>
       <div style={row}><Label title={t['field.maxTokens.title']} help={t['field.maxTokens.help']}/>{numeric('maxTokens',1)}</div>
+      <div style={row}><Label title={t['field.label.title']} help={t['field.label.help']}/><Input style={{width:'100%',height:36,borderRadius:8}} type="text" disabled={busy} placeholder={draft.model||t['field.label.placeholder']} aria-label={t['field.label.title']} value={draft.label??''} onChange={e=>patch('label',e.target.value||undefined)}/></div>
+      <div style={{...row,gridTemplateColumns:'minmax(180px, 1fr) auto',minHeight:48}}><Label title={t['field.extraJudges.title']} help={t['field.extraJudges.help']}/><Button variant="outline" disabled={busy||draft.extraJudges.length>=MAX_EXTRA_JUDGES} onClick={addJudge}>{t['field.extraJudges.add']}</Button></div>
+      {draft.extraJudges.length>0&&<div style={{display:'flex',flexDirection:'column',gap:8,padding:'10px 0',borderBottom:'1px solid var(--dsw-alias-border-l2)'}}>
+        <div style={{display:'grid',gridTemplateColumns:'minmax(110px, 1.2fr) minmax(120px, 1.3fr) minmax(95px, 1fr) minmax(95px, 1fr) auto',gap:8,fontSize:12,color:'var(--dsw-alias-label-tertiary)',paddingBottom:2}}>
+          <div>{t['field.provider.title']}</div>
+          <div>{t['field.model.title']}</div>
+          <div>{t['field.reasoningEffort.title']}</div>
+          <div>{t['field.extraJudges.labelTitle']}</div>
+          <div/>
+        </div>
+        {draft.extraJudges.map((judge,idx)=>{
+          const judgeGroup=loaded.groups.find(g=>g.id===judge.provider)
+          const judgeModels=judgeGroup?.models??[]
+          const judgeModel=judgeModels.find(m=>m.id===judge.model)
+          const judgeEfforts=judgeModel?.reasoning?.efforts??[]
+          return <div key={idx} style={{display:'grid',gridTemplateColumns:'minmax(110px, 1.2fr) minmax(120px, 1.3fr) minmax(95px, 1fr) minmax(95px, 1fr) auto',gap:8,alignItems:'center'}}>
+            <select style={selectStyle} disabled={busy} aria-label={tFormat(t['field.extraJudges.providerAria'],{index:idx+1})} value={judge.provider} onChange={e=>{
+              const newProvider=e.target.value
+              const targetGroup=loaded.groups.find(g=>g.id===newProvider)
+              const firstM=targetGroup?.models[0]
+              updateJudge(idx,{
+                provider:newProvider,
+                model:firstM?.id??'',
+                ...(firstM?.reasoning?.defaultEffort?{reasoningEffort:firstM.reasoning.defaultEffort}:{reasoningEffort:undefined}),
+              })
+            }}>
+              {!loaded.groups.some(g=>g.id===judge.provider)&&judge.provider&&<option value={judge.provider}>{judge.provider}</option>}
+              {loaded.groups.map(g=><option key={g.id} value={g.id}>{g.name} · {g.id}</option>)}
+            </select>
+            <select style={selectStyle} disabled={busy} aria-label={tFormat(t['field.extraJudges.modelAria'],{index:idx+1})} value={judge.model} onChange={e=>{
+              const newModel=e.target.value
+              const found=judgeModels.find(m=>m.id===newModel)
+              updateJudge(idx,{
+                model:newModel,
+                ...(found?.reasoning?.defaultEffort?{reasoningEffort:found.reasoning.defaultEffort}:{reasoningEffort:undefined}),
+              })
+            }}>
+              {!judgeModels.some(m=>m.id===judge.model)&&judge.model&&<option value={judge.model}>{judge.model}</option>}
+              {judgeModels.map(m=><option key={m.id} value={m.id}>{m.name} · {m.id}</option>)}
+            </select>
+            <select style={selectStyle} disabled={busy} aria-label={tFormat(t['field.extraJudges.effortAria'],{index:idx+1})} value={judge.reasoningEffort??''} onChange={e=>updateJudge(idx,{reasoningEffort:e.target.value||undefined})}>
+              <option value="">{t['field.reasoningEffort.default']}</option>
+              {judgeEfforts.map(ef=><option key={ef.id} value={ef.id}>{ef.name}</option>)}
+            </select>
+            <Input style={{width:'100%',height:36,borderRadius:8}} type="text" disabled={busy} placeholder={t['field.extraJudges.labelPlaceholder']} aria-label={tFormat(t['field.extraJudges.labelAria'],{index:idx+1})} value={judge.label??''} onChange={e=>updateJudge(idx,{label:e.target.value})}/>
+            <Button variant="outline" disabled={busy} aria-label={tFormat(t['field.extraJudges.removeAria'],{index:idx+1})} onClick={()=>removeJudge(idx)}>{t['field.extraJudges.remove']}</Button>
+          </div>
+        })}
+      </div>}
+      {conflict&&<p style={{margin:'8px 0 0',fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-warn-label)'}}>{conflict.duplicateOf==='primary'?tFormat(t['field.extraJudges.conflictPrimary'],{index:conflict.index+1,id:judgeIdentity(draft.extraJudges[conflict.index]?.provider??'',draft.extraJudges[conflict.index]?.model??'')}):tFormat(t['field.extraJudges.conflictDuplicate'],{index:conflict.index+1,other:conflict.duplicateOf+1,id:judgeIdentity(draft.extraJudges[conflict.index]?.provider??'',draft.extraJudges[conflict.index]?.model??'')})}</p>}
     </section>
 
     <section style={group}><GroupTitle>{t['section.execution']}</GroupTitle>
@@ -159,7 +243,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
 
     {loaded.failures.length>0&&<div style={{padding:'10px 12px',borderRadius:8,background:'var(--dsw-alias-state-warn-bg)',color:'var(--dsw-alias-state-warn-label)',fontSize:12,lineHeight:'18px'}}><div style={{fontWeight:500,marginBottom:3}}>{t['settings.catalogFailures']}</div>{loaded.failures.map(x=><div key={x}>{x}</div>)}</div>}
     {error&&<p style={{margin:0,fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-error-primary)'}}>{error}</p>}{saved&&<p style={{margin:0,fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-success-primary)'}}>{t['settings.saved']}</p>}
-    <div style={{display:'flex',justifyContent:'flex-end',gap:8,paddingTop:4}}><Button variant="outline" disabled={busy} onClick={()=>void load()}>{t['settings.reload']}</Button><Button variant="primary" disabled={busy||!loaded.writable} onClick={()=>void save()}>{busy?t['settings.saving']:t['settings.save']}</Button></div>
+    <div style={{display:'flex',justifyContent:'flex-end',gap:8,paddingTop:4}}><Button variant="outline" disabled={busy} onClick={()=>void load()}>{t['settings.reload']}</Button><Button variant="primary" disabled={busy||!loaded.writable||Boolean(conflict)} onClick={()=>void save()}>{busy?t['settings.saving']:t['settings.save']}</Button></div>
   </div>
 }
 

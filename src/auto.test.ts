@@ -14,7 +14,14 @@ function call(session: ReturnType<typeof taskSession>, name: string, id: string)
   session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: id as never, content: [{ type: 'text', text: 'ok' }], isError: false }) }, { surfaceOp: 'append' })
 }
 
-const smart = { mode: 'smart' as const, minToolCalls: 3, maxPerTask: 2, maxPerSession: 8 }
+const smart = { mode: 'smart' as const, minToolCalls: 3, maxPerTask: 2, maxPerSession: 8, threshold: 0.65 }
+
+/** A completed verifier_current_session call carrying a rendered verdict payload. */
+function sessionVerify(session: ReturnType<typeof taskSession>, id: string, payload: string) {
+  session.append('tool/call', { turn: 1, step: 1, callId: id as never, name: 'verifier_current_session', arguments: '{}' })
+  session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: id as never, content: [{ type: 'text', text: payload }], isError: false }) }, { surfaceOp: 'append' })
+}
+const verdict = (score: number, winner = 'A') => JSON.stringify({ sessionId: 's', problem: 'p', score, baselineScore: 0.2, winner, fromSeq: 0, toSeq: 9, omittedCharacters: 0, calls: 3, stats: {} })
 
 describe('automatic verification policy', () => {
   it('requires consequential work and enough evidence in smart mode', () => {
@@ -40,12 +47,44 @@ describe('automatic verification policy', () => {
     expect(analyzeAutoTask(session.events, { ...smart, mode: 'strict' })).toMatchObject({ eligible: true, reason: 'strict-eligible' })
   })
 
-  it('manual verification suppresses the automatic gate', () => {
-    const session = taskSession()
-    call(session, 'edit', 'one')
-    call(session, 'pwsh', 'two')
-    call(session, 'verifier_current_session', 'three')
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: false, reason: 'already-verified', hasManualSessionVerification: true })
+  it('suppresses the gate only for a passing manual verification that is still current', () => {
+    // A passing review of the work as it stands clears the task.
+    const accepted = taskSession()
+    call(accepted, 'edit', 'one'); call(accepted, 'pwsh', 'two'); call(accepted, 'read', 'three')
+    sessionVerify(accepted, 'four', verdict(0.81))
+    expect(analyzeAutoTask(accepted.events, smart)).toMatchObject({ eligible: false, reason: 'already-verified', hasManualSessionVerification: true, manualVerificationAccepted: true })
+
+    // A FAILING verdict must not disarm the gate (the old behaviour let it through).
+    const failing = taskSession()
+    call(failing, 'edit', 'one'); call(failing, 'pwsh', 'two'); call(failing, 'read', 'three')
+    sessionVerify(failing, 'four', verdict(0.2, 'B'))
+    expect(analyzeAutoTask(failing.events, smart)).toMatchObject({ eligible: true, hasManualSessionVerification: true, manualVerificationAccepted: false })
+
+    // A pass below the configured threshold does not count either.
+    const belowThreshold = taskSession()
+    call(belowThreshold, 'edit', 'one'); call(belowThreshold, 'pwsh', 'two'); call(belowThreshold, 'read', 'three')
+    sessionVerify(belowThreshold, 'four', verdict(0.5))
+    expect(analyzeAutoTask(belowThreshold.events, smart)).toMatchObject({ eligible: true, manualVerificationAccepted: false })
+
+    // A pass followed by more consequential work is stale.
+    const stale = taskSession()
+    call(stale, 'edit', 'one'); call(stale, 'pwsh', 'two'); call(stale, 'read', 'three')
+    sessionVerify(stale, 'four', verdict(0.9))
+    call(stale, 'edit', 'five')
+    expect(analyzeAutoTask(stale.events, smart)).toMatchObject({ eligible: true, manualVerificationAccepted: false })
+
+    // An unreadable result is never a pass.
+    const unreadable = taskSession()
+    call(unreadable, 'edit', 'one'); call(unreadable, 'pwsh', 'two'); call(unreadable, 'read', 'three')
+    call(unreadable, 'verifier_current_session', 'four')
+    expect(analyzeAutoTask(unreadable.events, smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false })
+  })
+
+  it('treats a team message as the task boundary for teammate sessions', () => {
+    const session = Session.create('session-00000000-0000-4000-8000-000000000010' as never)
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Implement the assigned team task' }], source: { kind: 'team-message' } as never }), { surfaceOp: 'append' })
+    call(session, 'edit', 'one'); call(session, 'pwsh', 'two'); call(session, 'read', 'three')
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: true, consequentialToolCalls: 2 })
   })
 
   it('resets per-task attempts for a new direct user message and enforces the session cap', () => {

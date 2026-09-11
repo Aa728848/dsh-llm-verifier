@@ -23,6 +23,19 @@ export interface RunStats extends UsageStats {
     topLogprobScores: number;
     explicitTagScores: number;
 }
+export interface JudgeScore {
+    provider: string;
+    model: string;
+    label: string;
+    ok: boolean;
+    calls: number;
+    error?: string;
+    scoreA?: number;
+    scoreB?: number;
+    winner?: 'A' | 'B' | 'tie';
+    scores?: number[];
+    ranking?: number[];
+}
 export interface CompareResult {
     scoreA: number;
     scoreB: number;
@@ -30,6 +43,8 @@ export interface CompareResult {
     criteria: CriterionResult[];
     calls: number;
     stats: RunStats;
+    judges: JudgeScore[];
+    agreement: number;
 }
 export interface SelectOptions {
     problem: string;
@@ -50,15 +65,17 @@ export interface SelectResult {
     comparisons: number;
     calls: number;
     stats: RunStats;
+    judges: JudgeScore[];
 }
 export declare class VerifierEngine {
     readonly client: VerifierClientConfig;
+    readonly clients: readonly VerifierClientConfig[];
     readonly maxConcurrency: number;
     readonly cache: ScoreCache | undefined;
     readonly inputPrice: number;
     readonly outputPrice: number;
     private readonly flights;
-    constructor(client: VerifierClientConfig, maxConcurrency?: number, cache?: ScoreCache, prices?: {
+    constructor(client: VerifierClientConfig | readonly VerifierClientConfig[], maxConcurrency?: number, cache?: ScoreCache, prices?: {
         input: number;
         output: number;
     }, flights?: SingleFlight<{
@@ -75,6 +92,7 @@ export declare class VerifierEngine {
         perRepeat: number[][];
         calls: number;
         stats: RunStats;
+        judges: JudgeScore[];
     }>;
     select(options: SelectOptions, signal?: AbortSignal): Promise<SelectResult>;
 }
