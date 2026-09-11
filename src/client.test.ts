@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { zh, en, toolLabels, tFormat, detectLanguage, compact, dateTime } from './client-i18n.ts'
 import {
   resolveCacheDirOnSave,
+  sameSettingValue,
+  sectionForSave,
   WORST_CASE_ROUTE_CALLS_PER_JUDGE,
   WORST_CASE_FINAL_CALLS_PER_JUDGE,
   WORST_CASE_TASK_PER_JUDGE,
@@ -362,6 +364,90 @@ describe('resolveCacheDirOnSave rule', () => {
     expect(resolveCacheDirOnSave('   ', '   ')).toBeUndefined()
     expect(resolveCacheDirOnSave(undefined, undefined)).toBeUndefined()
     expect(resolveCacheDirOnSave(null, '')).toBeUndefined()
+  })
+})
+
+describe('sameSettingValue', () => {
+  it('treats a missing key and an explicit undefined as the same value', () => {
+    expect(sameSettingValue({ reasoningEffort: undefined }, {})).toBe(true)
+    expect(sameSettingValue({}, { reasoningEffort: undefined })).toBe(true)
+  })
+
+  it('ignores object key order but not array order', () => {
+    expect(sameSettingValue({ a: 1, b: { c: 2, d: 3 } }, { b: { d: 3, c: 2 }, a: 1 })).toBe(true)
+    expect(sameSettingValue([1, 2], [1, 2])).toBe(true)
+    expect(sameSettingValue([1, 2], [2, 1])).toBe(false)
+    expect(sameSettingValue([1, 2], [1, 2, 3])).toBe(false)
+  })
+
+  it('never equates an absent value with null, 0 or false', () => {
+    expect(sameSettingValue(null, undefined)).toBe(false)
+    expect(sameSettingValue(0, undefined)).toBe(false)
+    expect(sameSettingValue(false, undefined)).toBe(false)
+    expect(sameSettingValue(0, false)).toBe(false)
+    expect(sameSettingValue('0', 0)).toBe(false)
+  })
+
+  it('compares nested judge drafts', () => {
+    const judge = { provider: 'deepseek-official', model: 'deepseek-flash', maxTokens: 32768 }
+    expect(sameSettingValue([judge], [{ maxTokens: 32768, model: 'deepseek-flash', provider: 'deepseek-official' }])).toBe(true)
+    expect(sameSettingValue([judge], [{ ...judge, maxTokens: 4096 }])).toBe(false)
+  })
+})
+
+describe('settings save layer', () => {
+  const BASE = {
+    autoMaxModelCallsPerTask: 96,
+    autoMaxModelCallsPerSession: 240,
+    enabled: true,
+    autoVerifyMaxPerSession: 8,
+    extraJudges: [] as unknown[],
+  }
+
+  it('drops every field that only repeats the base composition', () => {
+    expect(sectionForSave({}, { enabled: true, autoMaxModelCallsPerTask: 96, extraJudges: [] }, BASE)).toEqual({})
+  })
+
+  it('keeps a field whose value differs from the base', () => {
+    expect(sectionForSave({}, { enabled: true, autoMaxModelCallsPerTask: 54 }, BASE))
+      .toEqual({ autoMaxModelCallsPerTask: 54 })
+  })
+
+  it('prunes a stored copy of a value the base already supplies', () => {
+    // The shape this plugin used to write: every field pinned, including the
+    // budget values that later moved 48 -> 64 -> 96 in the plugin defaults.
+    const stored = { enabled: true, autoVerifyMaxPerSession: 8, autoMaxModelCallsPerTask: 54 }
+    const draft = { enabled: true, autoVerifyMaxPerSession: 8, autoMaxModelCallsPerTask: 54 }
+    expect(sectionForSave(stored, draft, BASE)).toEqual({ autoMaxModelCallsPerTask: 54 })
+  })
+
+  it('keeps user-layer keys this client does not own', () => {
+    expect(sectionForSave({ futureKey: 'keep-me' }, { enabled: true }, BASE)).toEqual({ futureKey: 'keep-me' })
+  })
+
+  it('writes every draft field when the host reports no base', () => {
+    expect(sectionForSave({}, { enabled: true, autoMaxModelCallsPerTask: 96 }, undefined))
+      .toEqual({ enabled: true, autoMaxModelCallsPerTask: 96 })
+  })
+
+  it('never stores an undefined override but keeps a key the base omits', () => {
+    expect(sectionForSave({}, { reasoningEffort: undefined, autoVerifyThreshold: 0.65 }, BASE))
+      .toEqual({ autoVerifyThreshold: 0.65 })
+  })
+
+  it('clears a stored override the draft no longer carries', () => {
+    const stored = { label: 'old judge', cacheDir: 'legacy-cache', reasoningEffort: 'high' }
+    expect(sectionForSave(stored, { label: undefined, cacheDir: undefined, reasoningEffort: undefined }, BASE))
+      .toEqual({})
+  })
+
+  it('clears a stored override even when the host reports no base', () => {
+    expect(sectionForSave({ label: 'old judge' }, { label: undefined }, undefined)).toEqual({})
+  })
+
+  it('keeps an extra judge whose base counterpart differs', () => {
+    const judge = { provider: 'antigravity', model: 'gemini-3.8-flash' }
+    expect(sectionForSave({}, { extraJudges: [judge] }, BASE)).toEqual({ extraJudges: [judge] })
   })
 })
 

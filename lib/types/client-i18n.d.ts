@@ -101,6 +101,7 @@ export declare const zh: {
     'settings.catalogFailures': string;
     'settings.saved': string;
     'settings.reload': string;
+    'settings.unsaved': string;
     'settings.save': string;
     'settings.saving': string;
     'stats.pageTitle': string;
@@ -284,6 +285,7 @@ export declare const dictionaries: {
         'settings.catalogFailures': string;
         'settings.saved': string;
         'settings.reload': string;
+        'settings.unsaved': string;
         'settings.save': string;
         'settings.saving': string;
         'stats.pageTitle': string;
@@ -464,6 +466,7 @@ export declare const dictionaries: {
         'settings.catalogFailures': string;
         'settings.saved': string;
         'settings.reload': string;
+        'settings.unsaved': string;
         'settings.save': string;
         'settings.saving': string;
         'stats.pageTitle': string;
@@ -559,6 +562,32 @@ export interface VerdictSummary {
     threshold?: number;
 }
 export declare function resolveCacheDirOnSave(draft: string | undefined | null, previous?: string | null): string | undefined;
+/**
+ * Deep equality for JSON-shaped settings values, insensitive to object key
+ * order and treating a missing key as `undefined`. The settings page compares a
+ * draft against a resolved view that was built from a different object shape,
+ * so identity comparison is never enough.
+ */
+export declare function sameSettingValue(left: unknown, right: unknown): boolean;
+/**
+ * Build the user layer for one settings save.
+ *
+ * Keys this client does not own survive untouched and every draft field is
+ * written, but a field that only repeats the base composition is *dropped*
+ * rather than pinned. Pinning is what makes a shipped default change
+ * unreachable: the budget fields once defaulted to 48/160, and a section that
+ * stored those numbers kept overriding 64/240 and then 96/240 forever. `base`
+ * is the descriptor's composition base (the resolved plugin config), so the
+ * stored section keeps exactly what the user really overrode.
+ *
+ * An explicit `undefined` draft value means "clear this override": it deletes
+ * the stored key instead of pinning a valueless one, which is how the form
+ * removes a judge label, a reasoning effort or a cache directory.
+ *
+ * A host that reports no `base` cannot be pruned against and keeps the old
+ * write-everything behavior.
+ */
+export declare function sectionForSave(user: Record<string, unknown>, draft: Record<string, unknown>, base: Record<string, unknown> | undefined): Record<string, unknown>;
 /** An eight-candidate select: ring + pivot rounds (18 pairs) x three criteria, one repeat. */
 export declare const WORST_CASE_ROUTE_CALLS_PER_JUDGE = 54;
 /** Final acceptance: three criteria x the default two repeats (one per A/B position). */

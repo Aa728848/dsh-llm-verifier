@@ -8,7 +8,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage,
   compact, money, duration, dateTime, type I18nDict,
-  type VerdictSummary, resolveCacheDirOnSave,
+  type VerdictSummary, resolveCacheDirOnSave, sameSettingValue, sectionForSave,
   WORST_CASE_ROUTE_CALLS_PER_JUDGE, WORST_CASE_FINAL_CALLS_PER_JUDGE, WORST_CASE_TASK_PER_JUDGE, WORST_CASE_SESSION_PER_JUDGE,
   computeJudgeCount, computeWorstCaseBudget, type BudgetWarningState,
   evaluateBudgetWarning, isVerdictFailed, formatPercentage, formatVerdictDetails,
@@ -26,7 +26,7 @@ import {
 
 export {
   zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage, compact, money, duration, dateTime, type I18nDict,
-  type VerdictSummary, resolveCacheDirOnSave, WORST_CASE_ROUTE_CALLS_PER_JUDGE, WORST_CASE_FINAL_CALLS_PER_JUDGE, WORST_CASE_TASK_PER_JUDGE, WORST_CASE_SESSION_PER_JUDGE,
+  type VerdictSummary, resolveCacheDirOnSave, sameSettingValue, sectionForSave, WORST_CASE_ROUTE_CALLS_PER_JUDGE, WORST_CASE_FINAL_CALLS_PER_JUDGE, WORST_CASE_TASK_PER_JUDGE, WORST_CASE_SESSION_PER_JUDGE,
   computeJudgeCount, computeWorstCaseBudget, type BudgetWarningState, evaluateBudgetWarning, isVerdictFailed,
   formatPercentage, formatVerdictDetails,
 }
@@ -105,6 +105,37 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
   const [loaded,setLoaded]=useState<Loaded|null>(null); const [draft,setDraft]=useState<Values|null>(null); const [busy,setBusy]=useState(false); const [error,setError]=useState<string|null>(null); const [saved,setSaved]=useState(false); const [editing,setEditing]=useState<Record<string,string>>({})
   const load=async()=>{setError(null);try{const [m,s]=await Promise.all([remote.session.modelCatalog(),remote.settings.describe()]);if(!m.ok)throw new Error(m.error.message);if(!s.ok)throw new Error(s.error.message);const view=s.value.namespaces.find((x:SettingsNamespaceView)=>x.ns===NS);if(!view)throw new Error(t['settings.nsUnregistered']);const next={groups:m.value.groups,settings:view,writable:s.value.writable,failures:m.value.failures.map((f: { id?: string; provider?: string; name?: string; message: string })=>(f.id??f.provider??f.name??'unknown')+': '+f.message)};setLoaded(next);setDraft(values(view));setEditing({})}catch(e){setError(message(e))}}
   useEffect(()=>{void load()},[])
+  const dirty=useMemo(()=>loaded!==null&&draft!==null&&!sameSettingValue(draft,values(loaded.settings)),[loaded,draft])
+  // Another writer — the settings shell's reset, a second window, an edit to
+  // settings.yaml — can move this namespace under a page that never re-reads
+  // it, and the stale draft would then be written straight back on the next
+  // save. Re-read whenever the page regains focus, but only while the draft
+  // holds no unsaved edit: a pending edit belongs to the user, and the
+  // revision check on save still rejects a write that raced a moved namespace.
+  const latest=useRef({loaded,draft})
+  latest.current={loaded,draft}
+  useEffect(()=>{
+    const sync=()=>{
+      if(document.visibilityState==='hidden')return
+      const {loaded:at,draft:local}=latest.current
+      if(!at||!local)return
+      if(!sameSettingValue(local,values(at.settings)))return
+      void (async()=>{
+        try{
+          const s=await remote.settings.describe()
+          if(!s.ok)return
+          const view=s.value.namespaces.find((x:SettingsNamespaceView)=>x.ns===NS)
+          if(!view||view.revision===at.settings.revision)return
+          const next:Loaded={...at,settings:view,writable:s.value.writable}
+          latest.current={loaded:next,draft:values(view)}
+          setLoaded(next);setDraft(values(view));setEditing({});setSaved(false)
+        }catch{/* keep the last good view; the reload button still forces a read */}
+      })()
+    }
+    window.addEventListener('focus',sync)
+    document.addEventListener('visibilitychange',sync)
+    return ()=>{window.removeEventListener('focus',sync);document.removeEventListener('visibilitychange',sync)}
+  },[remote])
   const models=useMemo(()=>loaded?.groups.find(g=>g.id===draft?.provider)?.models??[],[loaded,draft?.provider])
   const selected=models.find(m=>m.id===draft?.model); const efforts=selected?.reasoning?.efforts??[]
   const patch=<K extends keyof Values>(key:K,value:Values[K])=>{setSaved(false);setDraft(v=>v?{...v,[key]:value}:v)}
@@ -141,7 +172,30 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
       draft.autoMaxModelCallsPerSession,
     )
   }, [draft?.autoVerifyMode, draft?.extraJudges.length, draft?.autoMaxModelCallsPerTask, draft?.autoMaxModelCallsPerSession])
-  const save=async()=>{if(!loaded||!draft||conflict)return;setBusy(true);setSaved(false);setError(null);try{const section={...record(loaded.settings.user),...draft,extraJudges:serializeExtraJudges(draft.extraJudges)};if(!draft.reasoningEffort)delete section.reasoningEffort;if(!draft.label||!draft.label.trim())delete section.label;else section.label=draft.label.trim();const resolvedCacheDir=resolveCacheDirOnSave(draft.cacheDir,values(loaded.settings).cacheDir);if(!resolvedCacheDir)delete (section as {cacheDir?:string}).cacheDir;else section.cacheDir=resolvedCacheDir;const res=await remote.settings.update(NS,section as never,loaded.settings.revision);if(!res.ok)throw new Error(res.error.message);setLoaded(v=>v?{...v,settings:res.value}:v);setDraft(values(res.value));setEditing({});setSaved(true)}catch(e){setError(message(e))}finally{setBusy(false)}}
+  // The saved section holds only real overrides: a draft field equal to the
+  // composition base is dropped so a later plugin default still reaches this
+  // install (see sectionForSave).
+  const save=async()=>{
+    if(!loaded||!draft||conflict)return
+    setBusy(true);setSaved(false);setError(null)
+    try{
+      // An explicit undefined means "clear the stored override": sectionForSave
+      // starts from the previous user layer, so simply omitting a key would let
+      // the stale override outlive the save that cleared it.
+      const editable:Record<string,unknown>={
+        ...draft,
+        extraJudges:serializeExtraJudges(draft.extraJudges),
+        reasoningEffort:draft.reasoningEffort||undefined,
+        label:draft.label?.trim()||undefined,
+        cacheDir:resolveCacheDirOnSave(draft.cacheDir,values(loaded.settings).cacheDir),
+      }
+      const base=loaded.settings.base===undefined?undefined:record(loaded.settings.base)
+      const section=sectionForSave(record(loaded.settings.user),editable,base)
+      const res=await remote.settings.update(NS,section as never,loaded.settings.revision)
+      if(!res.ok)throw new Error(res.error.message)
+      setLoaded(v=>v?{...v,settings:res.value}:v);setDraft(values(res.value));setEditing({});setSaved(true)
+    }catch(e){setError(message(e))}finally{setBusy(false)}
+  }
   if(!loaded||!draft)return <div style={shell}><h2 style={settingsHeading}>{t['settings.title']}</h2><p style={settingsIntro}>{error??t['settings.loading']}</p>{error&&<div><Button variant="outline" onClick={()=>void load()}>{t['settings.retry']}</Button></div>}</div>
   // Fractional settings are typed character by character, so the raw text is
   // kept while the field has focus: a controlled type="number" input rewrites
@@ -275,7 +329,8 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     </section>
 
     {loaded.failures.length>0&&<div style={{padding:'10px 12px',borderRadius:8,background:'var(--dsw-alias-state-warn-bg)',color:'var(--dsw-alias-state-warn-label)',fontSize:12,lineHeight:'18px'}}><div style={{fontWeight:500,marginBottom:3}}>{t['settings.catalogFailures']}</div>{loaded.failures.map(x=><div key={x}>{x}</div>)}</div>}
-    {error&&<p style={{margin:0,fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-error-primary)'}}>{error}</p>}{saved&&<p style={{margin:0,fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-success-primary)'}}>{t['settings.saved']}</p>}
+    {error&&<p style={{margin:0,fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-error-primary)'}}>{error}</p>}{saved&&!dirty&&<p style={{margin:0,fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-success-primary)'}}>{t['settings.saved']}</p>}
+    {dirty&&<p style={{margin:0,fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-warn-label)'}}>{t['settings.unsaved']}</p>}
     <div style={{display:'flex',justifyContent:'flex-end',gap:8,paddingTop:4}}><Button variant="outline" disabled={busy} onClick={()=>void load()}>{t['settings.reload']}</Button><Button variant="primary" disabled={busy||!loaded.writable||Boolean(conflict)} onClick={()=>void save()}>{busy?t['settings.saving']:t['settings.save']}</Button></div>
   </div>
 }
