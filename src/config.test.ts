@@ -383,3 +383,28 @@ describe('config - settings payload seam', () => {
     expect(() => resolveConfig(Config({ provider: 'deepseek-official', model: 'deepseek-flash', extraJudges: payload }))).toThrow(/duplicate judge/)
   })
 })
+
+describe('config - temperature', () => {
+  it('defaults to 0.2 in schema and resolveConfig', () => {
+    const fromSchema = Config({})
+    expect(fromSchema.temperature).toBe(0.2)
+    const resolved = resolveConfig({})
+    expect(resolved.temperature).toBe(0.2)
+  })
+
+  it('accepts explicit valid temperature (including 0, 1.5, 2)', () => {
+    const fromSchema = Config({ temperature: 0.7 })
+    expect(fromSchema.temperature).toBe(0.7)
+    const resolved = resolveConfig({ temperature: 0.7 })
+    expect(resolved.temperature).toBe(0.7)
+
+    expect(resolveConfig({ temperature: 0 }).temperature).toBe(0)
+    expect(resolveConfig({ temperature: 2 }).temperature).toBe(2)
+  })
+
+  it('rejects temperature < 0, > 2, or NaN with expected message', () => {
+    expect(() => resolveConfig({ temperature: -1 })).toThrow('llm-verifier: temperature must be between 0 and 2')
+    expect(() => resolveConfig({ temperature: 3 })).toThrow('llm-verifier: temperature must be between 0 and 2')
+    expect(() => resolveConfig({ temperature: NaN })).toThrow('llm-verifier: temperature must be between 0 and 2')
+  })
+})

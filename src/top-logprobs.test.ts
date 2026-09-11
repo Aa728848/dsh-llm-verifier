@@ -2,8 +2,8 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
-import { CAPABILITY_TTL_MS, TopLogprobCapabilityCache, resolveCapabilityFile } from './top-logprobs.ts'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { CAPABILITY_TTL_MS, TopLogprobCapabilityCache, callTopLogprobs, resolveCapabilityFile } from './top-logprobs.ts'
 
 describe('TopLogprobCapabilityCache persistence', () => {
   it('round-trips marks across instances through the capability file', async () => {
@@ -89,5 +89,57 @@ describe('TopLogprobCapabilityCache persistence', () => {
     cache.markUnsupported('p', 'm')
     expect(cache.isUnsupported('p', 'm')).toBe(true)
     expect(cache.isUnsupported('p', 'other')).toBe(false)
+  })
+})
+
+describe('callTopLogprobs temperature', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('sends default temperature 0.2 in request body when unspecified', async () => {
+    let capturedBody: any
+    const mockResponse = {
+      choices: [{
+        message: { content: '<score_A> A </score_A>' },
+        logprobs: {
+          content: [
+            { token: '<score_A>', logprob: 0, top_logprobs: [] },
+            { token: 'A', logprob: -0.1, top_logprobs: [{ token: 'A', logprob: 0 }] },
+          ],
+        },
+      }],
+      usage: { prompt_tokens: 10, completion_tokens: 2 },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_url, init: any) => {
+      capturedBody = JSON.parse(init.body)
+      return new Response(JSON.stringify(mockResponse), { status: 200 })
+    }))
+
+    const route = { baseURL: 'https://api.openai.com/v1', apiKey: 'test-key', deepSeekThinking: false }
+    await callTopLogprobs(route, 'gpt-4o', 'test prompt', 100, undefined)
+    expect(capturedBody.temperature).toBe(0.2)
+  })
+
+  it('sends explicit temperature in request body when specified', async () => {
+    let capturedBody: any
+    const mockResponse = {
+      choices: [{
+        message: { content: '<score_A> A </score_A>' },
+        logprobs: {
+          content: [
+            { token: '<score_A>', logprob: 0, top_logprobs: [] },
+            { token: 'A', logprob: -0.1, top_logprobs: [{ token: 'A', logprob: 0 }] },
+          ],
+        },
+      }],
+      usage: { prompt_tokens: 10, completion_tokens: 2 },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_url, init: any) => {
+      capturedBody = JSON.parse(init.body)
+      return new Response(JSON.stringify(mockResponse), { status: 200 })
+    }))
+
+    const route = { baseURL: 'https://api.openai.com/v1', apiKey: 'test-key', deepSeekThinking: false }
+    await callTopLogprobs(route, 'gpt-4o', 'test prompt', 100, undefined, undefined, undefined, 1, 0.7)
+    expect(capturedBody.temperature).toBe(0.7)
   })
 })

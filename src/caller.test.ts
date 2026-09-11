@@ -4,7 +4,7 @@ import { TopLogprobCapabilityCache } from './top-logprobs.ts'
 
 function chunks(text = '<score_A> A </score_A>') { return [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'text-delta', index: 0, text }, { type: 'block-end', index: 0, block: { type: 'text', text } }, { type: 'usage', usage: { inputTokens: 7, cacheReadTokens: 3, outputTokens: 4, reasoningTokens: 2 } }, { type: 'finish', reason: { kind: 'stop' } }] as any[] }
 function ctx(settingsValue?: unknown) { return { get(name: string) { if (name === 'settings' && settingsValue !== undefined) return { get: () => settingsValue }; if (name === 'credentials') return { resolve: async () => ({ value: 'secret' }) }; return undefined } } as any }
-function config(stream: (options: any) => AsyncIterable<any>, saveImage = vi.fn(), context = ctx()) { return { ctx: context, llm: { stream } as any, attachments: { saveImage } as any, topLogprobCapabilities: new TopLogprobCapabilityCache(), provider: 'openai', model: 'gpt-5', reasoningEffort: 'high', maxTokens: 100, timeoutMs: 1000, maxRetries: 2, retryBaseDelayMs: 1 } }
+function config(stream: (options: any) => AsyncIterable<any>, saveImage = vi.fn(), context = ctx(), overrides: Record<string, any> = {}) { return { ctx: context, llm: { stream } as any, attachments: { saveImage } as any, topLogprobCapabilities: new TopLogprobCapabilityCache(), provider: 'openai', model: 'gpt-5', reasoningEffort: 'high', maxTokens: 100, temperature: 0.2, timeoutMs: 1000, maxRetries: 2, retryBaseDelayMs: 1, ...overrides } }
 async function* streamOf(items: any[]) { for (const item of items) yield item }
 afterEach(() => vi.unstubAllGlobals())
 
@@ -13,14 +13,26 @@ describe('automatic verifier scoring', () => {
     let seen: any
     const result = await callVerifier(config(async function* (options) { seen = options; yield* streamOf(chunks()) }), 'prompt')
     expect(seen.provider).toBe('openai'); expect(result.scoringMode).toBe('explicit-tag')
+    expect(seen.temperature).toBe(0.2)
+  })
+  it('sends config.temperature to llm.stream in explicit-tag transport', async () => {
+    let seen: any
+    await callVerifier(config(async function* (options) { seen = options; yield* streamOf(chunks()) }, vi.fn(), ctx(), { temperature: 0.7 }), 'prompt')
+    expect(seen.temperature).toBe(0.7)
   })
   it('uses top-logprob distributions on an explicit OpenAI-compatible route', async () => {
     const body = { choices: [{ message: { content: '<score_A> A </score_A>' }, logprobs: { content: [{ token: '<score_A>', logprob: 0, top_logprobs: [] }, { token: 'A', logprob: -0.1, top_logprobs: [{ token: 'A', logprob: Math.log(0.7) }, { token: 'T', logprob: Math.log(0.3) }] }] } }], usage: { prompt_tokens: 10, completion_tokens: 2 } }
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })))
     let streamed = false
     const context = ctx({ providers: { openai: { api: 'openai-completions', baseURL: 'https://example.test/v1', apiKeyEnv: 'OPENAI_API_KEY' } } })
-    const result = await callVerifier(config(async function* () { streamed = true; yield* streamOf(chunks()) }, vi.fn(), context), 'prompt')
+    let capturedBody: any
+    vi.stubGlobal('fetch', vi.fn(async (_url, init: any) => {
+      capturedBody = JSON.parse(init.body)
+      return new Response(JSON.stringify(body), { status: 200 })
+    }))
+    const result = await callVerifier(config(async function* () { streamed = true; yield* streamOf(chunks()) }, vi.fn(), context, { temperature: 0.8 }), 'prompt')
     expect(result.scoringMode).toBe('top-logprobs'); expect(result.positions[1]?.length).toBe(2); expect(streamed).toBe(false)
+    expect(capturedBody.temperature).toBe(0.8)
   })
   it('applies timeout and retry budget to the top-logprob transport', async () => {
     const fetcher = vi.fn((_url: unknown, init: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
@@ -176,5 +188,58 @@ describe('RequestLimiter', () => {
     expect(results[1].status).toBe('rejected')
     expect((results[1] as PromiseRejectedResult).reason).toEqual(new Error('aborted-while-queued'))
     expect(results[2]).toEqual({ status: 'fulfilled', value: 'task3' })
+  })
+})
+
+describe('retrying abort handling (FIX 2)', () => {
+  it('rejects with signal.reason when signal is already aborted and never invokes llm.stream', async () => {
+    let streamCalled = false
+    const stream = vi.fn(async function* () {
+      streamCalled = true
+      yield* streamOf(chunks())
+    })
+    const controller = new AbortController()
+    const abortReason = new Error('caller aborted upfront')
+    controller.abort(abortReason)
+
+    const cfg = config(stream)
+    delete cfg.limiter
+    await expect(callVerifier(cfg, 'prompt', controller.signal)).rejects.toThrow('caller aborted upfront')
+    expect(streamCalled).toBe(false)
+    expect(stream).not.toHaveBeenCalled()
+  })
+})
+
+describe('imageRefs eviction on rejection (FIX 3)', () => {
+  it('evicts rejected saveImage promise so second attempt retries save rather than rethrowing cached rejection', async () => {
+    let saveCount = 0
+    const saveImage = vi.fn(async () => {
+      saveCount += 1
+      if (saveCount === 1) {
+        throw new Error('transient disk/lock error')
+      }
+      return { id: 'att-1' }
+    })
+    const stream = vi.fn(async function* () {
+      yield* streamOf(chunks())
+    })
+    const cfg = config(stream, saveImage)
+    cfg.maxRetries = 0
+
+    const image = { data: new Uint8Array([1, 2, 3]), mediaType: 'image/png' as const }
+
+    // First call: saveImage rejects
+    await expect(callVerifier(cfg, 'prompt 1', undefined, [image])).rejects.toThrow('transient disk/lock error')
+    expect(saveImage).toHaveBeenCalledTimes(1)
+
+    // Second call: with same image object, should re-attempt save and succeed
+    const result = await callVerifier(cfg, 'prompt 2', undefined, [image])
+    expect(result.scoringMode).toBe('explicit-tag')
+    expect(saveImage).toHaveBeenCalledTimes(2)
+
+    // Third call: with same image object, should reuse cached successful promise
+    const result3 = await callVerifier(cfg, 'prompt 3', undefined, [image])
+    expect(result3.scoringMode).toBe('explicit-tag')
+    expect(saveImage).toHaveBeenCalledTimes(2)
   })
 })

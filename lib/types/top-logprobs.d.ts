@@ -24,7 +24,7 @@ export declare class TopLogprobsRouteError extends TopLogprobsUnsupportedError {
     constructor(message: string, status?: number | undefined);
 }
 export declare function resolveTopLogprobRoute(ctx: Context, provider: string): Promise<TopLogprobRoute | undefined>;
-export declare function callTopLogprobs(route: TopLogprobRoute, model: string, prompt: string, maxTokens: number, reasoningEffort: string | undefined, signal?: AbortSignal, images?: readonly VerifierImage[], attempt?: number): Promise<TopLogprobCompletion>;
+export declare function callTopLogprobs(route: TopLogprobRoute, model: string, prompt: string, maxTokens: number, reasoningEffort: string | undefined, signal?: AbortSignal, images?: readonly VerifierImage[], attempt?: number, temperature?: number): Promise<TopLogprobCompletion>;
 /** Marks older than this are dropped on hydration so a provider that later gains logprobs support is re-probed. */
 export declare const CAPABILITY_TTL_MS: number;
 /** Resolves the capability memory file beside the score cache inside the topic verifier directory. */

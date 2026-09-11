@@ -30,6 +30,7 @@ export interface VerifierClientConfig {
   label?: string
   reasoningEffort?: string
   maxTokens: number
+  temperature: number
   timeoutMs: number
   maxRetries: number
   retryBaseDelayMs: number
@@ -90,6 +91,7 @@ const RETRYABLE_MESSAGE = /rate|quota|timeout|timed out|temporar|network|fetch|s
 async function retrying<T>(config: VerifierClientConfig, signal: AbortSignal | undefined, run: (signal: AbortSignal, attempt: number) => Promise<T>): Promise<T> {
   let attempt = 0
   while (true) {
+    if (signal?.aborted) throw signal.reason
     attempt += 1
     const controller = new AbortController()
     let timedOut = false
@@ -119,7 +121,18 @@ async function callExplicitTag(config: VerifierClientConfig, prompt: string, sig
   const content: ContentBlock[] = [{ type: 'text', text: prompt }]
   for (const image of images ?? []) {
     let pending = imageRefs.get(image)
-    if (pending === undefined) { pending = config.attachments.saveImage({ data: image.data, mediaType: image.mediaType }); imageRefs.set(image, pending) }
+    if (pending === undefined) {
+      const promise = Promise.resolve()
+        .then(() => config.attachments.saveImage({ data: image.data, mediaType: image.mediaType }))
+        .catch(error => {
+          if (imageRefs.get(image) === pending) {
+            imageRefs.delete(image)
+          }
+          throw error
+        })
+      pending = promise
+      imageRefs.set(image, pending)
+    }
     content.push({ type: 'image', attachment: await pending as never })
   }
   const messages = [createUserMessage({ content, source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } })]
@@ -130,7 +143,7 @@ async function callExplicitTag(config: VerifierClientConfig, prompt: string, sig
     ...(config.reasoningEffort ? { reasoningEffort: ReasoningEffortId(config.reasoningEffort) } : {}),
     messages,
     maxTokens: config.maxTokens,
-    temperature: 1,
+    temperature: config.temperature,
     signal,
   })
   for await (const chunk of config.llm.stream(options)) assembler.push(chunk)
@@ -174,7 +187,7 @@ async function callAutomatic(config: VerifierClientConfig, prompt: string, signa
   if (!config.topLogprobCapabilities.isUnsupported(config.provider, config.model)) {
     const route = await resolveTopLogprobRoute(config.ctx, config.provider)
     if (route !== undefined) {
-      try { return await callTopLogprobs(route, config.model, prompt, config.maxTokens, config.reasoningEffort, signal, images, attempt) }
+      try { return await callTopLogprobs(route, config.model, prompt, config.maxTokens, config.reasoningEffort, signal, images, attempt, config.temperature) }
       catch (error) {
         // Both a capability rejection and a non-retryable provider rejection of
         // the direct transport fall back to the DSH stream instead of failing

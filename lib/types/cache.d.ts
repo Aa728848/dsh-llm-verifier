@@ -20,6 +20,7 @@ export declare class ScoreCache {
     private readonly file;
     private readonly maxEntries;
     private loaded;
+    private hydrating;
     private entries;
     private readonly inflight;
     private writing;

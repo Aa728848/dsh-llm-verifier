@@ -1,8 +1,28 @@
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { describe, expect, it } from 'vitest'
-import { StatisticsStore, emptyRunStats, mergeStatisticsOverviews } from './statistics.ts'
+import { describe, expect, it, vi } from 'vitest'
+import {
+  StatisticsStore,
+  emptyRunStats,
+  mergeStatisticsOverviews,
+  parseStatisticsQuery,
+} from './statistics.ts'
+
+const readTracker = {
+  calls: [] as string[],
+}
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    readFile: vi.fn(async (...args: Parameters<typeof actual.readFile>) => {
+      readTracker.calls.push(String(args[0]))
+      return actual.readFile(...args)
+    }),
+  }
+})
 
 function stats(overrides: Partial<ReturnType<typeof emptyRunStats>> = {}) {
   return { ...emptyRunStats(), ...overrides }
@@ -76,5 +96,296 @@ describe('StatisticsStore', () => {
 
     expect(normalize(legacyHeaders).map(h => h.id)).toEqual(['sess-1'])
     expect(normalize(modernSnapshots).map(h => h.id)).toEqual(['sess-2'])
+  })
+
+  it('guards cold-start hydration so concurrent operations see persisted entries and read file once', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const file = join(root, 'statistics.json')
+    const storeSeed = new StatisticsStore(file)
+    await storeSeed.record({
+      toolName: 'verifier_compare',
+      startedAt: 1_000,
+      finishedAt: 1_200,
+      success: true,
+      provider: 'p',
+      model: 'm',
+      stats: stats({ calls: 1 }),
+    })
+
+    readTracker.calls = []
+    const freshStore = new StatisticsStore(file)
+    const query = { fromMs: 0, toMs: 10_000 }
+
+    const [all1, all2] = await Promise.all([
+      freshStore.overview(query),
+      freshStore.overview(query),
+    ])
+
+    expect(all1.totals.invocations).toBe(1)
+    expect(all2.totals.invocations).toBe(1)
+    expect(all1.recent[0]?.id).toBe(all2.recent[0]?.id)
+
+    const fileReads = readTracker.calls.filter(p => p === file).length
+    expect(fileReads).toBe(1)
+  })
+
+  it('starts empty when the statistics file does not exist (ENOENT)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const file = join(root, 'non-existent.json')
+    const store = new StatisticsStore(file)
+    const result = await store.overview({ fromMs: 0, toMs: 10_000 })
+    expect(result.totals.invocations).toBe(0)
+    expect(result.recent).toHaveLength(0)
+  })
+
+  it('propagates non-ENOENT read errors', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const file = join(root, 'corrupted.json')
+    await writeFile(file, '{ corrupt json', 'utf8')
+    const store = new StatisticsStore(file)
+    await expect(store.overview({ fromMs: 0, toMs: 10_000 })).rejects.toThrow()
+  })
+
+  it('records verdict and round-trips through persistence into overview recent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const file = join(root, 'statistics.json')
+    const store = new StatisticsStore(file)
+    const record = await store.record({
+      toolName: 'verifier_compare',
+      startedAt: 100,
+      finishedAt: 200,
+      success: true,
+      provider: 'p',
+      model: 'm',
+      stats: stats(),
+      verdict: {
+        phase: 'explicit',
+        outcome: 'passed',
+        score: 0.95,
+        baselineScore: 0.2,
+        winner: 'A',
+        threshold: 0.8,
+      },
+    })
+    expect(record.verdict).toEqual({
+      phase: 'explicit',
+      outcome: 'passed',
+      score: 0.95,
+      baselineScore: 0.2,
+      winner: 'A',
+      threshold: 0.8,
+    })
+
+    const freshStore = new StatisticsStore(file)
+    const result = await freshStore.overview({ fromMs: 0, toMs: 1_000 })
+    expect(result.recent[0]?.verdict).toEqual({
+      phase: 'explicit',
+      outcome: 'passed',
+      score: 0.95,
+      baselineScore: 0.2,
+      winner: 'A',
+      threshold: 0.8,
+    })
+  })
+
+  it('loads old records that have no verdict', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const file = join(root, 'statistics.json')
+    await writeFile(file, JSON.stringify({
+      version: 1,
+      records: [
+        {
+          id: 'old-record-1',
+          toolName: 'verifier_compare',
+          startedAt: 100,
+          finishedAt: 200,
+          durationMs: 100,
+          success: true,
+          provider: 'p',
+          model: 'm',
+          stats: stats(),
+        },
+      ],
+    }), 'utf8')
+
+    const store = new StatisticsStore(file)
+    const result = await store.overview({ fromMs: 0, toMs: 1_000 })
+    expect(result.totals.invocations).toBe(1)
+    expect(result.recent[0]?.id).toBe('old-record-1')
+    expect(result.recent[0]?.verdict).toBeUndefined()
+  })
+
+  it('does not crash the load when a stored record has a malformed verdict', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const file = join(root, 'statistics.json')
+    await writeFile(file, JSON.stringify({
+      version: 1,
+      records: [
+        {
+          id: 'valid-record',
+          toolName: 'verifier_compare',
+          startedAt: 100,
+          finishedAt: 200,
+          durationMs: 100,
+          success: true,
+          provider: 'p',
+          model: 'm',
+          stats: stats(),
+          verdict: { phase: 'compare', outcome: 'passed' },
+        },
+        {
+          id: 'malformed-verdict-string',
+          toolName: 'verifier_compare',
+          startedAt: 150,
+          finishedAt: 250,
+          durationMs: 100,
+          success: true,
+          provider: 'p',
+          model: 'm',
+          stats: stats(),
+          verdict: 'not an object',
+        },
+        {
+          id: 'malformed-verdict-null',
+          toolName: 'verifier_compare',
+          startedAt: 160,
+          finishedAt: 260,
+          durationMs: 100,
+          success: true,
+          provider: 'p',
+          model: 'm',
+          stats: stats(),
+          verdict: null,
+        },
+      ],
+    }), 'utf8')
+
+    const store = new StatisticsStore(file)
+    const result = await store.overview({ fromMs: 0, toMs: 1_000 })
+    expect(result.totals.invocations).toBe(1)
+    expect(result.recent).toHaveLength(1)
+    expect(result.recent[0]?.id).toBe('valid-record')
+  })
+
+  it('omits undefined verdict keys from persisted JSON', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const file = join(root, 'statistics.json')
+    const store = new StatisticsStore(file)
+    await store.record({
+      toolName: 'verifier_track',
+      startedAt: 100,
+      success: true,
+      provider: 'p',
+      model: 'm',
+      stats: stats(),
+      verdict: {
+        phase: 'track',
+        outcome: 'passed',
+        score: undefined,
+        baselineScore: undefined,
+        winner: undefined,
+      },
+    })
+    await store.record({
+      toolName: 'verifier_select',
+      startedAt: 200,
+      success: true,
+      provider: 'p',
+      model: 'm',
+      stats: stats(),
+      // no verdict supplied
+    })
+
+    const raw = JSON.parse(await readFile(file, 'utf8'))
+    const withVerdict = raw.records.find((r: any) => r.toolName === 'verifier_track')
+    const withoutVerdict = raw.records.find((r: any) => r.toolName === 'verifier_select')
+
+    expect(withVerdict.verdict).toBeDefined()
+    expect(Object.keys(withVerdict.verdict).sort()).toEqual(['outcome', 'phase'])
+    expect('score' in withVerdict.verdict).toBe(false)
+    expect('baselineScore' in withVerdict.verdict).toBe(false)
+    expect('winner' in withVerdict.verdict).toBe(false)
+
+    expect('verdict' in withoutVerdict).toBe(false)
+  })
+})
+
+describe('parseStatisticsQuery', () => {
+  it('round-trips a valid payload with all fields', () => {
+    const result = parseStatisticsQuery({
+      fromMs: 1000,
+      toMs: 2000,
+      timezoneOffsetMinutes: -120,
+      recentLimit: 50,
+      sessionId: 'sess-123',
+    })
+    expect(result).toEqual({
+      ok: true,
+      query: {
+        fromMs: 1000,
+        toMs: 2000,
+        timezoneOffsetMinutes: -120,
+        recentLimit: 50,
+        sessionId: 'sess-123',
+      },
+    })
+  })
+
+  it('applies defaults for absent optionals and omits empty sessionId', () => {
+    const result1 = parseStatisticsQuery({
+      fromMs: 100,
+      toMs: 200,
+    })
+    expect(result1).toEqual({
+      ok: true,
+      query: {
+        fromMs: 100,
+        toMs: 200,
+        timezoneOffsetMinutes: 0,
+        recentLimit: 40,
+      },
+    })
+
+    const result2 = parseStatisticsQuery({
+      fromMs: 100,
+      toMs: 200,
+      sessionId: '',
+      extraField: 'ignored',
+    })
+    expect(result2).toEqual({
+      ok: true,
+      query: {
+        fromMs: 100,
+        toMs: 200,
+        timezoneOffsetMinutes: 0,
+        recentLimit: 40,
+      },
+    })
+  })
+
+  it('rejects non-object payloads with exact message', () => {
+    const expected = { ok: false, message: 'statistics payload must be an object' }
+    expect(parseStatisticsQuery(null)).toEqual(expected)
+    expect(parseStatisticsQuery(undefined)).toEqual(expected)
+    expect(parseStatisticsQuery('hello')).toEqual(expected)
+    expect(parseStatisticsQuery(123)).toEqual(expected)
+    expect(parseStatisticsQuery(true)).toEqual(expected)
+    expect(parseStatisticsQuery([])).toEqual(expected)
+  })
+
+  it('rejects missing, NaN, string, Infinity bounds and reversed range with exact message', () => {
+    const expected = { ok: false, message: 'statistics range must be finite and increasing' }
+    expect(parseStatisticsQuery({})).toEqual(expected)
+    expect(parseStatisticsQuery({ fromMs: 100 })).toEqual(expected)
+    expect(parseStatisticsQuery({ toMs: 200 })).toEqual(expected)
+    expect(parseStatisticsQuery({ fromMs: NaN, toMs: 200 })).toEqual(expected)
+    expect(parseStatisticsQuery({ fromMs: 100, toMs: NaN })).toEqual(expected)
+    expect(parseStatisticsQuery({ fromMs: '100', toMs: 200 })).toEqual(expected)
+    expect(parseStatisticsQuery({ fromMs: 100, toMs: '200' })).toEqual(expected)
+    expect(parseStatisticsQuery({ fromMs: Infinity, toMs: 200 })).toEqual(expected)
+    expect(parseStatisticsQuery({ fromMs: 100, toMs: Infinity })).toEqual(expected)
+    expect(parseStatisticsQuery({ fromMs: -Infinity, toMs: 200 })).toEqual(expected)
+    expect(parseStatisticsQuery({ fromMs: 200, toMs: 100 })).toEqual(expected)
+    expect(parseStatisticsQuery({ fromMs: 100, toMs: 100 })).toEqual(expected)
   })
 })

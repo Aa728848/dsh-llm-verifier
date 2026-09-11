@@ -55,13 +55,13 @@ export async function resolveTopLogprobRoute(ctx: Context, provider: string): Pr
   return { baseURL, ...(apiKey ? { apiKey } : {}), ...(headers ? { headers } : {}), deepSeekThinking: false }
 }
 
-export async function callTopLogprobs(route: TopLogprobRoute, model: string, prompt: string, maxTokens: number, reasoningEffort: string | undefined, signal?: AbortSignal, images?: readonly VerifierImage[], attempt = 1): Promise<TopLogprobCompletion> {
+export async function callTopLogprobs(route: TopLogprobRoute, model: string, prompt: string, maxTokens: number, reasoningEffort: string | undefined, signal?: AbortSignal, images?: readonly VerifierImage[], attempt = 1, temperature = 0.2): Promise<TopLogprobCompletion> {
   const content: string | Record<string, unknown>[] = images?.length ? [{ type: 'text', text: prompt }, ...images.map(image => ({ type: 'image_url', image_url: { url: dataUrl(image) } }))] : prompt
   const thinking = route.deepSeekThinking && reasoningEffort ? reasoningEffort === 'off' ? { thinking: { type: 'disabled' } } : { thinking: { type: 'enabled' }, reasoning_effort: reasoningEffort } : {}
   const response = await fetch(endpoint(route.baseURL), {
     method: 'POST', redirect: 'error', signal,
     headers: { 'content-type': 'application/json', ...(route.apiKey ? { authorization: 'Bearer ' + route.apiKey } : {}), ...route.headers },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content }], max_tokens: maxTokens, temperature: 1, logprobs: true, top_logprobs: 20, ...thinking }),
+    body: JSON.stringify({ model, messages: [{ role: 'user', content }], max_tokens: maxTokens, temperature, logprobs: true, top_logprobs: 20, ...thinking }),
   })
   const raw = await response.text()
   if (!response.ok) {

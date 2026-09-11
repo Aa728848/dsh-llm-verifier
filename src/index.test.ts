@@ -12,6 +12,7 @@ import { apply } from './index.ts'
 function assemble(config: Record<string, unknown> = {}) {
   const tools = new Map<string, { output: { schema: { properties: Record<string, unknown> } }; execute: (args: unknown, exec: unknown) => Promise<unknown> }>()
   const warnings: string[] = []
+  const rpc = new Map<string, (endpoint: string, payload: unknown) => unknown>()
   const ctx = {
     inject() {}, on() {}, effect() {},
     get() { return undefined },
@@ -19,10 +20,13 @@ function assemble(config: Record<string, unknown> = {}) {
     tools: { register(definition: never) { tools.set((definition as unknown as { name: string }).name, definition as never) } },
     agents: { currentInitiator() { return undefined } },
     llm: { resolveCallConfig: async () => ({}) },
-    attachments: {}, connection: {}, sessionPersistence: {},
+    attachments: {}, sessionPersistence: {},
+    // Older hosts answer statistics over the plugin RPC channel; capturing the handler
+    // lets the payload contract be tested without any host I/O.
+    connection: { rpc: { handle(channel: string, handler: (endpoint: string, payload: unknown) => unknown) { rpc.set(channel, handler) } } },
   } as unknown as Context
   apply(ctx, config as never)
-  return { tools, warnings }
+  return { tools, warnings, rpc }
 }
 
 const exec = { agent: { id: 'agent-1', session: { header: { id: 'session-1' } } }, signal: new AbortController().signal }
@@ -48,6 +52,18 @@ describe('plugin assembly', () => {
     await expect(session.execute({ max_chars: 2_000_001 }, exec)).rejects.toThrow(/max_chars must be at most 2000000/)
     // A non-positive repeat count is rejected too.
     await expect(session.execute({ repeats: 0 }, exec)).rejects.toThrow(/repeats must be a positive integer/)
+  })
+
+  it('rejects a malformed statistics range instead of answering an empty success', async () => {
+    const { rpc } = assemble()
+    const handler = rpc.get('/llm-verifier')
+    expect(handler).toBeDefined()
+    // Regression: a NaN range used to be swallowed by the per-topic allSettled fan-out
+    // and returned as ok with a NaN range, so the caller saw "success, no data".
+    expect(await handler!('statistics', { fromMs: Number.NaN, toMs: Number.NaN })).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect(await handler!('statistics', { fromMs: 10, toMs: 5 })).toMatchObject({ ok: false, error: { message: expect.stringMatching(/finite and increasing/) } })
+    expect(await handler!('statistics', 'not-an-object')).toMatchObject({ ok: false, error: { message: expect.stringMatching(/must be an object/) } })
+    expect(await handler!('other', {})).toMatchObject({ ok: false, error: { message: expect.stringMatching(/unknown llm-verifier endpoint/) } })
   })
 
   it('survives an unavailable settings service and an unregistered connection', () => {

@@ -235,7 +235,12 @@ function checkpointEvidence(index: EvidenceIndex, seq: number, budget: number): 
     if (pair.resultSeq <= seq && (latest === undefined || pair.resultSeq > latest.resultSeq)) latest = pair
   }
   if (latest === undefined) return ''
-  return '\n\nLatest observed tool output before this checkpoint (' + latest.name + '):\n' + sanitizeVerifierText(latest.text, budget - 60)
+  // The prefix length depends on the tool name, so measure it instead of assuming a
+  // fixed overhead: with a long tool name the old "- 60" let the rendered step exceed
+  // maxItemChars, and boundDecision() then dropped the whole track decision silently.
+  const prefix = '\n\nLatest observed tool output before this checkpoint (' + latest.name + '):\n'
+  if (prefix.length >= budget) return ''
+  return prefix + sanitizeVerifierText(latest.text, budget - prefix.length)
 }
 
 /**

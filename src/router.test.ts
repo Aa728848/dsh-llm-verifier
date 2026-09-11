@@ -108,6 +108,26 @@ describe('semantic evidence references', () => {
     expect(semanticDecision(parsed, value.events)).toMatchObject({ kind: 'compare', source: 'semantic' })
   })
 
+  it('keeps checkpoint evidence within the per-item cap even for long tool names', () => {
+    // Regression: a fixed 60-character deduction let a long MCP tool name push the
+    // rendered step past maxItemChars, and boundDecision() then dropped the decision.
+    const value = session()
+    const longName = 'mcp__codegraph__' + 'x'.repeat(60)
+    tool(value, longName, 'long-a', 'Y'.repeat(6000))
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    tool(value, longName, 'long-b', 'Z'.repeat(6000))
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    for (const maxItemChars of [128, 140, 160, 2000, 20000]) {
+      const decision = analyzeStructuredRoute(value.events, 8, maxItemChars, Math.max(60000, maxItemChars * 2))
+      expect(decision, 'maxItemChars=' + maxItemChars).toMatchObject({ kind: 'track' })
+      const bounded = boundDecision(decision, { ...policy, maxItemChars, maxInputChars: Math.max(60000, maxItemChars * 2) })
+      expect(bounded, 'maxItemChars=' + maxItemChars).toBeDefined()
+      if (decision?.kind === 'track') {
+        for (const step of decision.steps) expect(step.length, 'maxItemChars=' + maxItemChars).toBeLessThanOrEqual(maxItemChars)
+      }
+    }
+  })
+
   it('routes progress tracking based on changed team/task snapshots', () => {
     const value = session()
     value.append('team/task' as never, { task: { id: 'task-1', revision: 1, subject: 'Backend API', status: 'in_progress' } } as never)

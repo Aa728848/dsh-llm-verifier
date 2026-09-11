@@ -43,6 +43,7 @@ export interface Config {
     model?: string;
     reasoningEffort?: string;
     maxTokens?: number;
+    temperature?: number;
     label?: string;
     timeoutMs?: number;
     maxConcurrency?: number;
@@ -80,6 +81,7 @@ export interface ResolvedConfig {
     model: string;
     reasoningEffort?: string;
     maxTokens: number;
+    temperature: number;
     timeoutMs: number;
     maxConcurrency: number;
     maxRetries: number;

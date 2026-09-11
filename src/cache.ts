@@ -54,6 +54,7 @@ export class ScoreCache {
   private readonly file: string
   private readonly maxEntries: number
   private loaded = false
+  private hydrating: Promise<void> | undefined
   private entries = new Map<string, CachedPairScore>()
   private readonly inflight = new Map<string, Promise<{ value: CachedPairScore; key: string }>>()
   private writing: Promise<void> = Promise.resolve()
@@ -65,14 +66,24 @@ export class ScoreCache {
 
   async load(): Promise<void> {
     if (this.loaded) return
-    this.loaded = true
-    try {
-      const document = JSON.parse(await readFile(this.file, 'utf8')) as CacheDocument
-      if (document.version !== 1 || typeof document.entries !== 'object' || document.entries === null) return
-      this.entries = new Map(Object.entries(document.entries).filter((entry): entry is [string, CachedPairScore] => validEntry(entry[1])).map(([key, value]) => [key, { ...value, scoringMode: value.scoringMode ?? 'explicit-tag' }]))
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    }
+    this.hydrating ??= (async () => {
+      try {
+        const document = JSON.parse(await readFile(this.file, 'utf8')) as CacheDocument
+        if (document.version === 1 && typeof document.entries === 'object' && document.entries !== null) {
+          this.entries = new Map(Object.entries(document.entries).filter((entry): entry is [string, CachedPairScore] => validEntry(entry[1])).map(([key, value]) => [key, { ...value, scoringMode: value.scoringMode ?? 'explicit-tag' }]))
+        }
+        this.loaded = true
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          this.loaded = true
+          return
+        }
+        throw error
+      } finally {
+        this.hydrating = undefined
+      }
+    })()
+    await this.hydrating
   }
 
   async getOrCreate(key: string, create: () => Promise<CachedPairScore>, keyFor: (value: CachedPairScore) => string = () => key): Promise<{ value: CachedPairScore; hit: boolean }> {

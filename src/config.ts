@@ -49,6 +49,7 @@ export interface Config {
   model?: string
   reasoningEffort?: string
   maxTokens?: number
+  temperature?: number
   label?: string
   timeoutMs?: number
   maxConcurrency?: number
@@ -87,6 +88,7 @@ export interface ResolvedConfig {
   model: string
   reasoningEffort?: string
   maxTokens: number
+  temperature: number
   timeoutMs: number
   maxConcurrency: number
   maxRetries: number
@@ -132,6 +134,7 @@ export const Config: z<Config> = z.object({
   model: z.string().default('deepseek-flash'),
   reasoningEffort: z.string(),
   maxTokens: z.number().step(1).min(1).default(32768),
+  temperature: z.number().min(0).max(2).default(0.2),
   label: z.string(),
   timeoutMs: z.number().step(1).min(1).default(300000),
   maxConcurrency: z.number().step(1).min(1).default(8),
@@ -184,6 +187,8 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   if (!['manual', 'smart', 'strict'].includes(autoVerifyMode)) throw new Error('llm-verifier: autoVerifyMode must be manual, smart, or strict')
   const autoVerifyThreshold = config.autoVerifyThreshold ?? 0.65
   if (!Number.isFinite(autoVerifyThreshold) || autoVerifyThreshold < 0 || autoVerifyThreshold > 1) throw new Error('llm-verifier: autoVerifyThreshold must be between 0 and 1')
+  const temperature = config.temperature ?? 0.2
+  if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) throw new Error('llm-verifier: temperature must be between 0 and 2')
   const values = {
     autoVerifyRepeats: config.autoVerifyRepeats ?? 1,
     autoVerifyMinToolCalls: config.autoVerifyMinToolCalls ?? 3,
@@ -301,6 +306,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     estimatedInputUsdPerMillion,
     estimatedOutputUsdPerMillion,
     ...values,
+    temperature,
     judges,
   }
 }

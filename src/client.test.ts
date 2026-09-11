@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import { zh, en, toolLabels, tFormat, detectLanguage, compact, dateTime } from './client-i18n.ts'
 import {
+  resolveCacheDirOnSave,
+  WORST_CASE_TASK_PER_JUDGE,
+  WORST_CASE_SESSION_PER_JUDGE,
+  computeJudgeCount,
+  computeWorstCaseBudget,
+  evaluateBudgetWarning,
+  isVerdictFailed,
+  formatPercentage,
+  formatVerdictDetails,
+  type VerdictSummary,
+} from './client-i18n.ts'
+import {
   type ExtraJudgeDraft,
   MAX_EXTRA_JUDGES,
   normalizeExtraJudges,
@@ -328,4 +340,184 @@ describe('client-judges helpers', () => {
     })
   })
 })
+
+describe('resolveCacheDirOnSave rule', () => {
+  it('trims and keeps non-empty draft directory', () => {
+    expect(resolveCacheDirOnSave('  custom-cache  ', 'verifier')).toBe('custom-cache')
+    expect(resolveCacheDirOnSave('my/topic/cache', 'verifier')).toBe('my/topic/cache')
+    expect(resolveCacheDirOnSave('verifier', 'custom')).toBe('verifier')
+  })
+
+  it('keeps previously loaded value when draft is empty string, whitespace, or nullish', () => {
+    expect(resolveCacheDirOnSave('', 'verifier')).toBe('verifier')
+    expect(resolveCacheDirOnSave('   ', 'my-saved-cache')).toBe('my-saved-cache')
+    expect(resolveCacheDirOnSave(undefined, 'custom-dir')).toBe('custom-dir')
+    expect(resolveCacheDirOnSave(null, 'custom-dir')).toBe('custom-dir')
+  })
+
+  it('returns undefined when both draft and previously loaded value are empty or whitespace', () => {
+    expect(resolveCacheDirOnSave('', '')).toBeUndefined()
+    expect(resolveCacheDirOnSave('   ', '   ')).toBeUndefined()
+    expect(resolveCacheDirOnSave(undefined, undefined)).toBeUndefined()
+    expect(resolveCacheDirOnSave(null, '')).toBeUndefined()
+  })
+})
+
+describe('budget worst case and sanity warnings', () => {
+  it('defines correct constants for worst case calls per judge', () => {
+    expect(WORST_CASE_TASK_PER_JUDGE).toBe(54)
+    expect(WORST_CASE_SESSION_PER_JUDGE).toBe(160)
+  })
+
+  it('computes judge count correctly including primary judge', () => {
+    expect(computeJudgeCount(0)).toBe(1)
+    expect(computeJudgeCount(1)).toBe(2)
+    expect(computeJudgeCount(3)).toBe(4)
+    expect(computeJudgeCount(-2)).toBe(1)
+  })
+
+  it('computes worst case budgets proportional to judge count', () => {
+    expect(computeWorstCaseBudget(1)).toEqual({ worstCaseTask: 54, worstCaseSession: 160 })
+    expect(computeWorstCaseBudget(2)).toEqual({ worstCaseTask: 108, worstCaseSession: 320 })
+    expect(computeWorstCaseBudget(3)).toEqual({ worstCaseTask: 162, worstCaseSession: 480 })
+  })
+
+  it('suppresses budget warnings in manual mode', () => {
+    const warning = evaluateBudgetWarning('manual', 2, 10, 10)
+    expect(warning).toBeNull()
+  })
+
+  it('returns null when budgets meet or exceed worst case requirements', () => {
+    // 1 judge (0 extra): task worst case 54, session worst case 160
+    expect(evaluateBudgetWarning('smart', 0, 64, 240)).toBeNull()
+    // 2 judges (1 extra): task worst case 108, session worst case 320
+    expect(evaluateBudgetWarning('smart', 1, 108, 320)).toBeNull()
+  })
+
+  it('warns on task budget below worst case requirement', () => {
+    // 2 judges (1 extra): task worst case 108, session worst case 320
+    const warning = evaluateBudgetWarning('smart', 1, 64, 350)
+    expect(warning).not.toBeNull()
+    expect(warning?.warnTask).toBe(true)
+    expect(warning?.warnSession).toBe(false)
+    expect(warning?.judgeCount).toBe(2)
+    expect(warning?.worstCaseTask).toBe(108)
+    expect(warning?.worstCaseSession).toBe(320)
+  })
+
+  it('warns on session budget below worst case requirement', () => {
+    const warning = evaluateBudgetWarning('smart', 1, 120, 240)
+    expect(warning).not.toBeNull()
+    expect(warning?.warnTask).toBe(false)
+    expect(warning?.warnSession).toBe(true)
+    expect(warning?.judgeCount).toBe(2)
+    expect(warning?.worstCaseSession).toBe(320)
+  })
+
+  it('warns on both task and session budgets when both are inadequate', () => {
+    const warning = evaluateBudgetWarning('strict', 2, 64, 240)
+    expect(warning).not.toBeNull()
+    expect(warning?.warnTask).toBe(true)
+    expect(warning?.warnSession).toBe(true)
+    expect(warning?.judgeCount).toBe(3)
+    expect(warning?.worstCaseTask).toBe(162)
+    expect(warning?.worstCaseSession).toBe(480)
+  })
+})
+
+describe('verdict dashboard helpers', () => {
+  describe('formatPercentage', () => {
+    it('formats numbers to 1 decimal place percentage', () => {
+      expect(formatPercentage(0.65)).toBe('65.0%')
+      expect(formatPercentage(0.854)).toBe('85.4%')
+      expect(formatPercentage(1)).toBe('100.0%')
+      expect(formatPercentage(0)).toBe('0.0%')
+      expect(formatPercentage(Number.NaN)).toBe('--')
+    })
+  })
+
+  describe('isVerdictFailed', () => {
+    it('treats failed model call as failure regardless of verdict', () => {
+      expect(isVerdictFailed(undefined, false)).toBe(true)
+      expect(isVerdictFailed({ outcome: 'passed' }, false)).toBe(true)
+    })
+
+    it('returns false for successful call without verdict or with passed outcome', () => {
+      expect(isVerdictFailed(undefined, true)).toBe(false)
+      expect(isVerdictFailed({ outcome: 'passed' }, true)).toBe(false)
+      expect(isVerdictFailed({ outcome: 'tie' }, true)).toBe(false)
+    })
+
+    it('identifies below-threshold and error outcomes as failure', () => {
+      expect(isVerdictFailed({ outcome: 'below-threshold' }, true)).toBe(true)
+      expect(isVerdictFailed({ outcome: 'error' }, true)).toBe(true)
+    })
+  })
+
+  describe('formatVerdictDetails', () => {
+    it('formats passed verdict with score, threshold, winner, and phase in zh', () => {
+      const verdict: VerdictSummary = {
+        phase: 'final',
+        outcome: 'passed',
+        score: 0.85,
+        threshold: 0.65,
+        winner: 'A',
+      }
+      const res = formatVerdictDetails(verdict, zh)
+      expect(res.outcomeText).toBe('通过')
+      expect(res.phaseText).toBe('最终验收')
+      expect(res.scoreText).toBe('得分 85.0%（阈值 65.0%）')
+      expect(res.winnerText).toBe('胜方 A')
+      expect(res.isFailed).toBe(false)
+    })
+
+    it('formats below-threshold verdict with score and threshold in en', () => {
+      const verdict: VerdictSummary = {
+        phase: 'final',
+        outcome: 'below-threshold',
+        score: 0.42,
+        threshold: 0.65,
+        winner: 'B',
+      }
+      const res = formatVerdictDetails(verdict, en)
+      expect(res.outcomeText).toBe('Below Threshold')
+      expect(res.phaseText).toBe('Final Acceptance')
+      expect(res.scoreText).toBe('Score 42.0% (threshold 65.0%)')
+      expect(res.winnerText).toBe('Winner B')
+      expect(res.isFailed).toBe(true)
+    })
+
+    it('formats score without threshold when threshold is undefined', () => {
+      const verdict: VerdictSummary = {
+        phase: 'compare',
+        outcome: 'passed',
+        score: 0.9,
+        winner: 'A',
+      }
+      const res = formatVerdictDetails(verdict, zh)
+      expect(res.scoreText).toBe('得分 90.0%')
+      expect(res.phaseText).toBe('两项对比')
+    })
+
+    it('formats tie winner localized in zh and en', () => {
+      const verdict: VerdictSummary = {
+        outcome: 'tie',
+        winner: 'tie',
+      }
+      expect(formatVerdictDetails(verdict, zh).winnerText).toBe('胜方 平局')
+      expect(formatVerdictDetails(verdict, en).winnerText).toBe('Winner Tie')
+    })
+
+    it('gracefully handles unknown phases and outcomes by falling back to raw string', () => {
+      const verdict: VerdictSummary = {
+        phase: 'custom_phase',
+        outcome: 'custom_outcome',
+      }
+      const res = formatVerdictDetails(verdict, zh)
+      expect(res.phaseText).toBe('custom_phase')
+      expect(res.outcomeText).toBe('custom_outcome')
+    })
+  })
+})
+
 

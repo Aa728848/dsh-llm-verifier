@@ -11,7 +11,7 @@ function chunks(text: string) { return [{ type: 'block-start', index: 0, blockTy
 async function* streamOf(items: any[]) { for (const item of items) yield item }
 
 function clientConfig(overrides: Partial<VerifierClientConfig> = {}): VerifierClientConfig {
-  return { ctx: { get: () => undefined } as any, llm: { stream: async function* () { throw new Error('unexpected model call') } } as any, attachments: { saveImage: async () => ({}) } as any, topLogprobCapabilities: new TopLogprobCapabilityCache(), provider: 'openai', model: 'gpt-5', reasoningEffort: 'high', maxTokens: 100, timeoutMs: 1000, maxRetries: 0, retryBaseDelayMs: 1, ...overrides }
+  return { ctx: { get: () => undefined } as any, llm: { stream: async function* () { throw new Error('unexpected model call') } } as any, attachments: { saveImage: async () => ({}) } as any, topLogprobCapabilities: new TopLogprobCapabilityCache(), provider: 'openai', model: 'gpt-5', reasoningEffort: 'high', maxTokens: 100, temperature: 0.2, timeoutMs: 1000, maxRetries: 0, retryBaseDelayMs: 1, ...overrides }
 }
 
 /** Streams an explicit-tag verdict derived from which named candidate sits in trajectory A/B. */
@@ -127,8 +127,8 @@ describe('VerifierEngine cache identity', () => {
     expect(result.index).toBe(0)
     expect(result.pivots).toEqual([])
   })
-  it('uses version 5 in scoreOne cache identity (regression FIX 1)', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-engine-v5-'))
+  it('uses version 6 in scoreOne cache identity with temperature (regression FIX 1)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-engine-v6-'))
     try {
       const file = join(dir, 'scores.json')
       const options = { problem: 'task', candidateA: 'AAA', candidateB: 'BBB', repeats: 1 }
@@ -140,17 +140,50 @@ describe('VerifierEngine cache identity', () => {
       const { stableHash } = await import('./cache.ts')
       const prompt = (await import('./core.ts')).buildPairwisePrompt(options.problem, options.candidateA, options.candidateB, (await import('./core.ts')).DEFAULT_CRITERIA[0]!)
       const expectedKey = stableHash({
-        version: 5,
+        version: 6,
         provider: 'openai',
         model: 'gpt-5',
         effort: 'high',
         maxTokens: 100,
+        temperature: 0.2,
         repeat: 0,
         promptHash: stableHash(prompt),
         imageKey: undefined,
         scoringMode: 'explicit-tag',
       })
       expect(raw.entries[expectedKey]).toBeDefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+  it('does not reuse cached scores when temperature differs', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-temp-'))
+    try {
+      const file = join(dir, 'scores.json')
+      const cache = new ScoreCache(file, 100)
+      const options = { problem: 'task', candidateA: 'STRONG-1', candidateB: 'WEAK-2', repeats: 1 }
+
+      const judged1: string[] = []
+      const client1 = clientConfig({ temperature: 0.2, llm: { stream: scriptedStream(judged1) } as any })
+      const engine1 = new VerifierEngine(client1, 4, cache)
+      const r1 = await engine1.compare(options)
+      expect(r1.stats.cacheHits).toBe(0)
+      expect(r1.stats.cacheMisses).toBe(3)
+      expect(judged1).toHaveLength(3)
+
+      // Identical temperature -> full hit
+      const r1Repeat = await engine1.compare(options)
+      expect(r1Repeat.stats.cacheHits).toBe(3)
+      expect(r1Repeat.stats.cacheMisses).toBe(0)
+
+      // Different temperature -> cache miss, runs model again
+      const judged2: string[] = []
+      const client2 = clientConfig({ temperature: 0.8, llm: { stream: scriptedStream(judged2) } as any })
+      const engine2 = new VerifierEngine(client2, 4, cache)
+      const r2 = await engine2.compare(options)
+      expect(r2.stats.cacheHits).toBe(0)
+      expect(r2.stats.cacheMisses).toBe(3)
+      expect(judged2).toHaveLength(3)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

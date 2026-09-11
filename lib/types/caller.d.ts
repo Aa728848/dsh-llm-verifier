@@ -14,6 +14,7 @@ export interface VerifierClientConfig {
     label?: string;
     reasoningEffort?: string;
     maxTokens: number;
+    temperature: number;
     timeoutMs: number;
     maxRetries: number;
     retryBaseDelayMs: number;

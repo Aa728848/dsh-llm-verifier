@@ -17,7 +17,7 @@ import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanti
 import { DEFAULT_CRITERIA } from './core.ts'
 import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from './plan-gate.ts'
 import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from './team-gate.ts'
-import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, resolveStatisticsFile, type StatisticsOverview, type StatisticsQuery, type VerifierToolName } from './statistics.ts'
+import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, parseStatisticsQuery, resolveStatisticsFile, type StatisticsOverview, type VerifierToolName, type VerdictSummary } from './statistics.ts'
 import { resolveTopicDataDir, type SessionArtifactLocator } from './topic-storage.ts'
 
 export const name = 'llm-verifier'
@@ -68,12 +68,18 @@ function explicitEvidence(values: readonly string[], maxItemChars: number, maxTo
  * truncate a caller's explicit evidence, but the tools still need a hard bound.
  */
 const EXPLICIT_MIN_ITEM_CHARS = 20_000
-const EXPLICIT_MIN_TOTAL_CHARS = 400_000
+/**
+ * Hard ceiling for the combined evidence of one explicit tool call. The previous
+ * 600k ceiling could overflow the judge's context window before it compared
+ * anything, so the cap is a fixed budget (~60k tokens) with an actionable error.
+ */
+const EXPLICIT_MAX_TOTAL_CHARS = 240_000
+const EXPLICIT_MIN_TOTAL_CHARS = 120_000
 const MAX_EXPLICIT_CANDIDATES = 16
 const MAX_EXPLICIT_PLANNED_CALLS = 500
 interface EvidenceBounds { autoRouteMaxItemChars: number; autoRouteMaxInputChars: number }
 function explicitItemChars(selected: EvidenceBounds): number { return Math.max(selected.autoRouteMaxItemChars, EXPLICIT_MIN_ITEM_CHARS) }
-function explicitBudget(selected: EvidenceBounds): number { return Math.max(selected.autoRouteMaxInputChars * 10, EXPLICIT_MIN_TOTAL_CHARS) }
+function explicitBudget(selected: EvidenceBounds): number { return Math.min(Math.max(selected.autoRouteMaxInputChars * 2, EXPLICIT_MIN_TOTAL_CHARS), EXPLICIT_MAX_TOTAL_CHARS) }
 function explicitCandidateLimit(selected: EvidenceBounds & { autoRouteMaxCandidates: number }): number { return Math.max(selected.autoRouteMaxCandidates, MAX_EXPLICIT_CANDIDATES) }
 /** Ring + pivot-round comparisons for an explicitly requested selection. */
 function plannedComparisons(count: number): number { return count <= 2 ? 1 : count + Math.max(0, (count - 2) * 2 + 1 - 3) }
@@ -126,14 +132,45 @@ export function apply(ctx: Context, config: Config = {}): void {
     const clients: VerifierClientConfig[] = []
     for (const judge of selected.judges) {
       await ctx.llm.resolveCallConfig({ provider: judge.provider, model: judge.model, ...(judge.reasoningEffort ? { reasoningEffort: judge.reasoningEffort as never } : {}), maxTokens: judge.maxTokens })
-      clients.push({ ctx, llm: ctx.llm, attachments: services.attachments, topLogprobCapabilities: topicEntry.capabilities, provider: judge.provider, model: judge.model, label: judge.label, ...(judge.reasoningEffort ? { reasoningEffort: judge.reasoningEffort } : {}), maxTokens: judge.maxTokens, timeoutMs: selected.timeoutMs, maxRetries: selected.maxRetries, retryBaseDelayMs: selected.retryBaseDelayMs, limiter })
+      clients.push({ ctx, llm: ctx.llm, attachments: services.attachments, topLogprobCapabilities: topicEntry.capabilities, provider: judge.provider, model: judge.model, temperature: selected.temperature, label: judge.label, ...(judge.reasoningEffort ? { reasoningEffort: judge.reasoningEffort } : {}), maxTokens: judge.maxTokens, timeoutMs: selected.timeoutMs, maxRetries: selected.maxRetries, retryBaseDelayMs: selected.retryBaseDelayMs, limiter })
     }
     return { verifier: new VerifierEngine(clients, selected.maxConcurrency, topicEntry.cache, { input: selected.estimatedInputUsdPerMillion, output: selected.estimatedOutputUsdPerMillion }, topicEntry.flights), selected }
   }
   const images = (values: readonly string[] | undefined, signal: AbortSignal) => loadVerifierImages(values, signal)
   const route = (selected: { provider: string; model: string }) => ({ provider: selected.provider, model: selected.model })
   const requireEnabled = () => { if (!current().enabled) throw new Error('llm-verifier: verifier tools are disabled — enable them in Settings → LLM Verifier') }
-  const record = async <T>(toolName: VerifierToolName, agent: Agent, operation: () => Promise<{ result: T; selected: { provider: string; model: string } }>): Promise<T & { provider: string; model: string }> => {
+  /**
+   * Compact summary of what the judges decided, stored beside the call counters so
+   * the dashboard can answer "why did this fail?" instead of only "how much did it cost".
+   * @param toolName - the verifier tool that produced the value.
+   * @param value - its rendered result.
+   * @param phase - which stage produced it (explicit | compare | select | track | final | ...).
+   * @returns A verdict summary; score fields are omitted when the tool has none.
+   */
+  const verdictFrom = (toolName: VerifierToolName, value: unknown, phase: string): VerdictSummary => {
+    const selected = current()
+    const row = typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
+    const numberAt = (key: string): number | undefined => (typeof row[key] === 'number' && Number.isFinite(row[key]) ? row[key] as number : undefined)
+    const scores = Array.isArray(row.scores) ? row.scores.filter((entry): entry is number => typeof entry === 'number' && Number.isFinite(entry)) : []
+    const winner = row.winner === 'A' || row.winner === 'B' || row.winner === 'tie' ? row.winner : undefined
+    if (toolName === 'verifier_route_classify') return { phase, outcome: 'classified' }
+    if (toolName === 'verifier_select') {
+      const index = numberAt('index')
+      const best = index === undefined ? undefined : scores[index]
+      return { phase, outcome: 'ranked', ...(best !== undefined ? { score: best } : {}) }
+    }
+    if (toolName === 'verifier_track') {
+      const worst = scores.length > 0 ? Math.min(...scores) : undefined
+      const threshold = selected.autoTrackCompletionThreshold
+      return { phase, outcome: worst !== undefined && worst >= threshold ? 'passed' : 'below-threshold', ...(worst !== undefined ? { score: worst } : {}), threshold }
+    }
+    const score = numberAt('score') ?? numberAt('scoreA')
+    const baselineScore = numberAt('baselineScore')
+    const threshold = selected.autoVerifyThreshold
+    const outcome = winner === 'tie' ? 'tie' : winner === 'A' && score !== undefined && score >= threshold ? 'passed' : 'below-threshold'
+    return { phase, outcome, ...(score !== undefined ? { score } : {}), ...(baselineScore !== undefined ? { baselineScore } : {}), ...(winner !== undefined ? { winner } : {}), threshold }
+  }
+  const record = async <T>(toolName: VerifierToolName, agent: Agent, operation: () => Promise<{ result: T; selected: { provider: string; model: string } }>, phase = 'explicit'): Promise<T & { provider: string; model: string }> => {
     const startedAt = Date.now()
     let selected: { provider: string; model: string } = current()
     const statistics = topic(agent.session.header).statistics
@@ -141,54 +178,55 @@ export function apply(ctx: Context, config: Config = {}): void {
       const completed = await operation()
       selected = completed.selected
       const value = { ...completed.result as T & object, ...route(selected) } as T & { provider: string; model: string }
-      await statistics.record({ toolName, sessionId: String(agent.id), startedAt, success: true, provider: selected.provider, model: selected.model, stats: statsFrom(value) }).catch(() => {})
+      await statistics.record({ toolName, sessionId: String(agent.id), startedAt, success: true, provider: selected.provider, model: selected.model, stats: statsFrom(value), verdict: verdictFrom(toolName, value, phase) }).catch(() => {})
       return value
     } catch (error) {
       const details = errorDetails(error)
-      await statistics.record({ toolName, sessionId: String(agent.id), startedAt, success: false, ...details, provider: selected.provider, model: selected.model, stats: emptyRunStats() }).catch(() => {})
+      await statistics.record({ toolName, sessionId: String(agent.id), startedAt, success: false, ...details, provider: selected.provider, model: selected.model, stats: emptyRunStats(), verdict: { phase, outcome: 'error' } }).catch(() => {})
       throw error
     }
   }
-  const verifySession = async (agent: Agent, options: SessionVerificationOptions, signal: AbortSignal): Promise<SessionVerificationResult & { provider: string; model: string }> => record('verifier_current_session', agent, async () => {
+  const verifySession = async (agent: Agent, options: SessionVerificationOptions, signal: AbortSignal, phase = 'explicit'): Promise<SessionVerificationResult & { provider: string; model: string }> => record('verifier_current_session', agent, async () => {
     const extracted = await extractSession(agent, async (ref: ImageAttachmentRef) => { const stored = await services.attachments.readImage(ref, signal); return { data: stored.data, mediaType: stored.ref.mediaType } }, { fromSeq: options.fromSeq, toSeq: options.toSeq, includeAssistantText: options.includeAssistantText, redactPatterns: options.redactPatterns, maxChars: options.maxChars })
     if (!extracted.problem.trim()) throw new Error('llm-verifier: no direct user task found in the selected session range — widen from_seq so the task statement is included')
     const { verifier, selected } = await engine(agent)
     const compared = await verifier.compare({ problem: extracted.problem, candidateA: extracted.trace, candidateB: '(No useful work or verification was performed.)', repeats: positive(options.repeats, 2, 'repeats'), images: extracted.images }, signal)
     const result: SessionVerificationResult = { sessionId: extracted.sessionId, problem: extracted.problem, score: compared.scoreA, baselineScore: compared.scoreB, winner: compared.winner, fromSeq: extracted.fromSeq, toSeq: extracted.toSeq, omittedCharacters: extracted.omittedCharacters, calls: compared.calls, stats: compared.stats, judges: compared.judges, agreement: compared.agreement }
     return { result, selected }
-  })
-  const compareCandidates = async (agent: Agent, problem: string, candidateA: string, candidateB: string, repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = []) => record('verifier_compare', agent, async () => {
+  }, phase)
+  const compareCandidates = async (agent: Agent, problem: string, candidateA: string, candidateB: string, repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit') => record('verifier_compare', agent, async () => {
     const { verifier, selected } = await engine(agent)
     return { result: await verifier.compare({ problem, candidateA, candidateB, repeats, images: routedImages }, signal), selected }
-  })
-  const selectCandidates = async (agent: Agent, problem: string, candidates: readonly string[], repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = []) => record('verifier_select', agent, async () => {
+  }, phase)
+  const selectCandidates = async (agent: Agent, problem: string, candidates: readonly string[], repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit') => record('verifier_select', agent, async () => {
     const { verifier, selected } = await engine(agent)
     return { result: await verifier.select({ problem, candidates, repeats, pivots: Math.min(2, candidates.length), seed: 0, images: routedImages }, signal), selected }
-  })
-  const trackProgress = async (agent: Agent, problem: string, steps: readonly string[], checkpoints: readonly number[], repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = []) => record('verifier_track', agent, async () => {
+  }, phase)
+  const trackProgress = async (agent: Agent, problem: string, steps: readonly string[], checkpoints: readonly number[], repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit') => record('verifier_track', agent, async () => {
     const { verifier, selected } = await engine(agent)
     return { result: await verifier.track(problem, steps, checkpoints, repeats, signal, routedImages), selected }
-  })
-  const classifyRoute = async (agent: Agent, prompt: string, signal: AbortSignal) => record('verifier_route_classify', agent, async () => {
+  }, phase)
+  const classifyRoute = async (agent: Agent, prompt: string, signal: AbortSignal, phase: string) => record('verifier_route_classify', agent, async () => {
     const { verifier, selected } = await engine(agent)
     const completion = await callVerifierText(verifier.client, prompt, signal)
     const stats: RunStats = { ...completion.usage, cacheHits: 0, cacheMisses: 0, estimatedCostUsd: ((completion.usage.inputTokens + completion.usage.cachedInputTokens) * selected.estimatedInputUsdPerMillion + completion.usage.outputTokens * selected.estimatedOutputUsdPerMillion) / 1_000_000, topLogprobScores: 0, explicitTagScores: 1 }
     return { result: { text: completion.text, stats }, selected }
-  })
+  }, phase)
   const extractTask = async (agent: Agent, fromSeq: number, toSeq: number, maxChars: number, signal: AbortSignal) => extractSession(agent, async (ref: ImageAttachmentRef) => { const stored = await services.attachments.readImage(ref, signal); return { data: stored.data, mediaType: stored.ref.mediaType } }, { fromSeq, toSeq, includeAssistantText: true, maxChars })
   const routePolicy = (selected: ReturnType<typeof current>) => ({ mode: selected.autoVerifyMode, minConfidence: selected.autoRouteMinConfidence, maxCandidates: selected.autoRouteMaxCandidates, maxPerTask: selected.autoRouteMaxPerTask + selected.autoVerifyMaxPerTask, maxPerSession: selected.autoRouteMaxPerSession + selected.autoVerifyMaxPerSession, maxModelCallsPerTask: selected.autoMaxModelCallsPerTask, maxModelCallsPerSession: selected.autoMaxModelCallsPerSession, maxInputChars: selected.autoRouteMaxInputChars, maxItemChars: selected.autoRouteMaxItemChars })
   const routeFeedback = (decision: RouteDecision, detail: string) => createUserMessage({ content: [{ type: 'text' as const, text: '[Automatic verifier routing: ' + decision.kind + ']\n' + detail + '\nUse this independent result to continue the actual task. Do not merely restate the ranking or progress score; implement, correct, and verify the required work.' }], source: { kind: 'plugin' as const, plugin: 'dsh-llm-verifier', form: 'notice' as const, summary: 'Automatic verifier routed ' + decision.kind } })
 
   const handleStatisticsQuery = async (payload: unknown): Promise<{ ok: true; value: StatisticsOverview } | { ok: false; error: { code: 'bad-request'; message: string; details: { issues: never[] } } }> => {
-    if (typeof payload !== 'object' || payload === null) return rpcFailure('statistics payload must be an object')
-    const row = payload as Record<string, unknown>
-    const sessionId = typeof row.sessionId === 'string' && row.sessionId.length > 0 ? row.sessionId : undefined
-    const query: StatisticsQuery = { fromMs: numberField(row.fromMs, Number.NaN), toMs: numberField(row.toMs, Number.NaN), timezoneOffsetMinutes: numberField(row.timezoneOffsetMinutes, 0), recentLimit: numberField(row.recentLimit, 40), ...(sessionId ? { sessionId } : {}) }
+    // A malformed range used to be swallowed by the Promise.allSettled fan-out below and
+    // answered as an empty "success" with a NaN range, so validate the payload up front.
+    const parsed = parseStatisticsQuery(payload)
+    if (!parsed.ok) return rpcFailure(parsed.message)
+    const query = parsed.query
     try {
       const items = await services.sessionPersistence.list()
       const headers: SessionHeader[] = items
         .map(item => item && typeof item === 'object' && 'header' in item ? (item as { header: SessionHeader }).header : item as SessionHeader)
-        .filter(header => header !== undefined && (sessionId === undefined || String(header.id) === sessionId))
+        .filter(header => header !== undefined && (query.sessionId === undefined || String(header.id) === query.sessionId))
       const settled = await Promise.allSettled(headers.map(async header => topic(header).statistics.overview(query)))
       const overviews: StatisticsOverview[] = []
       for (const result of settled) {
@@ -277,7 +315,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     try {
       const toSeq = sessionEvents(agent.session).at(-1)?.seq ?? -1
       const extracted = await extractTask(agent, evidence.taskStartSeq, toSeq, selected.autoVerifyMaxChars, exec.signal)
-      const classified = await classifyRoute(agent, buildPlanPreReviewPrompt(extracted.problem, plan, selected.autoRouteMaxInputChars), exec.signal)
+      const classified = await classifyRoute(agent, buildPlanPreReviewPrompt(extracted.problem, plan, selected.autoRouteMaxInputChars), exec.signal, 'plan_review')
       const verdict = parseVerdictLetter(classified.text)
       if (verdict === undefined) {
         autoRouter.fail(agent, reservation, false)
@@ -324,7 +362,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         try {
           const extracted = await extractTask(agent, evidence.taskStartSeq, admittedLastSeq, selected.autoVerifyMaxChars, signal)
           const prompt = buildTeamTaskVerificationPrompt(task, extracted.trace, selected.autoRouteMaxInputChars)
-          const classified = await classifyRoute(agent, prompt, signal)
+          const classified = await classifyRoute(agent, prompt, signal, 'team_task')
           if (!stillCurrent()) { autoRouter.fail(agent, taskReservation, false); return }
           const verdict = parseVerdictLetter(classified.text)
           if (verdict === undefined) {
@@ -365,7 +403,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (reservation) {
         try {
           const extracted = await extractTask(agent, evidence.taskStartSeq, admittedLastSeq, selected.autoVerifyMaxChars, signal)
-          const classified = await classifyRoute(agent, buildSemanticRoutePrompt(extracted.problem, snapshot, selected.autoRouteMaxCandidates, selected.autoRouteMaxItemChars, selected.autoRouteMaxInputChars), signal)
+          const classified = await classifyRoute(agent, buildSemanticRoutePrompt(extracted.problem, snapshot, selected.autoRouteMaxCandidates, selected.autoRouteMaxItemChars, selected.autoRouteMaxInputChars), signal, 'semantic')
           if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return }
           const parsed = parseSemanticRoute(classified.text, selected.autoRouteMaxCandidates)
           if (!parsed) throw new Error('semantic router returned invalid strict JSON')
@@ -398,7 +436,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         try {
           const extracted = await extractTask(agent, evidence.taskStartSeq, admittedLastSeq, selected.autoVerifyMaxChars, signal)
           if (decision.kind === 'compare') {
-            const result = await compareCandidates(agent, extracted.problem, decision.candidates[0].content, decision.candidates[1].content, selected.autoVerifyRepeats, signal, extracted.images)
+            const result = await compareCandidates(agent, extracted.problem, decision.candidates[0].content, decision.candidates[1].content, selected.autoVerifyRepeats, signal, extracted.images, 'compare')
             if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return }
             if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
             const winner = result.winner === 'A' ? decision.candidates[0].label : result.winner === 'B' ? decision.candidates[1].label : 'tie'
@@ -406,14 +444,14 @@ export function apply(ctx: Context, config: Config = {}): void {
             return
           }
           if (decision.kind === 'select') {
-            const result = await selectCandidates(agent, extracted.problem, decision.candidates.map(candidate => candidate.content), selected.autoVerifyRepeats, signal, extracted.images)
+            const result = await selectCandidates(agent, extracted.problem, decision.candidates.map(candidate => candidate.content), selected.autoVerifyRepeats, signal, extracted.images, 'select')
             if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return }
             if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
             const ranking = result.ranking.map((index, rank) => (rank + 1) + '. ' + decision.candidates[index]!.label).join('\n')
             agent.steer(routeFeedback(decision, 'Ranking:\n' + ranking + '\nProceed with ' + decision.candidates[result.index]!.label + '.'))
             return
           }
-          const result = await trackProgress(agent, extracted.problem, decision.steps, decision.checkpoints, selected.autoVerifyRepeats, signal, extracted.images)
+          const result = await trackProgress(agent, extracted.problem, decision.steps, decision.checkpoints, selected.autoVerifyRepeats, signal, extracted.images, 'track')
           if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return }
           if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
           const detail = result.scores.map((score, index) => 'Checkpoint step ' + decision.checkpoints[index] + ': ' + (score * 100).toFixed(1) + '%').join('\n')
@@ -453,7 +491,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       return
     }
     try {
-      const result = await verifySession(agent, { fromSeq: finalFromSeq, toSeq: admittedLastSeq, includeAssistantText: true, maxChars: selected.autoVerifyMaxChars, repeats: selected.autoVerifyRepeats }, signal)
+      const result = await verifySession(agent, { fromSeq: finalFromSeq, toSeq: admittedLastSeq, includeAssistantText: true, maxChars: selected.autoVerifyMaxChars, repeats: selected.autoVerifyRepeats }, signal, 'final')
       if (!stillCurrent()) { autoRouter.fail(agent, finalReservation, false); return }
       const passed = result.winner === 'A' && result.score >= selected.autoVerifyThreshold
       if (passed) autoRouter.commit(agent, finalReservation)

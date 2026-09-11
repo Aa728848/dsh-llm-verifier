@@ -6,6 +6,15 @@ import type { RunStats } from './engine.ts'
 export const VERIFIER_TOOL_NAMES = ['verifier_route_classify', 'verifier_compare', 'verifier_select', 'verifier_track', 'verifier_current_session'] as const
 export type VerifierToolName = typeof VERIFIER_TOOL_NAMES[number]
 
+export interface VerdictSummary {
+  phase?: string
+  outcome?: string
+  score?: number
+  baselineScore?: number
+  winner?: 'A' | 'B' | 'tie'
+  threshold?: number
+}
+
 export interface InvocationRecord {
   id: string
   toolName: VerifierToolName
@@ -19,6 +28,7 @@ export interface InvocationRecord {
   provider: string
   model: string
   stats: RunStats
+  verdict?: VerdictSummary
 }
 
 interface StatisticsDocument {
@@ -113,6 +123,19 @@ export interface InvocationInput {
   provider: string
   model: string
   stats: RunStats
+  verdict?: VerdictSummary
+}
+
+function cleanVerdict(input: VerdictSummary | undefined): VerdictSummary | undefined {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return undefined
+  const verdict: VerdictSummary = {}
+  if (typeof input.phase === 'string') verdict.phase = input.phase
+  if (typeof input.outcome === 'string') verdict.outcome = input.outcome
+  if (typeof input.score === 'number' && Number.isFinite(input.score)) verdict.score = input.score
+  if (typeof input.baselineScore === 'number' && Number.isFinite(input.baselineScore)) verdict.baselineScore = input.baselineScore
+  if (input.winner === 'A' || input.winner === 'B' || input.winner === 'tie') verdict.winner = input.winner
+  if (typeof input.threshold === 'number' && Number.isFinite(input.threshold)) verdict.threshold = input.threshold
+  return verdict
 }
 
 function finite(value: number): number { return Number.isFinite(value) ? value : 0 }
@@ -158,7 +181,54 @@ function localDate(time: number, timezoneOffsetMinutes: number): string {
 function isRecord(value: unknown): value is InvocationRecord {
   if (typeof value !== 'object' || value === null) return false
   const row = value as Partial<InvocationRecord>
-  return typeof row.id === 'string' && VERIFIER_TOOL_NAMES.includes(row.toolName as VerifierToolName) && typeof row.startedAt === 'number' && typeof row.finishedAt === 'number' && typeof row.durationMs === 'number' && typeof row.success === 'boolean' && typeof row.provider === 'string' && typeof row.model === 'string' && typeof row.stats === 'object' && row.stats !== null
+  if (
+    typeof row.id !== 'string' ||
+    !VERIFIER_TOOL_NAMES.includes(row.toolName as VerifierToolName) ||
+    typeof row.startedAt !== 'number' ||
+    typeof row.finishedAt !== 'number' ||
+    typeof row.durationMs !== 'number' ||
+    typeof row.success !== 'boolean' ||
+    typeof row.provider !== 'string' ||
+    typeof row.model !== 'string' ||
+    typeof row.stats !== 'object' ||
+    row.stats === null
+  ) {
+    return false
+  }
+  if (row.verdict !== undefined) {
+    if (typeof row.verdict !== 'object' || row.verdict === null || Array.isArray(row.verdict)) {
+      return false
+    }
+  }
+  return true
+}
+
+export function parseStatisticsQuery(payload: unknown): { ok: true; query: StatisticsQuery } | { ok: false; message: string } {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    return { ok: false, message: 'statistics payload must be an object' }
+  }
+  const row = payload as Record<string, unknown>
+  const fromMs = row.fromMs
+  const toMs = row.toMs
+  if (typeof fromMs !== 'number' || !Number.isFinite(fromMs) || typeof toMs !== 'number' || !Number.isFinite(toMs) || fromMs >= toMs) {
+    return { ok: false, message: 'statistics range must be finite and increasing' }
+  }
+  const timezoneOffsetMinutes = typeof row.timezoneOffsetMinutes === 'number' && Number.isFinite(row.timezoneOffsetMinutes)
+    ? row.timezoneOffsetMinutes
+    : 0
+  const recentLimit = typeof row.recentLimit === 'number' && Number.isFinite(row.recentLimit)
+    ? row.recentLimit
+    : 40
+  const query: StatisticsQuery = {
+    fromMs,
+    toMs,
+    timezoneOffsetMinutes,
+    recentLimit,
+  }
+  if (typeof row.sessionId === 'string' && row.sessionId.length > 0) {
+    query.sessionId = row.sessionId
+  }
+  return { ok: true, query }
 }
 
 export function resolveStatisticsFile(cacheFile: string): string {
@@ -212,6 +282,7 @@ export function mergeStatisticsOverviews(overviews: readonly StatisticsOverview[
 
 export class StatisticsStore {
   private loaded = false
+  private hydrating: Promise<void> | undefined
   private records: InvocationRecord[] = []
   private writing: Promise<void> = Promise.resolve()
 
@@ -221,6 +292,7 @@ export class StatisticsStore {
 
   async record(input: InvocationInput): Promise<InvocationRecord> {
     const finishedAt = input.finishedAt ?? Date.now()
+    const verdict = cleanVerdict(input.verdict)
     const record: InvocationRecord = {
       id: randomUUID(),
       toolName: input.toolName,
@@ -234,6 +306,7 @@ export class StatisticsStore {
       provider: input.provider,
       model: input.model,
       stats: { ...input.stats },
+      ...(verdict !== undefined ? { verdict } : {}),
     }
     const operation = async () => {
       await this.load()
@@ -298,15 +371,26 @@ export class StatisticsStore {
     }
   }
 
-  private async load(): Promise<void> {
+  async load(): Promise<void> {
     if (this.loaded) return
-    this.loaded = true
-    try {
-      const document = JSON.parse(await readFile(this.file, 'utf8')) as Partial<StatisticsDocument>
-      if (document.version === 1 && Array.isArray(document.records)) this.records = document.records.filter(isRecord).slice(-this.maxEntries)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    }
+    this.hydrating ??= (async () => {
+      try {
+        const document = JSON.parse(await readFile(this.file, 'utf8')) as Partial<StatisticsDocument>
+        if (document.version === 1 && Array.isArray(document.records)) {
+          this.records = document.records.filter(isRecord).slice(-this.maxEntries)
+        }
+        this.loaded = true
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          this.loaded = true
+          return
+        }
+        throw error
+      } finally {
+        this.hydrating = undefined
+      }
+    })()
+    await this.hydrating
   }
 
   private async persist(): Promise<void> {

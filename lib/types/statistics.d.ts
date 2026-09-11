@@ -1,6 +1,14 @@
 import type { RunStats } from './engine.ts';
 export declare const VERIFIER_TOOL_NAMES: readonly ["verifier_route_classify", "verifier_compare", "verifier_select", "verifier_track", "verifier_current_session"];
 export type VerifierToolName = typeof VERIFIER_TOOL_NAMES[number];
+export interface VerdictSummary {
+    phase?: string;
+    outcome?: string;
+    score?: number;
+    baselineScore?: number;
+    winner?: 'A' | 'B' | 'tie';
+    threshold?: number;
+}
 export interface InvocationRecord {
     id: string;
     toolName: VerifierToolName;
@@ -14,6 +22,7 @@ export interface InvocationRecord {
     provider: string;
     model: string;
     stats: RunStats;
+    verdict?: VerdictSummary;
 }
 export interface DailyStatistics {
     date: string;
@@ -96,7 +105,15 @@ export interface InvocationInput {
     provider: string;
     model: string;
     stats: RunStats;
+    verdict?: VerdictSummary;
 }
+export declare function parseStatisticsQuery(payload: unknown): {
+    ok: true;
+    query: StatisticsQuery;
+} | {
+    ok: false;
+    message: string;
+};
 export declare function resolveStatisticsFile(cacheFile: string): string;
 /** Combine independently persisted topic summaries for the all-topics dashboard. */
 export declare function mergeStatisticsOverviews(overviews: readonly StatisticsOverview[], query: StatisticsQuery): StatisticsOverview;
@@ -104,12 +121,13 @@ export declare class StatisticsStore {
     private readonly file;
     private readonly maxEntries;
     private loaded;
+    private hydrating;
     private records;
     private writing;
     constructor(file: string, maxEntries?: number);
     record(input: InvocationInput): Promise<InvocationRecord>;
     overview(query: StatisticsQuery): Promise<StatisticsOverview>;
-    private load;
+    load(): Promise<void>;
     private persist;
 }
 export declare function emptyRunStats(): RunStats;

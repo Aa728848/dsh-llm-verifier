@@ -72,6 +72,9 @@ pnpm run verify:release  # typecheck + test + build，prepublishOnly 会自动�
 - **验收期间会阻塞 turn 关闭**、**`engine.track` 不参与评分缓存**、**`resolveCallConfig` 每次调用做一次适配器 I/O**：都是已知取舍。
 - **子 Agent 会话默认不门控**（`autoVerifySubagents=false`）。子会话用真实用户消息播种，门控它们会额外消耗预算并反复 steering 子 Agent。
 - **同一字母的多个 token 变体概率必须相加**（`extractScore`）：`" A"` 与 `"A"` 是同一次采样的互斥事件，取 `max` 会系统性压低被拆分的字母并可能翻转判决。**这是与上游唯一的刻意偏差**：上游 `fine_grained_reward.py:678` 用的是 `max`（已核对源码而非猜测），因此 `parity.test.ts` 的 fixture 有意不含同字母多变体用例，新增 fixture 时不要往里面塞这种输入。要退回上游语义就改 `core.ts` 那一行，并同步改 README「与上游的一处已知差异」与本节；改这条评分语义必须同时升 `engine.ts` 里缓存身份的 `version`。
+- **判官温度默认 0.2**（旧版硬编码 1）：自动验收默认只跑 1 轮，低温度让同一次判决更可复现。温度是评分缓存身份的一部分，改默认值或改这个字段必须同时升 `engine.ts` 的缓存 `version`。
+- **统计的 `verdict` 是增量可选字段**：旧记录没有它也必须能加载（`isRecord` 只做宽松校验），看板对缺字段的行按旧样式渲染；`success` 恒为"模型调用是否抛错"，不要把它当验收结果。
+- **显式证据有硬上限**：一次显式调用合计 ≤ 24 万字符（`EXPLICIT_MAX_TOTAL_CHARS`），超出直接报错。放宽它要重新评估判官模型上下文。
 - **显式 `verifier_current_session` 不等于"已验收"**：只有该次复核达到阈值（`winner === 'A'` 且分数 ≥ 阈值）**并且之后没有实质工作**时才解除自动门控。判决失败、低于阈值、结果解析不出、或通过之后又改动过，都照常验收。别简化回"调用过即放行"。
 - **计划预审通过不设置 `finalRequiredFromSeq`**（只有 compare/select/track/team_task 设置）：批准计划不是完成工作，否则下一个停止边界会立刻跑一次空会话验收，strict 下还会吃掉一次预算并把 `strictBlocked` 打开。
 - **Agent Teams 的 `team-message` 也算任务边界**（`latestDirectUserSeq` 的唯一定义在 `router.ts`，`auto.ts` 直接复用，别复制一份），否则队友会话里所有预约都会被静默拒绝。
