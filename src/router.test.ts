@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
-import { createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { analyzeStructuredRoute, AutoVerifierRouter, boundDecision, buildSemanticRoutePrompt, estimateRoutedCalls, latestDirectUserSeq, MAX_ROUTED_CHECKPOINTS, parseSemanticRoute, semanticDecision, semanticRouteHint, type RouterPolicy } from './router.ts'
 import { sanitizeVerifierText } from './session.ts'
 
@@ -12,6 +12,9 @@ function session() {
 function tool(value: ReturnType<typeof session>, name: string, id: string, text: string, turn = 1, step = 1) {
   value.append('tool/call', { turn, step, callId: id as never, name, arguments: '{}' })
   value.append('tool/result', { turn, step, message: createToolResultMessage({ callId: id as never, content: [{ type: 'text', text }], isError: false }) }, { surfaceOp: 'append' })
+}
+function assistant(value: ReturnType<typeof session>, text: string, turn = 1, step = 1) {
+  value.append('assistant/message', { turn, step, message: createAssistantMessage({ content: [{ type: 'text', text }], source: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } }) }, { surfaceOp: 'append' })
 }
 const policy: RouterPolicy = { mode: 'smart', minConfidence: .9, maxCandidates: 8, maxPerTask: 5, maxPerSession: 20, maxModelCallsPerTask: 48, maxModelCallsPerSession: 160, maxInputChars: 60000, maxItemChars: 20000 }
 const envelope = (count: number) => JSON.stringify({ protocol: 'dsh-verifier-candidates', version: 1, groupId: 'auth', candidates: Array.from({ length: count }, (_, i) => ({ id: String(i + 1), label: 'C' + (i + 1), status: 'completed', content: 'candidate ' + (i + 1) })) })
@@ -45,6 +48,63 @@ describe('production structured routing', () => {
       expect(decision.steps.every(step => step.length <= 400)).toBe(true)
     }
   })
+  it('never attaches bookkeeping output as checkpoint evidence', () => {
+    // Regression: the newest successful result before a todo snapshot is usually the
+    // bookkeeping call that wrote it (create_goal/update_goal/todo_write/interrupt_agent),
+    // so every checkpoint showed the router its own metadata instead of the work that
+    // had just run the task's tests.
+    const value = session()
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    tool(value, 'pwsh', 'run', 'all tests passed: 91 passed')
+    tool(value, 'create_goal', 'goal', '{"goal":{"id":"g1","phase":"active"}}')
+    tool(value, 'interrupt_agent', 'stop', 'interrupt requested for agent abc')
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    const decision = analyzeStructuredRoute(value.events, 8, 400, 800)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind !== 'track') return
+    // The real run is older than both bookkeeping results, and must still win.
+    expect(decision.steps[1]).toContain('all tests passed')
+    expect(decision.steps[1]).not.toContain('"phase":"active"')
+    expect(decision.steps[1]).not.toContain('interrupt requested')
+  })
+
+  it('attaches the newest narration to the current checkpoint only', () => {
+    // A prose deliverable (review, analysis) never reaches a tool result, so every
+    // checkpoint scored "certainly NO" while the same session's final acceptance
+    // passed. The narration is labelled as a claim, and only the checkpoint the route
+    // actually judges carries it.
+    const value = session()
+    assistant(value, 'Early plan: read the parser first.')
+    value.append('todo/write', { todos: [{ content: 'Review', status: 'in_progress' }, { content: 'Report', status: 'pending' }] })
+    assistant(value, 'Deliverable: the review found two blocking issues.', 1, 2)
+    value.append('todo/write', { todos: [{ content: 'Review', status: 'completed' }, { content: 'Report', status: 'completed' }] })
+    const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind !== 'track') return
+    expect(decision.steps[0]).not.toContain('Newest agent narration')
+    expect(decision.steps[1]).toContain('Newest agent narration')
+    expect(decision.steps[1]).toContain('two blocking issues')
+    expect(decision.steps[1]).not.toContain('Early plan')
+  })
+
+  it('keeps narration and evidence inside the checkpoint caps', () => {
+    const value = session()
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    tool(value, 'pwsh', 'run', 'Z'.repeat(4000))
+    assistant(value, 'Q'.repeat(4000))
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    for (const maxItemChars of [128, 200, 2000, 20000]) {
+      const maxInputChars = Math.max(60000, maxItemChars * 2)
+      const decision = analyzeStructuredRoute(value.events, 8, maxItemChars, maxInputChars)
+      expect(decision, 'maxItemChars=' + maxItemChars).toMatchObject({ kind: 'track' })
+      if (decision?.kind !== 'track') continue
+      for (const step of decision.steps) expect(step.length, 'maxItemChars=' + maxItemChars).toBeLessThanOrEqual(maxItemChars)
+      expect(decision.steps.reduce((sum, step) => sum + step.length, 0)).toBeLessThanOrEqual(maxInputChars)
+      // Regression guard for the caps that boundDecision() enforces on the whole route.
+      expect(boundDecision(decision, { ...policy, maxItemChars, maxInputChars }), 'maxItemChars=' + maxItemChars).toBeDefined()
+    }
+  })
+
   it('deduplicates identical todo snapshots', () => {
     const value = session()
     const todos = [{ content: 'Implement', status: 'in_progress' as const }, { content: 'Test', status: 'pending' as const }]

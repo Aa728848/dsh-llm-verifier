@@ -33,7 +33,7 @@ export const zh = {
   'field.autoRouteMaxPerSession.title': '每会话最多路由',
   'field.autoRouteMaxPerSession.help': '同一会话中自动路由的尝试上限；与「每会话最多验收」共享计数器，实际可用次数同样是两者之和。',
   'field.autoTrackCompletionThreshold.title': '进度完成阈值',
-  'field.autoTrackCompletionThreshold.help': 'track 任一检查点低于该值时 steering 要求 Agent 继续执行；范围 0–1。',
+  'field.autoTrackCompletionThreshold.help': 'track 最新检查点低于该值时 steering 要求 Agent 继续执行；更早的检查点只作展示，范围 0–1。',
   'field.autoRouteMaxItemChars.title': '单项证据字符上限',
   'field.autoRouteMaxItemChars.help': '每个候选或检查点在脱敏后允许发送给裁判的最大字符数。',
   'field.autoRouteMaxInputChars.title': '路由证据总字符上限',
@@ -153,6 +153,7 @@ export const zh = {
   'stats.verdict.winner': '胜方 {winner}',
   'stats.verdict.scoreThreshold': '得分 {score}（阈值 {threshold}）',
   'stats.verdict.scoreOnly': '得分 {score}',
+  'stats.verdict.checkpoints': '检查点 {scores}',
 
   // Metrics
   'metric.cacheHitRate': '缓存命中率',
@@ -244,7 +245,7 @@ export const en: I18nDict = {
   'field.autoRouteMaxPerSession.title': 'Max Routes per Session',
   'field.autoRouteMaxPerSession.help': 'Session attempt cap for automatic routing; shares its counter with "Max Verifications per Session" (effective limit is the sum of both).',
   'field.autoTrackCompletionThreshold.title': 'Progress Completion Threshold',
-  'field.autoTrackCompletionThreshold.help': 'When any track checkpoint falls below this score, steering instructs the Agent to continue; range 0–1.',
+  'field.autoTrackCompletionThreshold.help': 'When the newest track checkpoint falls below this score, steering instructs the Agent to continue; earlier checkpoints are shown only; range 0–1.',
   'field.autoRouteMaxItemChars.title': 'Max Chars per Route Item',
   'field.autoRouteMaxItemChars.help': 'Maximum sanitized character count allowed per candidate or checkpoint when sent to the judge.',
   'field.autoRouteMaxInputChars.title': 'Total Route Input Chars Cap',
@@ -364,6 +365,7 @@ export const en: I18nDict = {
   'stats.verdict.winner': 'Winner {winner}',
   'stats.verdict.scoreThreshold': 'Score {score} (threshold {threshold})',
   'stats.verdict.scoreOnly': 'Score {score}',
+  'stats.verdict.checkpoints': 'Checkpoints {scores}',
 
   // Metrics
   'metric.cacheHitRate': 'Cache Hit Rate',
@@ -493,6 +495,8 @@ export interface VerdictSummary {
   phase?: string
   outcome?: string
   score?: number
+  /** Per-checkpoint progression of a `verifier_track` verdict, oldest first; absent on older records. */
+  scores?: number[]
   baselineScore?: number
   winner?: 'A' | 'B' | 'tie'
   threshold?: number
@@ -629,6 +633,7 @@ export function formatVerdictDetails(
   outcomeText?: string
   phaseText?: string
   scoreText?: string
+  checkpointsText?: string
   winnerText?: string
   isFailed: boolean
 } {
@@ -650,12 +655,19 @@ export function formatVerdictDetails(
     }
   }
 
+  // One track verdict carries a whole progression; showing only the newest score
+  // hides why the route decided to continue.
+  let checkpointsText: string | undefined
+  if (Array.isArray(verdict.scores) && verdict.scores.length > 1) {
+    checkpointsText = tFormat(t['stats.verdict.checkpoints'], { scores: verdict.scores.map(formatPercentage).join(' → ') })
+  }
+
   let winnerText: string | undefined
   if (verdict.winner) {
     const winnerValue = verdict.winner === 'tie' ? t['stats.winner.tie'] : verdict.winner
     winnerText = tFormat(t['stats.verdict.winner'], { winner: winnerValue })
   }
 
-  return { outcomeText, phaseText, scoreText, winnerText, isFailed }
+  return { outcomeText, phaseText, scoreText, checkpointsText, winnerText, isFailed }
 }
 

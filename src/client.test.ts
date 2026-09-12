@@ -591,6 +591,23 @@ describe('verdict dashboard helpers', () => {
       expect(res.phaseText).toBe('两项对比')
     })
 
+    it('renders the track checkpoint progression', () => {
+      const verdict: VerdictSummary = {
+        phase: 'track',
+        outcome: 'below-threshold',
+        score: 0.7894736842105262,
+        scores: [0, 0.10526315789473684, 0.7894736842105262],
+        threshold: 0.8,
+      }
+      expect(formatVerdictDetails(verdict, zh).checkpointsText).toBe('检查点 0.0% → 10.5% → 78.9%')
+      expect(formatVerdictDetails(verdict, en).checkpointsText).toBe('Checkpoints 0.0% → 10.5% → 78.9%')
+    })
+
+    it('omits the progression for a single checkpoint', () => {
+      expect(formatVerdictDetails({ outcome: 'below-threshold', score: 0, scores: [0] }, zh).checkpointsText).toBeUndefined()
+      expect(formatVerdictDetails({ outcome: 'below-threshold', score: 0 }, zh).checkpointsText).toBeUndefined()
+    })
+
     it('formats tie winner localized in zh and en', () => {
       const verdict: VerdictSummary = {
         outcome: 'tie',

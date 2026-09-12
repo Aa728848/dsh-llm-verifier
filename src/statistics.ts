@@ -10,10 +10,15 @@ export interface VerdictSummary {
   phase?: string
   outcome?: string
   score?: number
+  /** Per-checkpoint progression of a `verifier_track` verdict, oldest first. Optional: old records do not carry it. */
+  scores?: number[]
   baselineScore?: number
   winner?: 'A' | 'B' | 'tie'
   threshold?: number
 }
+
+/** Upper bound on the stored checkpoint progression; one explicit call can legitimately carry 32 steps. */
+const MAX_VERDICT_SCORES = 64
 
 export interface InvocationRecord {
   id: string
@@ -132,6 +137,10 @@ function cleanVerdict(input: VerdictSummary | undefined): VerdictSummary | undef
   if (typeof input.phase === 'string') verdict.phase = input.phase
   if (typeof input.outcome === 'string') verdict.outcome = input.outcome
   if (typeof input.score === 'number' && Number.isFinite(input.score)) verdict.score = input.score
+  if (Array.isArray(input.scores)) {
+    const scores = input.scores.filter((entry): entry is number => typeof entry === 'number' && Number.isFinite(entry)).slice(0, MAX_VERDICT_SCORES)
+    if (scores.length > 0) verdict.scores = scores
+  }
   if (typeof input.baselineScore === 'number' && Number.isFinite(input.baselineScore)) verdict.baselineScore = input.baselineScore
   if (input.winner === 'A' || input.winner === 'B' || input.winner === 'tie') verdict.winner = input.winner
   if (typeof input.threshold === 'number' && Number.isFinite(input.threshold)) verdict.threshold = input.threshold

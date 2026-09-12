@@ -188,6 +188,47 @@ describe('StatisticsStore', () => {
     })
   })
 
+  it('keeps the track checkpoint progression and drops invalid entries', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const file = join(root, 'statistics.json')
+    const store = new StatisticsStore(file)
+    const record = await store.record({
+      toolName: 'verifier_track',
+      startedAt: 100,
+      finishedAt: 200,
+      success: true,
+      provider: 'p',
+      model: 'm',
+      stats: stats(),
+      verdict: {
+        phase: 'track',
+        outcome: 'below-threshold',
+        // The newest checkpoint drives the outcome; the whole curve explains it.
+        score: 0.7894736842105262,
+        scores: [0, Number.NaN, Number.POSITIVE_INFINITY, 0.7894736842105262],
+        threshold: 0.8,
+      },
+    })
+    expect(record.verdict?.score).toBe(0.7894736842105262)
+    expect(record.verdict?.scores).toEqual([0, 0.7894736842105262])
+
+    const fresh = new StatisticsStore(file)
+    const result = await fresh.overview({ fromMs: 0, toMs: 1_000 })
+    expect(result.recent[0]?.verdict?.scores).toEqual([0, 0.7894736842105262])
+  })
+
+  it('caps a stored checkpoint progression at the boundary', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const store = new StatisticsStore(join(root, 'statistics.json'))
+    const scores = Array.from({ length: 70 }, (_, index) => index / 100)
+    const record = await store.record({
+      toolName: 'verifier_track', startedAt: 100, finishedAt: 200, success: true, provider: 'p', model: 'm', stats: stats(),
+      verdict: { phase: 'track', outcome: 'below-threshold', score: 0.69, scores, threshold: 0.8 },
+    })
+    expect(record.verdict?.scores).toHaveLength(64)
+    expect(record.verdict?.scores?.at(-1)).toBe(0.63)
+  })
+
   it('loads old records that have no verdict', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
     const file = join(root, 'statistics.json')

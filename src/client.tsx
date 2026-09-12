@@ -502,6 +502,7 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
                   {verdictInfo.outcomeText && <span style={{ padding: '1px 5px', borderRadius: 4, fontWeight: 500, fontSize: 11, background: verdictInfo.isFailed ? 'rgba(231,101,101,.16)' : item.verdict.outcome === 'tie' ? 'rgba(227,189,99,.16)' : 'rgba(89,201,133,.16)', color: verdictInfo.isFailed ? '#e76565' : item.verdict.outcome === 'tie' ? '#e3bd63' : '#77d49b', border: `1px solid ${verdictInfo.isFailed ? 'rgba(231,101,101,.3)' : item.verdict.outcome === 'tie' ? 'rgba(227,189,99,.3)' : 'rgba(89,201,133,.3)'}` }}>{verdictInfo.outcomeText}</span>}
                   {verdictInfo.phaseText && <span style={{ padding: '1px 5px', borderRadius: 4, background: 'var(--dsw-surface-sunken)', color: 'var(--dsw-text-secondary)', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.1))' }}>{verdictInfo.phaseText}</span>}
                   {verdictInfo.scoreText && <span style={{ color: (typeof item.verdict.threshold === 'number' && typeof item.verdict.score === 'number' && item.verdict.score < item.verdict.threshold) ? '#e76565' : 'var(--dsw-text-primary)' }}>{verdictInfo.scoreText}</span>}
+                  {verdictInfo.checkpointsText && <span style={{ color: 'var(--dsw-text-secondary)' }}>{verdictInfo.checkpointsText}</span>}
                   {verdictInfo.winnerText && <span style={{ color: 'var(--dsw-text-secondary)' }}>{verdictInfo.winnerText}</span>}
                 </div>}
               </div>

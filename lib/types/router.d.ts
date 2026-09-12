@@ -96,6 +96,11 @@ interface EvidenceIndex {
     calls: Map<string, EvidenceCall>;
     todos: Map<number, TodoItem[]>;
     teamTasks: Map<number, TeamTaskItem[]>;
+    /** Newest assistant prose in the task; attached to the current checkpoint as a claim, never as evidence. */
+    narration?: {
+        seq: number;
+        text: string;
+    };
 }
 export declare function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceIndex | undefined;
 /**

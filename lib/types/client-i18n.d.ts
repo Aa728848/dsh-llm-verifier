@@ -136,6 +136,7 @@ export declare const zh: {
     'stats.verdict.winner': string;
     'stats.verdict.scoreThreshold': string;
     'stats.verdict.scoreOnly': string;
+    'stats.verdict.checkpoints': string;
     'metric.cacheHitRate': string;
     'metric.cacheHitNote': string;
     'metric.tokens': string;
@@ -320,6 +321,7 @@ export declare const dictionaries: {
         'stats.verdict.winner': string;
         'stats.verdict.scoreThreshold': string;
         'stats.verdict.scoreOnly': string;
+        'stats.verdict.checkpoints': string;
         'metric.cacheHitRate': string;
         'metric.cacheHitNote': string;
         'metric.tokens': string;
@@ -501,6 +503,7 @@ export declare const dictionaries: {
         'stats.verdict.winner': string;
         'stats.verdict.scoreThreshold': string;
         'stats.verdict.scoreOnly': string;
+        'stats.verdict.checkpoints': string;
         'metric.cacheHitRate': string;
         'metric.cacheHitNote': string;
         'metric.tokens': string;
@@ -557,6 +560,8 @@ export interface VerdictSummary {
     phase?: string;
     outcome?: string;
     score?: number;
+    /** Per-checkpoint progression of a `verifier_track` verdict, oldest first; absent on older records. */
+    scores?: number[];
     baselineScore?: number;
     winner?: 'A' | 'B' | 'tie';
     threshold?: number;
@@ -613,6 +618,7 @@ export declare function formatVerdictDetails(verdict: VerdictSummary, t: I18nDic
     outcomeText?: string;
     phaseText?: string;
     scoreText?: string;
+    checkpointsText?: string;
     winnerText?: string;
     isFailed: boolean;
 };

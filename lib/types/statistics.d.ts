@@ -5,6 +5,8 @@ export interface VerdictSummary {
     phase?: string;
     outcome?: string;
     score?: number;
+    /** Per-checkpoint progression of a `verifier_track` verdict, oldest first. Optional: old records do not carry it. */
+    scores?: number[];
     baselineScore?: number;
     winner?: 'A' | 'B' | 'tie';
     threshold?: number;

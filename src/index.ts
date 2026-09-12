@@ -160,9 +160,19 @@ export function apply(ctx: Context, config: Config = {}): void {
       return { phase, outcome: 'ranked', ...(best !== undefined ? { score: best } : {}) }
     }
     if (toolName === 'verifier_track') {
-      const worst = scores.length > 0 ? Math.min(...scores) : undefined
+      // The verdict reports the newest checkpoint (the one the continuation decision
+      // uses) plus the whole progression. Reporting only Math.min() made every routed
+      // track look like a 0% failure on the dashboard, because the first checkpoint of
+      // a task is always the untouched plan.
+      const latest = scores.length > 0 ? scores[scores.length - 1] : undefined
       const threshold = selected.autoTrackCompletionThreshold
-      return { phase, outcome: worst !== undefined && worst >= threshold ? 'passed' : 'below-threshold', ...(worst !== undefined ? { score: worst } : {}), threshold }
+      return {
+        phase,
+        outcome: latest !== undefined && latest >= threshold ? 'passed' : 'below-threshold',
+        ...(latest !== undefined ? { score: latest } : {}),
+        ...(scores.length > 1 ? { scores: [...scores] } : {}),
+        threshold,
+      }
     }
     const score = numberAt('score') ?? numberAt('scoreA')
     const baselineScore = numberAt('baselineScore')
@@ -502,7 +512,12 @@ export function apply(ctx: Context, config: Config = {}): void {
           if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return }
           if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
           const detail = result.scores.map((score, index) => 'Checkpoint step ' + decision.checkpoints[index] + ': ' + (score * 100).toFixed(1) + '%').join('\n')
-          const continuation = result.scores.some(score => score < selected.autoTrackCompletionThreshold) ? '\nContinue the unfinished work.' : '\nPrepare final delivery evidence; final session verification is mandatory.'
+          // Judge the CURRENT state, not the whole history: the first checkpoint is the
+          // state right after the first todo snapshot, which is always "nothing done
+          // yet", so "any checkpoint below threshold" made the continue branch
+          // unconditional (5/5 live routes) and the threshold meaningless.
+          const latest = result.scores.length > 0 ? result.scores[result.scores.length - 1]! : 0
+          const continuation = latest < selected.autoTrackCompletionThreshold ? '\nContinue the unfinished work.' : '\nPrepare final delivery evidence; final session verification is mandatory.'
           agent.steer(routeFeedback(decision, detail + continuation))
           return
         } catch (error) {

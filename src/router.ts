@@ -98,6 +98,23 @@ function blockText(blocks: readonly ContentBlock[]): string {
   return parts.join('\n').trim()
 }
 
+/**
+ * Text of one assistant turn, excluding reasoning blocks.
+ *
+ * Used only as the newest checkpoint's narration. Prose is not evidence, but for a
+ * deliverable that lives in prose (a review, an analysis) it is the only thing that
+ * describes the current state at all, so the judge receives it explicitly labelled
+ * as a claim instead of being shown nothing about the deliverable.
+ * @param blocks - content blocks of an `assistant/message` event.
+ * @returns The joined text, trimmed.
+ */
+function narrativeText(blocks: readonly ContentBlock[]): string {
+  const parts: string[] = []
+  const visit = (items: readonly ContentBlock[]) => { for (const block of items) { if (block.type === 'text') parts.push(block.text); else if (block.type === 'tool-result') visit(block.content) } }
+  visit(blocks)
+  return parts.join('\n').trim()
+}
+
 function successful(event: SessionEvent<'tool/result'>): boolean {
   return event.data.error === undefined && event.data.message.content.every(block => block.isError !== true)
 }
@@ -129,6 +146,8 @@ interface EvidenceIndex {
   calls: Map<string, EvidenceCall>
   todos: Map<number, TodoItem[]>
   teamTasks: Map<number, TeamTaskItem[]>
+  /** Newest assistant prose in the task; attached to the current checkpoint as a claim, never as evidence. */
+  narration?: { seq: number; text: string }
 }
 
 export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceIndex | undefined {
@@ -143,6 +162,7 @@ export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceInd
 
   // Track the rolling view of team tasks across the session
   const currentTeamTasks = new Map<string, TeamTaskItem>()
+  let narration: { seq: number; text: string } | undefined
 
   for (const rawEvent of relevant) {
     const event = rawEvent as unknown as { type: string; seq: number; data: any }
@@ -155,6 +175,13 @@ export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceInd
         currentTeamTasks.set(data.task.id, { ...data.task })
         teamTasks.set(event.seq, [...currentTeamTasks.values()])
       }
+    }
+    else if (event.type === 'assistant/message') {
+      // Session V3 carries the blocks under message.content (same shape as tool/result);
+      // the bare content fallback keeps older/mock event streams working.
+      const blocks = event.data?.message?.content ?? event.data?.content
+      const text = narrativeText(Array.isArray(blocks) ? blocks : [])
+      if (text) narration = { seq: event.seq, text }
     }
     else if (event.type === 'tool/ptc-dispatch' || event.type === 'tool/code-dispatch') {
       const data = event.data as { subCallId?: string; name: string; isError?: boolean; content?: readonly ContentBlock[] }
@@ -171,7 +198,7 @@ export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceInd
     const result = results.get(callId)
     if (result) paired.set(callId, { name: call.data.name, callSeq: call.seq, resultSeq: result.seq, text: blockText(result.data.message.content) })
   }
-  return { problemSeq: taskStartSeq, calls: paired, todos, teamTasks }
+  return { problemSeq: taskStartSeq, calls: paired, todos, teamTasks, narration }
 }
 
 function parseTrustedWorkflow(value: unknown, callId: string, callSeq: number, resultSeq: number, maxCandidates: number, maxItemChars: number, maxInputChars: number): CandidateArtifact[] {
@@ -219,12 +246,29 @@ function canonicalTodoSnapshots(index: EvidenceIndex): Array<{ seq: number; todo
 }
 
 /**
+ * Tools whose successful output only maintains the agent's own bookkeeping.
+ *
+ * A checkpoint already renders the todo/team snapshot these tools wrote, so their
+ * own result repeats it while displacing the real work output that came just before
+ * them.
+ */
+const BOOKKEEPING_TOOLS = new Set([
+  'todo_write', 'create_goal', 'get_goal', 'update_goal', 'interrupt_agent', 'list_agents', 'exit_plan_mode', 'skill',
+])
+
+/**
  * Observed tool evidence available at one checkpoint.
  *
  * A checkpoint rendered from todo/team text alone can never clear the progress
  * threshold: the judge prompt explicitly refuses to credit a state that carries
  * no observed output. The most recent successful tool result at or before the
  * checkpoint is therefore attached as evidence.
+ *
+ * Bookkeeping tools are skipped: the checkpoint already renders the todo/team
+ * snapshot they wrote, so their own result repeats it while displacing the real
+ * output produced just before them (a live session attached `create_goal`,
+ * `update_goal` and `interrupt_agent` output to checkpoints that had already run
+ * the task's test suite).
  * @param index - evidence index of the current task.
  * @param seq - checkpoint sequence number.
  * @param budget - maximum characters the evidence may occupy.
@@ -234,6 +278,7 @@ function checkpointEvidence(index: EvidenceIndex, seq: number, budget: number): 
   if (budget < 64) return ''
   let latest: EvidenceCall | undefined
   for (const pair of index.calls.values()) {
+    if (BOOKKEEPING_TOOLS.has(pair.name)) continue
     if (pair.resultSeq <= seq && (latest === undefined || pair.resultSeq > latest.resultSeq)) latest = pair
   }
   if (latest === undefined) return ''
@@ -279,7 +324,9 @@ interface CheckpointSource { seq: number; label: string; body: string }
  *
  * The result fits both caps by construction: each step is at most min(maxItemChars,
  * maxInputChars / kept.length) characters, so the combined length can never exceed
- * maxInputChars and boundDecision() no longer drops the whole route.
+ * maxInputChars and boundDecision() no longer drops the whole route. The newest
+ * checkpoint additionally carries the agent's latest prose as an explicitly labelled
+ * claim (see {@link currentNarration}), because prose deliverables never reach a tool.
  * @param index - evidence index of the current task.
  * @param sources - checkpoints in chronological order.
  * @param maxItemChars - hard per-item cap enforced by boundDecision().
@@ -294,10 +341,37 @@ function renderCheckpointSteps(index: EvidenceIndex, sources: readonly Checkpoin
   const evidenceBudget = Math.max(0, Math.min(Math.floor(maxInputChars / 2), Math.floor(maxItemChars / 2), Math.floor(stepCap / 2)))
   const steps = kept.map((source, position) => {
     const note = position === 0 && omitted > 0 ? 'Earlier ' + omitted + ' checkpoint(s) omitted; showing the ' + kept.length + ' most recent.\n' : ''
-    const evidence = checkpointEvidence(index, source.seq, evidenceBudget)
-    return sanitizeVerifierText(note + source.label + source.body, Math.max(1, stepCap - evidence.length)) + evidence
+    // Only the newest checkpoint describes the state the route is judging, so only it
+    // carries the agent's own latest narration. Half of the evidence budget is held
+    // back for it: narration is much longer than a tool result and used to be the
+    // deliverable for tasks (reviews, analyses) whose output never reaches a tool.
+    const isCurrent = position === kept.length - 1
+    const observed = checkpointEvidence(index, source.seq, isCurrent ? Math.floor(evidenceBudget / 2) : evidenceBudget)
+    const narration = isCurrent ? currentNarration(index, evidenceBudget - observed.length) : ''
+    return sanitizeVerifierText(note + source.label + source.body, Math.max(1, stepCap - observed.length - narration.length)) + observed + narration
   })
   return { steps, evidenceSeqs: kept.map(source => source.seq), omitted }
+}
+
+/**
+ * The agent's newest unverified prose, attached to the current checkpoint.
+ *
+ * Progress checkpoints are graded against "would this state satisfy the task", and
+ * for work whose deliverable is prose the todo snapshot plus one tool result say
+ * nothing about it: every checkpoint then scores "certainly NO" even though the
+ * deliverable exists (a live review task scored 0% on all four checkpoints while the
+ * final session acceptance of the same work passed). The block is labelled as a claim
+ * so the judge can weigh it without treating it as observed output.
+ * @param index - evidence index of the current task.
+ * @param budget - maximum characters the narration may occupy.
+ * @returns Narration block, or '' when the task produced no prose or has no budget.
+ */
+function currentNarration(index: EvidenceIndex, budget: number): string {
+  const narration = index.narration
+  if (narration === undefined || budget < 64) return ''
+  const prefix = "\n\nNewest agent narration in this task (the agent's own claim — NOT observed evidence):\n"
+  if (prefix.length >= budget) return ''
+  return prefix + sanitizeVerifierText(narration.text, budget - prefix.length)
 }
 
 function canonicalTeamTaskSnapshots(index: EvidenceIndex): Array<{ seq: number; tasks: TeamTaskItem[] }> {
