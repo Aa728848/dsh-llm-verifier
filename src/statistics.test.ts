@@ -7,6 +7,8 @@ import {
   emptyRunStats,
   mergeStatisticsOverviews,
   parseStatisticsQuery,
+  summarizeVerdict,
+  type VerdictThresholds,
 } from './statistics.ts'
 
 const readTracker = {
@@ -188,6 +190,51 @@ describe('StatisticsStore', () => {
     })
   })
 
+  it('summarizes every tool verdict from its own result shape', () => {
+    const thresholds: VerdictThresholds = { autoVerifyThreshold: 0.65, autoTrackCompletionThreshold: 0.8 }
+    // Route classification reports no score at all.
+    expect(summarizeVerdict('verifier_route_classify', { kind: 'none' }, 'semantic', thresholds)).toEqual({ phase: 'semantic', outcome: 'classified' })
+    // Select reports the ranked winner's score.
+    expect(summarizeVerdict('verifier_select', { index: 1, scores: [0.2, 0.9], ranking: [1, 0] }, 'select', thresholds)).toEqual({ phase: 'select', outcome: 'ranked', score: 0.9 })
+    // Track reports the newest checkpoint (not the historical minimum) plus the curve.
+    expect(summarizeVerdict('verifier_track', { scores: [0, 0.10526315789473684, 0.7894736842105262] }, 'track', thresholds)).toEqual({
+      phase: 'track',
+      outcome: 'below-threshold',
+      score: 0.7894736842105262,
+      scores: [0, 0.10526315789473684, 0.7894736842105262],
+      threshold: 0.8,
+    })
+    expect(summarizeVerdict('verifier_track', { scores: [0.9] }, 'track', thresholds)).toEqual({ phase: 'track', outcome: 'passed', score: 0.9, threshold: 0.8 })
+  })
+
+  it('reports the winning side of a comparison instead of the loser under a threshold', () => {
+    const thresholds: VerdictThresholds = { autoVerifyThreshold: 0.65, autoTrackCompletionThreshold: 0.8 }
+    // Regression: a comparison has no threshold, so "below-threshold" used to describe
+    // candidate A's (the loser's) score as a failure of the comparison itself.
+    expect(summarizeVerdict('verifier_compare', { scoreA: 0.2, scoreB: 0.9, winner: 'B' }, 'compare', thresholds)).toEqual({ phase: 'compare', outcome: 'compared', score: 0.9, scoreB: 0.9, winner: 'B' })
+    expect(summarizeVerdict('verifier_compare', { scoreA: 0.9, scoreB: 0.2, winner: 'A' }, 'compare', thresholds)).toEqual({ phase: 'compare', outcome: 'compared', score: 0.9, scoreB: 0.2, winner: 'A' })
+    expect(summarizeVerdict('verifier_compare', { scoreA: 0.5, scoreB: 0.5, winner: 'tie' }, 'compare', thresholds)).toEqual({ phase: 'compare', outcome: 'tie', score: 0.5, scoreB: 0.5, winner: 'tie' })
+    // Session acceptance keeps A = the session and B = the empty-work baseline.
+    expect(summarizeVerdict('verifier_current_session', { score: 0.4, baselineScore: 0, winner: 'A' }, 'final', thresholds)).toEqual({
+      phase: 'final', outcome: 'below-threshold', score: 0.4, baselineScore: 0, winner: 'A', threshold: 0.65,
+    })
+    expect(summarizeVerdict('verifier_current_session', { score: 0.7, baselineScore: 0, winner: 'A' }, 'final', thresholds)).toEqual({
+      phase: 'final', outcome: 'passed', score: 0.7, baselineScore: 0, winner: 'A', threshold: 0.65,
+    })
+    // Losing to the baseline can never pass, however high the raw score is.
+    expect(summarizeVerdict('verifier_current_session', { score: 0.9, baselineScore: 0.95, winner: 'B' }, 'final', thresholds)).toMatchObject({ outcome: 'below-threshold' })
+    // One criterion below the threshold fails the record even though the mean passes.
+    expect(summarizeVerdict('verifier_current_session', { score: 0.6667, baselineScore: 0, winner: 'A', criteria: [{ id: 'specification', scoreA: 1 }, { id: 'error_signals', scoreA: 0 }] }, 'final', thresholds)).toEqual({
+      phase: 'final',
+      outcome: 'below-threshold',
+      score: 0.6667,
+      baselineScore: 0,
+      criteria: [{ id: 'specification', score: 1 }, { id: 'error_signals', score: 0 }],
+      winner: 'A',
+      threshold: 0.65,
+    })
+  })
+
   it('keeps the track checkpoint progression and drops invalid entries', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
     const file = join(root, 'statistics.json')
@@ -227,6 +274,34 @@ describe('StatisticsStore', () => {
     })
     expect(record.verdict?.scores).toHaveLength(64)
     expect(record.verdict?.scores?.at(-1)).toBe(0.63)
+  })
+
+  it('stores the per-criterion breakdown and drops malformed entries', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const store = new StatisticsStore(join(root, 'statistics.json'))
+    const record = await store.record({
+      toolName: 'verifier_current_session', startedAt: 1, finishedAt: 2, success: true, provider: 'p', model: 'm', stats: stats(),
+      verdict: {
+        phase: 'final', outcome: 'below-threshold', score: 0.67, baselineScore: 0, winner: 'A', threshold: 0.65,
+        criteria: [{ id: 'specification', score: 1 }, { id: 42, score: 1 } as never, { id: 'error_signals', score: Number.NaN }, { id: 'output_match', score: 0 }],
+      },
+    })
+    expect(record.verdict?.criteria).toEqual([{ id: 'specification', score: 1 }, { id: 'output_match', score: 0 }])
+  })
+
+  it('stores scoreB for comparisons and drops a non-finite one', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const store = new StatisticsStore(join(root, 'statistics.json'))
+    const dropped = await store.record({
+      toolName: 'verifier_compare', startedAt: 1, finishedAt: 2, success: true, provider: 'p', model: 'm', stats: stats(),
+      verdict: { phase: 'compare', outcome: 'compared', score: 0.9, scoreB: Number.NaN, winner: 'A' },
+    })
+    expect(dropped.verdict?.scoreB).toBeUndefined()
+    const kept = await store.record({
+      toolName: 'verifier_compare', startedAt: 3, finishedAt: 4, success: true, provider: 'p', model: 'm', stats: stats(),
+      verdict: { phase: 'compare', outcome: 'compared', score: 0.9, scoreB: 0.15789473684210525, winner: 'A' },
+    })
+    expect(kept.verdict?.scoreB).toBe(0.15789473684210525)
   })
 
   it('loads old records that have no verdict', async () => {

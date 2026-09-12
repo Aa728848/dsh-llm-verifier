@@ -146,6 +146,7 @@ export const zh = {
   'stats.outcome.passed': '通过',
   'stats.outcome.below-threshold': '未达标',
   'stats.outcome.tie': '平局',
+  'stats.outcome.compared': '已比较',
   'stats.outcome.error': '异常',
   'stats.outcome.dropped-over-budget': '超预算丢弃',
   'stats.outcome.invalid-references': '引用无效',
@@ -154,6 +155,7 @@ export const zh = {
   'stats.verdict.scoreThreshold': '得分 {score}（阈值 {threshold}）',
   'stats.verdict.scoreOnly': '得分 {score}',
   'stats.verdict.checkpoints': '检查点 {scores}',
+  'stats.verdict.criteria': '标准 {criteria}',
 
   // Metrics
   'metric.cacheHitRate': '缓存命中率',
@@ -358,6 +360,7 @@ export const en: I18nDict = {
   'stats.outcome.passed': 'Passed',
   'stats.outcome.below-threshold': 'Below Threshold',
   'stats.outcome.tie': 'Tie',
+  'stats.outcome.compared': 'Compared',
   'stats.outcome.error': 'Error',
   'stats.outcome.dropped-over-budget': 'Dropped (over budget)',
   'stats.outcome.invalid-references': 'Invalid references',
@@ -366,6 +369,7 @@ export const en: I18nDict = {
   'stats.verdict.scoreThreshold': 'Score {score} (threshold {threshold})',
   'stats.verdict.scoreOnly': 'Score {score}',
   'stats.verdict.checkpoints': 'Checkpoints {scores}',
+  'stats.verdict.criteria': 'Criteria {criteria}',
 
   // Metrics
   'metric.cacheHitRate': 'Cache Hit Rate',
@@ -497,6 +501,10 @@ export interface VerdictSummary {
   score?: number
   /** Per-checkpoint progression of a `verifier_track` verdict, oldest first; absent on older records. */
   scores?: number[]
+  /** Candidate B's score of a two-way comparison; `score` is the winning side. */
+  scoreB?: number
+  /** Per-criterion A-side scores of a session acceptance; the mean alone can hide a failed requirement. */
+  criteria?: Array<{ id: string; score: number }>
   baselineScore?: number
   winner?: 'A' | 'B' | 'tie'
   threshold?: number
@@ -570,7 +578,7 @@ export function sectionForSave(
   return section
 }
 
-/** An eight-candidate select: ring + pivot rounds (18 pairs) x three criteria, one repeat. */
+/** An eight-candidate select: ring + pivot rounds (18 pairs) x three criteria, one round (the per-pair orientation removes the slot bias). */
 export const WORST_CASE_ROUTE_CALLS_PER_JUDGE = 54
 /** Final acceptance: three criteria x the default two repeats (one per A/B position). */
 export const WORST_CASE_FINAL_CALLS_PER_JUDGE = 6
@@ -634,6 +642,7 @@ export function formatVerdictDetails(
   phaseText?: string
   scoreText?: string
   checkpointsText?: string
+  criteriaText?: string
   winnerText?: string
   isFailed: boolean
 } {
@@ -662,12 +671,19 @@ export function formatVerdictDetails(
     checkpointsText = tFormat(t['stats.verdict.checkpoints'], { scores: verdict.scores.map(formatPercentage).join(' → ') })
   }
 
+  // The acceptance mean can hide a requirement that failed on its own, so the breakdown
+  // is what tells the reader which one is holding the task back.
+  let criteriaText: string | undefined
+  if (Array.isArray(verdict.criteria) && verdict.criteria.length > 0) {
+    criteriaText = tFormat(t['stats.verdict.criteria'], { criteria: verdict.criteria.map(criterion => criterion.id + ' ' + formatPercentage(criterion.score)).join(' · ') })
+  }
+
   let winnerText: string | undefined
   if (verdict.winner) {
     const winnerValue = verdict.winner === 'tie' ? t['stats.winner.tie'] : verdict.winner
     winnerText = tFormat(t['stats.verdict.winner'], { winner: winnerValue })
   }
 
-  return { outcomeText, phaseText, scoreText, checkpointsText, winnerText, isFailed }
+  return { outcomeText, phaseText, scoreText, checkpointsText, criteriaText, winnerText, isFailed }
 }
 

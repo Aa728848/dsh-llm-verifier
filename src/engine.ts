@@ -60,6 +60,56 @@ function median(values: readonly number[]): number {
 function blankStats(): RunStats { return { ...emptyUsage(), cacheHits: 0, cacheMisses: 0, estimatedCostUsd: 0, topLogprobScores: 0, explicitTagScores: 0 } }
 function unorderedPair(a: number, b: number): string { return a < b ? a + ',' + b : b + ',' + a }
 
+/**
+ * Deterministic A/B slot for one pivot-round pair, balanced by construction.
+ *
+ * The round used to emit `[candidate, pivot]` for every edge, so the ring leaders sat
+ * in trajectory B in all of their extra matches: with a judge that merely prefers slot A
+ * the pivots averaged 0.36 against 0.60 for everyone else and sank in the final ranking.
+ * Alternating on the sum of the two RANKS — not the raw indices: the pivot set is
+ * selected by score, so its indices can share a parity and a parity rule would then
+ * handicap half the field — gives every pivot and every candidate both slots within one
+ * edge of each other, without a second model call.
+ *
+ * Deliberately NOT in core.ts: `pivotRoundPairs` is compared against the upstream Python
+ * reference in `parity.test.ts`, so the orientation stays an orchestration-side decision.
+ * @param pair - one unordered pair from the pivot round.
+ * @param pivotRanks - pivot index → its rank among the pivots.
+ * @param nonPivotRanks - candidate index → its rank among the non-pivots.
+ * @returns The pair in the order it should be presented.
+ */
+export function orientRoundPairs(pairs: readonly (readonly [number, number])[]): Array<[number, number]> {
+  const balance = new Map<number, number>()
+  return pairs.map(([a, b]) => {
+    const first = balance.get(a) ?? 0
+    const second = balance.get(b) ?? 0
+    // Slot A goes to whichever endpoint has held it less often; an equal count keeps the
+    // incoming order, so the result is deterministic for a given pair sequence.
+    const [x, y] = second < first ? [b, a] : [a, b]
+    balance.set(x, (balance.get(x) ?? 0) + 1)
+    balance.set(y, (balance.get(y) ?? 0) - 1)
+    return [x, y] as [number, number]
+  })
+}
+
+/**
+ * Arbitrary but fixed A/B slot for the single pair of a two-candidate select.
+ *
+ * There is only one match, so nothing can cancel a preference; the mix at least stops
+ * candidate 0 from always sitting in slot A. Real comparisons go through `compare`,
+ * where `routedRepeats` runs an even number of rounds instead.
+ * @param a - first candidate index of the pair.
+ * @param b - second candidate index of the pair.
+ * @returns The pair in the order it should be presented.
+ */
+function orientPair(a: number, b: number): [number, number] {
+  const lo = Math.min(a, b)
+  const hi = Math.max(a, b)
+  let mixed = Math.imul(lo + 1, 0x9e3779b1) ^ Math.imul(hi + 1, 0x85ebca77)
+  mixed = Math.imul(mixed ^ (mixed >>> 15), 0x2545f491)
+  return ((mixed ^ (mixed >>> 13)) & 1) === 0 ? [a, b] : [b, a]
+}
+
 function judgeLabel(client: VerifierClientConfig): string {
   return client.label?.trim() || client.provider + '/' + client.model
 }
@@ -422,10 +472,12 @@ export class VerifierEngine {
       return { index: 0, best: options.candidates[0]!, scores: [1], ranking: [0], pivots: [0], comparisons: 0, calls: 0, stats: blankStats(), judges }
     }
     if (options.candidates.length === 2) {
-      // ringCycle(2) would judge the single unordered pair in both directions; play it once.
-      const { rewards, judgeRewards, judgeOk, judgeErrors, judgeCalls, stats } = await this.scorePairs(options, [[0, 1]], signal)
+      // ringCycle(2) would judge the single unordered pair in both directions; play it
+      // once, in the orientation orientPair() picks so the slot is not always candidate 0.
+      const single = orientPair(0, 1)
+      const { rewards, judgeRewards, judgeOk, judgeErrors, judgeCalls, stats } = await this.scorePairs(options, [single], signal)
       const wins = [0, 0]; const counts = [0, 0]
-      accumulatePairs([[0, 1]], rewards, wins, counts)
+      accumulatePairs([single], rewards, wins, counts)
       const ranked = rankScores(wins, counts); const index = ranked[0]!.index
       const judges: JudgeScore[] = this.clients.map((client, k) => {
         const isOk = judgeOk[k]!
@@ -464,7 +516,7 @@ export class VerifierEngine {
     // pivot→neighbour edges). Dropping those duplicates keeps each unordered pair to a
     // single match so wins/counts are not double-weighted and no pair is judged twice.
     const ringPairs = new Set(ring.map(pair => unorderedPair(pair[0], pair[1])))
-    const rounds = pivotRoundPairs(options.candidates.length, pivots).filter(pair => !ringPairs.has(unorderedPair(pair[0], pair[1])))
+    const rounds = orientRoundPairs(pivotRoundPairs(options.candidates.length, pivots).filter(pair => !ringPairs.has(unorderedPair(pair[0], pair[1]))))
     const roundScores = await this.scorePairs(options, rounds, signal)
     const allRewards = new Map([...ringScores.rewards, ...roundScores.rewards])
     const wins = new Array<number>(options.candidates.length).fill(0)

@@ -7,10 +7,36 @@ export interface VerdictSummary {
     score?: number;
     /** Per-checkpoint progression of a `verifier_track` verdict, oldest first. Optional: old records do not carry it. */
     scores?: number[];
+    /** Candidate B's score of a two-way comparison; `score` is the winning side. */
+    scoreB?: number;
+    /** Per-criterion A-side scores of a session acceptance; the mean alone can hide a failed requirement. */
+    criteria?: Array<{
+        id: string;
+        score: number;
+    }>;
     baselineScore?: number;
     winner?: 'A' | 'B' | 'tie';
     threshold?: number;
 }
+/** Thresholds the verdict summary needs; plain values keep the mapping a pure function. */
+export interface VerdictThresholds {
+    autoVerifyThreshold: number;
+    autoTrackCompletionThreshold: number;
+}
+/**
+ * Compact summary of what the judges decided, stored beside the call counters so
+ * the dashboard can answer "why did this fail?" instead of only "how much did it cost".
+ *
+ * Pure on purpose: this mapping used to live inside the plugin closure, where the two
+ * bugs it carried (a track verdict reported as the historical minimum, a comparison
+ * reported as the loser's score under a threshold it never used) could not be tested.
+ * @param toolName - the verifier tool that produced the value.
+ * @param value - its rendered result.
+ * @param phase - which stage produced it (explicit | compare | select | track | final | ...).
+ * @param thresholds - resolved acceptance thresholds.
+ * @returns A verdict summary; score fields are omitted when the tool has none.
+ */
+export declare function summarizeVerdict(toolName: VerifierToolName, value: unknown, phase: string, thresholds: VerdictThresholds): VerdictSummary;
 export interface InvocationRecord {
     id: string;
     toolName: VerifierToolName;

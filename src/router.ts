@@ -163,6 +163,11 @@ export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceInd
   // Track the rolling view of team tasks across the session
   const currentTeamTasks = new Map<string, TeamTaskItem>()
   let narration: { seq: number; text: string } | undefined
+  // Tool names each wrapper call (a `run_code` program) dispatched, keyed by the
+  // wrapper's callId. Session V3 carries rootCallId on the dispatch event, which is the
+  // only reliable parent link: the wrapper's own result text is a concatenation of its
+  // sub-results, so the tool name of the wrapper says nothing about what it did.
+  const dispatchedTools = new Map<string, Set<string>>()
 
   for (const rawEvent of relevant) {
     const event = rawEvent as unknown as { type: string; seq: number; data: any }
@@ -184,7 +189,13 @@ export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceInd
       if (text) narration = { seq: event.seq, text }
     }
     else if (event.type === 'tool/ptc-dispatch' || event.type === 'tool/code-dispatch') {
-      const data = event.data as { subCallId?: string; name: string; isError?: boolean; content?: readonly ContentBlock[] }
+      const data = event.data as { rootCallId?: string; subCallId?: string; name: string; isError?: boolean; content?: readonly ContentBlock[] }
+      const rootCallId = typeof data.rootCallId === 'string' && data.rootCallId ? data.rootCallId : undefined
+      if (rootCallId) {
+        const names = dispatchedTools.get(rootCallId) ?? new Set<string>()
+        names.add(data.name)
+        dispatchedTools.set(rootCallId, names)
+      }
       const isOk = data.isError !== true && (!Array.isArray(data.content) || data.content.every(b => (b as { isError?: boolean }).isError !== true))
       if (isOk) {
         const subCallId = String(data.subCallId ?? ('code:' + event.seq))
@@ -196,7 +207,13 @@ export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceInd
 
   for (const [callId, call] of calls) {
     const result = results.get(callId)
-    if (result) paired.set(callId, { name: call.data.name, callSeq: call.seq, resultSeq: result.seq, text: blockText(result.data.message.content) })
+    if (!result) continue
+    // A wrapper that dispatched nothing but bookkeeping carries only their payloads
+    // (typically the todo list echoed straight back), so it is bookkeeping too. Its
+    // nested dispatches stay in the index under their own names, so real work done by
+    // the same program is still available as evidence.
+    if (onlyBookkeepingDispatches(dispatchedTools.get(callId))) continue
+    paired.set(callId, { name: call.data.name, callSeq: call.seq, resultSeq: result.seq, text: blockText(result.data.message.content) })
   }
   return { problemSeq: taskStartSeq, calls: paired, todos, teamTasks, narration }
 }
@@ -256,6 +273,13 @@ const BOOKKEEPING_TOOLS = new Set([
   'todo_write', 'create_goal', 'get_goal', 'update_goal', 'interrupt_agent', 'list_agents', 'exit_plan_mode', 'skill',
 ])
 
+/** Whether a wrapper's dispatches were all bookkeeping; undefined/empty means it dispatched nothing. */
+function onlyBookkeepingDispatches(names: ReadonlySet<string> | undefined): boolean {
+  if (names === undefined || names.size === 0) return false
+  for (const name of names) if (!BOOKKEEPING_TOOLS.has(name)) return false
+  return true
+}
+
 /**
  * Observed tool evidence available at one checkpoint.
  *
@@ -270,22 +294,25 @@ const BOOKKEEPING_TOOLS = new Set([
  * `update_goal` and `interrupt_agent` output to checkpoints that had already run
  * the task's test suite).
  * @param index - evidence index of the current task.
- * @param seq - checkpoint sequence number.
+ * @param seq - checkpoint sequence number, or `Infinity` for the current state.
  * @param budget - maximum characters the evidence may occupy.
+ * @param current - render the newest output in the task instead of the newest one before `seq`.
  * @returns Evidence block, or '' when the task produced none yet.
  */
-function checkpointEvidence(index: EvidenceIndex, seq: number, budget: number): string {
+function checkpointEvidence(index: EvidenceIndex, seq: number, budget: number, current = false): string {
   if (budget < 64) return ''
   let latest: EvidenceCall | undefined
   for (const pair of index.calls.values()) {
-    if (BOOKKEEPING_TOOLS.has(pair.name)) continue
+    if (BOOKKEEPING_TOOLS.has(pair.name) || !pair.text.trim()) continue
     if (pair.resultSeq <= seq && (latest === undefined || pair.resultSeq > latest.resultSeq)) latest = pair
   }
   if (latest === undefined) return ''
   // The prefix length depends on the tool name, so measure it instead of assuming a
   // fixed overhead: with a long tool name the old "- 60" let the rendered step exceed
   // maxItemChars, and boundDecision() then dropped the whole track decision silently.
-  const prefix = '\n\nLatest observed tool output before this checkpoint (' + latest.name + '):\n'
+  const prefix = current
+    ? '\n\nLatest observed tool output at routing time (' + latest.name + '):\n'
+    : '\n\nLatest observed tool output before this checkpoint (' + latest.name + '):\n'
   if (prefix.length >= budget) return ''
   return prefix + sanitizeVerifierText(latest.text, budget - prefix.length)
 }
@@ -324,9 +351,13 @@ interface CheckpointSource { seq: number; label: string; body: string }
  *
  * The result fits both caps by construction: each step is at most min(maxItemChars,
  * maxInputChars / kept.length) characters, so the combined length can never exceed
- * maxInputChars and boundDecision() no longer drops the whole route. The newest
- * checkpoint additionally carries the agent's latest prose as an explicitly labelled
- * claim (see {@link currentNarration}), because prose deliverables never reach a tool.
+ * maxInputChars and boundDecision() no longer drops the whole route.
+ *
+ * The newest checkpoint is also the state the route is judging, so it is rendered as
+ * the CURRENT state: its evidence is the newest observed output in the task rather
+ * than the newest one before the last todo snapshot (which is often several tool calls
+ * stale), and it carries the agent's latest prose as an explicitly labelled claim (see
+ * {@link currentNarration}), because prose deliverables never reach a tool.
  * @param index - evidence index of the current task.
  * @param sources - checkpoints in chronological order.
  * @param maxItemChars - hard per-item cap enforced by boundDecision().
@@ -342,11 +373,12 @@ function renderCheckpointSteps(index: EvidenceIndex, sources: readonly Checkpoin
   const steps = kept.map((source, position) => {
     const note = position === 0 && omitted > 0 ? 'Earlier ' + omitted + ' checkpoint(s) omitted; showing the ' + kept.length + ' most recent.\n' : ''
     // Only the newest checkpoint describes the state the route is judging, so only it
-    // carries the agent's own latest narration. Half of the evidence budget is held
-    // back for it: narration is much longer than a tool result and used to be the
-    // deliverable for tasks (reviews, analyses) whose output never reaches a tool.
+    // carries the agent's own latest narration and the newest observed output. Half of
+    // the evidence budget is held back for the narration: it is much longer than a tool
+    // result and used to be the deliverable for tasks (reviews, analyses) whose output
+    // never reaches a tool.
     const isCurrent = position === kept.length - 1
-    const observed = checkpointEvidence(index, source.seq, isCurrent ? Math.floor(evidenceBudget / 2) : evidenceBudget)
+    const observed = checkpointEvidence(index, isCurrent ? Number.POSITIVE_INFINITY : source.seq, isCurrent ? Math.floor(evidenceBudget / 2) : evidenceBudget, isCurrent)
     const narration = isCurrent ? currentNarration(index, evidenceBudget - observed.length) : ''
     return sanitizeVerifierText(note + source.label + source.body, Math.max(1, stepCap - observed.length - narration.length)) + observed + narration
   })
@@ -403,23 +435,46 @@ export function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandi
     const snapshots = canonicalTodoSnapshots(index)
     if (snapshots.length >= 2 && snapshots.some(snapshot => snapshot.todos.length >= 2)) {
       const rendered = renderCheckpointSteps(index, snapshots.map(snapshot => ({ seq: snapshot.seq, label: 'Todo checkpoint seq ' + snapshot.seq + ':\n', body: snapshot.todos.map(todo => '- [' + todo.status + '] ' + todo.content).join('\n') })), maxItemChars, maxInputChars)
-      return { kind: 'track', source: 'structured', confidence: 1, reason: 'changed durable todo snapshots', fingerprint: stableHash({ kind: 'track', snapshots }), steps: rendered.steps, checkpoints: rendered.steps.map((_, i) => i + 1), evidenceSeqs: rendered.evidenceSeqs }
+      // The fingerprint covers the RENDERED steps, not just the snapshots: the evidence
+      // attached to a checkpoint (and the newest narration) changes with the work that
+      // followed it, so a route whose prompt would differ must not be refused as
+      // "already routed". The semantic track route hashes its steps for the same reason.
+      return { kind: 'track', source: 'structured', confidence: 1, reason: 'changed durable todo snapshots', fingerprint: stableHash({ kind: 'track', snapshots, steps: rendered.steps }), steps: rendered.steps, checkpoints: rendered.steps.map((_, i) => i + 1), evidenceSeqs: rendered.evidenceSeqs }
     }
     const teamSnapshots = canonicalTeamTaskSnapshots(index)
     if (teamSnapshots.length >= 2) {
       const rendered = renderCheckpointSteps(index, teamSnapshots.map(snapshot => ({ seq: snapshot.seq, label: 'Team task checkpoint seq ' + snapshot.seq + ':\n', body: snapshot.tasks.map(task => '- [' + task.status + '] ' + task.subject + (task.description ? ' (' + task.description + ')' : '')).join('\n') })), maxItemChars, maxInputChars)
-      return { kind: 'track', source: 'structured', confidence: 1, reason: 'changed durable team tasks', fingerprint: stableHash({ kind: 'track', teamSnapshots }), steps: rendered.steps, checkpoints: rendered.steps.map((_, i) => i + 1), evidenceSeqs: rendered.evidenceSeqs }
+      return { kind: 'track', source: 'structured', confidence: 1, reason: 'changed durable team tasks', fingerprint: stableHash({ kind: 'track', teamSnapshots, steps: rendered.steps }), steps: rendered.steps, checkpoints: rendered.steps.map((_, i) => i + 1), evidenceSeqs: rendered.evidenceSeqs }
     }
   }
   return undefined
 }
 
+/**
+ * Artifacts that only the classifier can turn into candidates.
+ *
+ * Todo and team snapshots are deliberately absent. They are the structured track
+ * route's own input, and that route runs first — so listing them here could only make
+ * the hint true in shapes the structured pass already claimed (or in a task that
+ * already ran an explicit `verifier_track`, where re-classifying the same snapshots is
+ * not wanted). The one shape left out is a snapshot series whose lists are all shorter
+ * than two items, which is not worth a classification call.
+ */
+const HINT_ARTIFACTS = new Set(['subagent', 'subagent_fork', 'workflow', 'exit_plan_mode'])
+
+/**
+ * Whether a smart-mode stop boundary is worth a semantic classification call.
+ *
+ * The semantic phase only runs when the structured pass produced nothing, so this
+ * answers "is there material the structured pass never consumes?" — never "are there
+ * todo/team snapshots?", which the structured pass would have used already.
+ * @param events - Session event log.
+ * @returns True when a subagent/workflow/plan artifact exists.
+ */
 export function semanticRouteHint(events: readonly SessionEvent[]): boolean {
   const index = buildEvidenceIndex(events)
   if (!index) return false
-  if ([...index.calls.values()].some(pair => pair.name === 'subagent' || pair.name === 'subagent_fork' || pair.name === 'workflow' || pair.name === 'exit_plan_mode')) return true
-  if (canonicalTodoSnapshots(index).length >= 2) return true
-  if (canonicalTeamTaskSnapshots(index).length >= 2) return true
+  for (const pair of index.calls.values()) if (HINT_ARTIFACTS.has(pair.name)) return true
   return false
 }
 
@@ -433,6 +488,9 @@ export function buildSemanticRoutePrompt(problem: string, events: readonly Sessi
   let used = 0
   let omitted = 0
   for (const [callId, pair] of [...index.calls.entries()].reverse()) {
+    // Bookkeeping results are not alternatives to anything; offering them let the
+    // classifier cite e.g. two goal/agent-control calls as competing candidates.
+    if (BOOKKEEPING_TOOLS.has(pair.name)) continue
     const text = sanitizeVerifierText(pair.text, maxItemChars)
     if (artifacts.length > 0 && used + text.length > maxInputChars) { omitted += 1; continue }
     used += text.length
@@ -490,7 +548,11 @@ export function semanticDecision(output: SemanticRouteOutput, events: readonly S
   const perItem = itemBudget(output.candidateCallIds.length, maxItemChars, maxInputChars)
   const candidates = output.candidateCallIds.map((callId, i) => {
     const pair = index.calls.get(callId)
-    return pair ? { id: callId, groupId: 'semantic', label: pair.name + ' ' + (i + 1), content: sanitizeVerifierText(pair.text, perItem), callId, fromSeq: pair.callSeq, toSeq: pair.resultSeq } : undefined
+    // Bookkeeping calls are not candidates (they were never offered to the classifier);
+    // a citation of one is an invalid reference, so the whole decision is rejected
+    // instead of comparing metadata as if it were alternative work.
+    if (!pair || BOOKKEEPING_TOOLS.has(pair.name)) return undefined
+    return { id: callId, groupId: 'semantic', label: pair.name + ' ' + (i + 1), content: sanitizeVerifierText(pair.text, perItem), callId, fromSeq: pair.callSeq, toSeq: pair.resultSeq }
   }).filter((candidate): candidate is CandidateArtifact => candidate !== undefined)
   if (candidates.length !== output.candidateCallIds.length) return undefined
   const fingerprint = stableHash({ kind: output.kind, candidates })
@@ -509,6 +571,27 @@ export function semanticDecision(output: SemanticRouteOutput, events: readonly S
  * @param criteriaCount - number of criteria evaluated per comparison.
  * @returns The planned model-call count, never below 1.
  */
+/**
+ * Scoring repeats a routed decision actually runs.
+ *
+ * `compare` judges ONE unordered pair, and `VerifierEngine.compare` only swaps the
+ * candidates on odd repeat indices — with the shipped default of a single round the
+ * first candidate therefore always sat in slot A, so the winner was partly decided by
+ * listing order. Rounding its count up to an even number averages a swapped round and
+ * cancels that.
+ *
+ * `select` does not need it: its ring is symmetric by construction and the pivot round
+ * is oriented per pair by the engine, so one round is already unbiased. `track` scores
+ * a single checkpoint list and has no slots at all.
+ * @param decision - the routed decision about to run.
+ * @param configured - the configured auto-route repeat count.
+ * @returns The repeat count to pass to the engine.
+ */
+export function routedRepeats(decision: RouteDecision, configured: number): number {
+  if (decision.kind !== 'compare') return configured
+  return configured % 2 === 0 ? configured : configured + 1
+}
+
 export function estimateRoutedCalls(decision: RouteDecision, repeats: number, criteriaCount: number): number {
   if (decision.kind === 'compare') return Math.max(1, criteriaCount * repeats)
   if (decision.kind === 'track') return Math.max(1, repeats)

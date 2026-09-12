@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { VerifierClientConfig } from './caller.ts'
 import { ScoreCache, SingleFlight, type CachedPairScore } from './cache.ts'
-import { VerifierEngine } from './engine.ts'
+import { VerifierEngine, orientRoundPairs } from './engine.ts'
+import { pivotRoundPairs } from './core.ts'
 import { TopLogprobCapabilityCache } from './top-logprobs.ts'
 
 function chunks(text: string) { return [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'text-delta', index: 0, text }, { type: 'block-end', index: 0, block: { type: 'text', text } }, { type: 'usage', usage: { inputTokens: 7, cacheReadTokens: 3, outputTokens: 4, reasoningTokens: 2 } }, { type: 'finish', reason: { kind: 'stop' } }] as any[] }
@@ -69,6 +70,44 @@ describe('VerifierEngine tournament', () => {
     expect(result.stats.calls).toBe(judged.length)
     expect(result.ranking[0]).toBe(0)
     expect(result.best).toBe('STRONG-0')
+  })
+})
+
+describe('pivot round orientation', () => {
+  it('gives every ring leader both slots instead of always trajectory B', () => {
+    // Regression: the pivot round emitted [candidate, pivot] for every edge, so the ring
+    // leaders sat in trajectory B in ALL their extra matches — a judge that merely
+    // prefers slot A then averaged 0.36 for the pivots against 0.60 for everyone else
+    // and pushed the leaders to the bottom of the final ranking.
+    const key = ([a, b]: readonly [number, number]) => (a < b ? a + ',' + b : b + ',' + a)
+    for (const count of [4, 5, 6, 8]) {
+      const pivots = [0, 1]
+      const raw = pivotRoundPairs(count, pivots)
+      const oriented = orientRoundPairs(raw)
+      // Same unordered pairs — only the presentation order may change.
+      expect(oriented).toHaveLength(raw.length)
+      expect(oriented.map(key).sort()).toEqual(raw.map(key).sort())
+      expect(new Set(oriented.map(key)).size).toBe(oriented.length)
+      const slotA = new Map<number, number>()
+      const slotB = new Map<number, number>()
+      for (const [a, b] of oriented) {
+        slotA.set(a, (slotA.get(a) ?? 0) + 1)
+        slotB.set(b, (slotB.get(b) ?? 0) + 1)
+      }
+      for (const pivot of pivots) {
+        const a = slotA.get(pivot) ?? 0
+        const b = slotB.get(pivot) ?? 0
+        expect(a, 'count=' + count + ' pivot=' + pivot + ' must not always sit in slot B').toBeGreaterThan(0)
+        expect(Math.abs(a - b), 'count=' + count + ' pivot=' + pivot + ' slot balance').toBeLessThanOrEqual(1)
+      }
+    }
+  })
+
+  it('leaves a two-candidate select with exactly one match', () => {
+    // The orientation must not invent or duplicate matches.
+    const oriented = orientRoundPairs([[0, 1]])
+    expect(oriented).toHaveLength(1)
+    expect([oriented[0]![0], oriented[0]![1]].sort()).toEqual([0, 1])
   })
 })
 

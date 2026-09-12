@@ -453,7 +453,8 @@ describe('settings save layer', () => {
 
 describe('budget worst case and sanity warnings', () => {
   it('defines correct constants for worst case calls per judge', () => {
-    // Routing (54) plus the final acceptance (3 criteria x 2 repeats) per judge.
+    // Routing (18 pairs x 3 criteria, one round per pair) plus the final acceptance
+    // (3 criteria x 2 repeats) per judge.
     expect(WORST_CASE_ROUTE_CALLS_PER_JUDGE).toBe(54)
     expect(WORST_CASE_FINAL_CALLS_PER_JUDGE).toBe(6)
     expect(WORST_CASE_TASK_PER_JUDGE).toBe(60)
@@ -480,14 +481,14 @@ describe('budget worst case and sanity warnings', () => {
   })
 
   it('returns null when budgets meet or exceed worst case requirements', () => {
-    // 1 judge (0 extra): task worst case 60, session worst case 160
+    // 1 judge (0 extra): task worst case 60, session worst case 160 — the shipped
+    // defaults (96 / 240) clear both.
     expect(evaluateBudgetWarning('smart', 0, 96, 240)).toBeNull()
     // 2 judges (1 extra): task worst case 120, session worst case 320
     expect(evaluateBudgetWarning('smart', 1, 120, 320)).toBeNull()
   })
 
   it('warns on task budget below worst case requirement', () => {
-    // 2 judges (1 extra): task worst case 120, session worst case 320
     const warning = evaluateBudgetWarning('smart', 1, 64, 350)
     expect(warning).not.toBeNull()
     expect(warning?.warnTask).toBe(true)
@@ -601,6 +602,33 @@ describe('verdict dashboard helpers', () => {
       }
       expect(formatVerdictDetails(verdict, zh).checkpointsText).toBe('检查点 0.0% → 10.5% → 78.9%')
       expect(formatVerdictDetails(verdict, en).checkpointsText).toBe('Checkpoints 0.0% → 10.5% → 78.9%')
+    })
+
+    it('localizes the compared outcome and omits a threshold a comparison never had', () => {
+      const verdict: VerdictSummary = { phase: 'compare', outcome: 'compared', score: 0.9, scoreB: 0.2, winner: 'B' }
+      const zhRes = formatVerdictDetails(verdict, zh)
+      expect(zhRes.outcomeText).toBe('已比较')
+      expect(zhRes.scoreText).toBe('得分 90.0%')
+      expect(zhRes.winnerText).toBe('胜方 B')
+      expect(zhRes.isFailed).toBe(false)
+      expect(formatVerdictDetails(verdict, en).outcomeText).toBe('Compared')
+      // A record written by an older build still renders.
+      expect(formatVerdictDetails({ phase: 'compare', outcome: 'below-threshold', score: 0.2, threshold: 0.65 }, zh).isFailed).toBe(true)
+    })
+
+    it('renders the per-criterion breakdown of a session acceptance', () => {
+      const verdict: VerdictSummary = {
+        phase: 'final',
+        outcome: 'below-threshold',
+        score: 0.6667,
+        baselineScore: 0,
+        criteria: [{ id: 'specification', score: 1 }, { id: 'error_signals', score: 0 }],
+        winner: 'A',
+        threshold: 0.65,
+      }
+      expect(formatVerdictDetails(verdict, zh).criteriaText).toBe('标准 specification 100.0% · error_signals 0.0%')
+      expect(formatVerdictDetails(verdict, en).criteriaText).toBe('Criteria specification 100.0% · error_signals 0.0%')
+      expect(formatVerdictDetails({ outcome: 'passed', score: 1 }, zh).criteriaText).toBeUndefined()
     })
 
     it('omits the progression for a single checkpoint', () => {

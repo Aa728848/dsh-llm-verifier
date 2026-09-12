@@ -1,4 +1,3 @@
-import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict';
 export interface AutoVerifyPolicy {
@@ -37,18 +36,39 @@ export declare function isSubagentSession(agent: {
     session?: unknown;
 } | undefined): boolean;
 export declare function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVerifyPolicy): AutoTaskEvidence;
-/**
- * Session/task acceptance budget.
- *
- * The automatic verifier enforces its per-task and per-session budget through
- * {@link AutoVerifierRouter} reservations, which also count the routing phases;
- * this standalone counter is kept as a public utility for orchestrators that
- * need the same accounting outside the router.
- */
-export declare class AutoVerificationBudget {
-    private readonly states;
-    claim(agent: Agent, evidence: AutoTaskEvidence, policy: AutoVerifyPolicy): boolean;
-    release(agent: Agent): void;
+/** One criterion's outcome from a session acceptance (candidate A is the session). */
+export interface AcceptanceCriterion {
+    id: string;
+    name?: string;
+    score: number;
 }
-export declare function automaticFeedback(score: number, baselineScore: number, winner: 'A' | 'B' | 'tie', threshold: number): string;
+/**
+ * Criteria that do not clear the acceptance threshold.
+ *
+ * The acceptance score is the MEAN over criteria, so a session with one requirement at
+ * zero and the others perfect averaged ~0.67 and cleared the 0.65 default: a single
+ * failed requirement was arithmetically invisible. The gate therefore also requires
+ * every criterion to clear the threshold on its own.
+ * @param criteria - per-criterion A-side scores, when the judge reported them.
+ * @param threshold - acceptance threshold.
+ * @returns The failing criteria, in report order.
+ */
+export declare function failedAcceptanceCriteria(criteria: readonly AcceptanceCriterion[] | undefined, threshold: number): AcceptanceCriterion[];
+/**
+ * Whether a session acceptance clears the gate.
+ *
+ * The empty-work baseline is a fixed sentence that always scores 0, so the comparison
+ * itself is decorative; what actually decides is the session's own score, the winner
+ * against that baseline, and (since the mean could hide a failed requirement) every
+ * criterion clearing the threshold.
+ * @param evidence - session acceptance result (score, winner and per-criterion scores).
+ * @param threshold - acceptance threshold.
+ * @returns True only when the session may conclude.
+ */
+export declare function sessionAccepted(evidence: {
+    score: number;
+    winner: 'A' | 'B' | 'tie';
+    criteria?: readonly AcceptanceCriterion[];
+}, threshold: number): boolean;
+export declare function automaticFeedback(score: number, baselineScore: number, winner: 'A' | 'B' | 'tie', threshold: number, failedCriteria?: readonly AcceptanceCriterion[]): string;
 //# sourceMappingURL=auto.d.ts.map

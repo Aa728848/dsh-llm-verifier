@@ -411,8 +411,9 @@ describe('config - temperature', () => {
 describe('config - automatic verification repeats and budget', () => {
   it('scores routing once and the final acceptance twice by default', () => {
     const resolved = resolveConfig({})
-    // Routing stays a cheap single round; the gate that decides turn completion runs
-    // two rounds so the second one swaps A/B positions and cancels position bias.
+    // Routing stays a cheap single round in the config; only compare is rounded up to an
+    // even count at run time (it judges a single pair, so an odd count would leave the
+    // A/B order uncorrected). select and track keep the configured round.
     expect(resolved.autoVerifyRepeats).toBe(1)
     expect(resolved.autoVerifyFinalRepeats).toBe(2)
   })
@@ -427,7 +428,9 @@ describe('config - automatic verification repeats and budget', () => {
   })
 
   it('leaves headroom in the task model-call budget for the final acceptance', () => {
-    // 54 calls for an eight-candidate tournament + 6 for the final acceptance per judge.
+    // 54 calls for an eight-candidate tournament (one round; the engine orients each
+    // pair instead of doubling the rounds) + 6 for the final acceptance per judge.
     expect(resolveConfig({}).autoMaxModelCallsPerTask).toBe(96)
+    expect(resolveConfig({}).autoMaxModelCallsPerSession).toBe(240)
   })
 })

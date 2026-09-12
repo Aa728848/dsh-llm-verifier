@@ -34,7 +34,7 @@ pnpm run verify:release  # typecheck + test + build，prepublishOnly 会自动�
 | `engine.ts` | compare / select / track 编排、位置交换、统计汇总 |
 | `session.ts` | 会话提取、脱敏、`sanitizeVerifierText` 限长、事件访问兼容层 |
 | `router.ts` | 结构化 + 语义路由、证据索引、reservation/commit/fail 状态机、预算估算、检查点渲染上限 |
-| `auto.ts` | 自动验收策略判定、预算计数、子 Agent 识别、低分反馈文案 |
+| `auto.ts` | 自动验收策略判定（`analyzeAutoTask` / `sessionAccepted`）、子 Agent 识别、低分反馈文案 |
 | `plan-gate.ts` / `team-gate.ts` | `exit_plan_mode` 预审 / Agent Teams 任务验收 |
 | `statistics.ts` | 调用记录持久化与多话题聚合 |
 | `topic-storage.ts` | 侧车目录解析（随话题删除） |
@@ -66,12 +66,14 @@ pnpm run verify:release  # typecheck + test + build，prepublishOnly 会自动�
 
 ## 已知的有意设计（别顺手"修"）
 
-- **最终验收用固定字符串当基线**（`'(No useful work or verification was performed.)'`）且要求 `winner === 'A'`。语义待定，改动等于重新定义验收松紧，需要产品决策。
+- **最终验收用固定字符串当基线**（`'(No useful work or verification was performed.)'`）且要求 `winner === 'A'`。基线恒为 0 分，所以真正生效的是分数与阈值；在此基础上还要求**每一项标准各自达到阈值**（`auto.ts` 的 `sessionAccepted` / `failedAcceptanceCriteria`），否则均值会把"3 项里 1 项彻底失败"平均掉。放宽这条等于重新定义验收松紧，需要产品决策。
 - **概率期望没有质量下限**：只要 A–T 候选概率质量 > 0 就归一化。当前用户判官走显式标签通道，这条不生效。
-- **自动路由默认 1 轮、最终验收默认 2 轮**（`autoVerifyFinalRepeats`）：最终验收是唯一决定 turn 能否结束的自动判决，偶数轮会交换 A/B 位置以抵消位置偏好；`compare/select/track` 仍保持 1 轮控成本。改这两个默认值都是成本决策，且会同时改变 `client-i18n.ts` 里 `WORST_CASE_TASK_PER_JUDGE` 的含义与 UI 预算告警阈值。
-- **任务模型调用预算默认 96**（会话 240）：8 候选锦标赛 54 次 + 最终验收 6 次/裁判，64 的旧默认值会把最终验收挤到余量不足。
+- **自动路由配置默认 1 轮、最终验收默认 2 轮**（`autoVerifyFinalRepeats`）：最终验收是唯一决定 turn 能否结束的自动判决，偶数轮会交换 A/B 位置以抵消位置偏好。`compare` 由 `router.ts` 的 `routedRepeats()` 在运行时**向上取整到偶数**（它只判一对，引擎只在奇数轮换位，奇数轮等于让第一个候选固定坐 A 位）；`select` 的 ring 本身对称、pivot 轮由 `engine.ts` 的 `orientRoundPairs()` 逐对平衡 A/B，`track` 没有位置可换——两者都保留配置值，不为不对症的偏差付双倍调用。改这些会同时改变 `client-i18n.ts` 里 `WORST_CASE_*` 的含义与 UI 预算告警阈值。
+- **`core.pivotRoundPairs` 保持上游顺序**（`parity.test.ts` 与 Python 参考实现逐对比对）；A/B 槽位在 `engine.ts` 的 `orientRoundPairs()` 里平衡——它按"谁更少坐 A 位谁坐 A 位"逐对定向，把"领先者永远坐 B 位"这一结构性问题消掉，且不增加任何模型调用。
+- **任务模型调用预算默认 96**（会话 240）：8 候选锦标赛 54 次（单轮；位置偏差在引擎侧定向解决，不靠翻倍轮次）+ 最终验收 6 次/裁判。
 - **验收期间会阻塞 turn 关闭**、**`engine.track` 不参与评分缓存**、**`resolveCallConfig` 每次调用做一次适配器 I/O**：都是已知取舍。
 - **子 Agent 会话默认不门控**（`autoVerifySubagents=false`）。子会话用真实用户消息播种，门控它们会额外消耗预算并反复 steering 子 Agent。
+- **记账类工具（`todo_write`/`create_goal`/`get_goal`/`update_goal`/`interrupt_agent`/`list_agents`/`exit_plan_mode`/`skill`）的输出永远不作为检查点证据或语义候选**，PTC 里 `run_code` 只派发这些工具时整条包装结果同样排除（按 `tool/ptc-dispatch` 的 `rootCallId` 归属判断）。新增证据来源时先问"它有没有自己的产出"，记账结果顶掉真正干活输出的回归见过两次（`router.test.ts`）。
 - **同一字母的多个 token 变体概率必须相加**（`extractScore`）：`" A"` 与 `"A"` 是同一次采样的互斥事件，取 `max` 会系统性压低被拆分的字母并可能翻转判决。**这是与上游唯一的刻意偏差**：上游 `fine_grained_reward.py:678` 用的是 `max`（已核对源码而非猜测），因此 `parity.test.ts` 的 fixture 有意不含同字母多变体用例，新增 fixture 时不要往里面塞这种输入。要退回上游语义就改 `core.ts` 那一行，并同步改 README「与上游的一处已知差异」与本节；改这条评分语义必须同时升 `engine.ts` 里缓存身份的 `version`。
 - **判官温度默认 0.2**（旧版硬编码 1）：自动路由默认只跑 1 轮，低温度让同一次判决更可复现。温度是评分缓存身份的一部分，改默认值或改这个字段必须同时升 `engine.ts` 的缓存 `version`。
 - **统计的 `verdict` 是增量可选字段**：旧记录没有它也必须能加载（`isRecord` 只做宽松校验），看板对缺字段的行按旧样式渲染；`success` 恒为"模型调用是否抛错"，不要把它当验收结果。

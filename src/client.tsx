@@ -503,6 +503,7 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
                   {verdictInfo.phaseText && <span style={{ padding: '1px 5px', borderRadius: 4, background: 'var(--dsw-surface-sunken)', color: 'var(--dsw-text-secondary)', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.1))' }}>{verdictInfo.phaseText}</span>}
                   {verdictInfo.scoreText && <span style={{ color: (typeof item.verdict.threshold === 'number' && typeof item.verdict.score === 'number' && item.verdict.score < item.verdict.threshold) ? '#e76565' : 'var(--dsw-text-primary)' }}>{verdictInfo.scoreText}</span>}
                   {verdictInfo.checkpointsText && <span style={{ color: 'var(--dsw-text-secondary)' }}>{verdictInfo.checkpointsText}</span>}
+                  {verdictInfo.criteriaText && <span style={{ color: 'var(--dsw-text-secondary)' }}>{verdictInfo.criteriaText}</span>}
                   {verdictInfo.winnerText && <span style={{ color: 'var(--dsw-text-secondary)' }}>{verdictInfo.winnerText}</span>}
                 </div>}
               </div>

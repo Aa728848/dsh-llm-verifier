@@ -12,6 +12,10 @@ export interface VerdictSummary {
   score?: number
   /** Per-checkpoint progression of a `verifier_track` verdict, oldest first. Optional: old records do not carry it. */
   scores?: number[]
+  /** Candidate B's score of a two-way comparison; `score` is the winning side. */
+  scoreB?: number
+  /** Per-criterion A-side scores of a session acceptance; the mean alone can hide a failed requirement. */
+  criteria?: Array<{ id: string; score: number }>
   baselineScore?: number
   winner?: 'A' | 'B' | 'tie'
   threshold?: number
@@ -19,6 +23,97 @@ export interface VerdictSummary {
 
 /** Upper bound on the stored checkpoint progression; one explicit call can legitimately carry 32 steps. */
 const MAX_VERDICT_SCORES = 64
+
+/** Upper bound on the stored per-criterion breakdown; the default rubric has three criteria. */
+const MAX_VERDICT_CRITERIA = 16
+
+/** Thresholds the verdict summary needs; plain values keep the mapping a pure function. */
+export interface VerdictThresholds {
+  autoVerifyThreshold: number
+  autoTrackCompletionThreshold: number
+}
+
+/**
+ * Compact summary of what the judges decided, stored beside the call counters so
+ * the dashboard can answer "why did this fail?" instead of only "how much did it cost".
+ *
+ * Pure on purpose: this mapping used to live inside the plugin closure, where the two
+ * bugs it carried (a track verdict reported as the historical minimum, a comparison
+ * reported as the loser's score under a threshold it never used) could not be tested.
+ * @param toolName - the verifier tool that produced the value.
+ * @param value - its rendered result.
+ * @param phase - which stage produced it (explicit | compare | select | track | final | ...).
+ * @param thresholds - resolved acceptance thresholds.
+ * @returns A verdict summary; score fields are omitted when the tool has none.
+ */
+export function summarizeVerdict(toolName: VerifierToolName, value: unknown, phase: string, thresholds: VerdictThresholds): VerdictSummary {
+  const row = typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
+  const numberAt = (key: string): number | undefined => (typeof row[key] === 'number' && Number.isFinite(row[key]) ? row[key] as number : undefined)
+  const scores = Array.isArray(row.scores) ? row.scores.filter((entry): entry is number => typeof entry === 'number' && Number.isFinite(entry)) : []
+  const winner = row.winner === 'A' || row.winner === 'B' || row.winner === 'tie' ? row.winner : undefined
+  if (toolName === 'verifier_route_classify') return { phase, outcome: 'classified' }
+  if (toolName === 'verifier_select') {
+    const index = numberAt('index')
+    const best = index === undefined ? undefined : scores[index]
+    return { phase, outcome: 'ranked', ...(best !== undefined ? { score: best } : {}) }
+  }
+  if (toolName === 'verifier_track') {
+    // The verdict reports the newest checkpoint (the one the continuation decision
+    // uses) plus the whole progression. Reporting only Math.min() made every routed
+    // track look like a 0% failure on the dashboard, because the first checkpoint of
+    // a task is always the untouched plan.
+    const latest = scores.length > 0 ? scores[scores.length - 1] : undefined
+    const threshold = thresholds.autoTrackCompletionThreshold
+    return {
+      phase,
+      outcome: latest !== undefined && latest >= threshold ? 'passed' : 'below-threshold',
+      ...(latest !== undefined ? { score: latest } : {}),
+      ...(scores.length > 1 ? { scores: [...scores] } : {}),
+      threshold,
+    }
+  }
+  if (toolName === 'verifier_compare') {
+    // A comparison has no threshold, so "below-threshold" used to describe the loser's
+    // score as a failure of the call itself. Report the winning side and keep both.
+    const scoreA = numberAt('score') ?? numberAt('scoreA')
+    const scoreB = numberAt('scoreB')
+    const score = winner === 'B' ? scoreB : scoreA
+    return {
+      phase,
+      outcome: winner === 'tie' ? 'tie' : 'compared',
+      ...(score !== undefined ? { score } : {}),
+      ...(scoreB !== undefined ? { scoreB } : {}),
+      ...(winner !== undefined ? { winner } : {}),
+    }
+  }
+  // Session acceptance: `score` is the session's own score and `baselineScore` the
+  // empty-work baseline it has to beat.
+  const score = numberAt('score') ?? numberAt('scoreA')
+  const baselineScore = numberAt('baselineScore')
+  const threshold = thresholds.autoVerifyThreshold
+  const criteria = Array.isArray(row.criteria)
+    ? (row.criteria as unknown[])
+        .map(entry => (typeof entry === 'object' && entry !== null ? entry as Record<string, unknown> : {}))
+        .filter(entry => typeof entry.id === 'string' && typeof entry.scoreA === 'number' && Number.isFinite(entry.scoreA))
+        .slice(0, MAX_VERDICT_CRITERIA)
+        .map(entry => ({ id: entry.id as string, score: entry.scoreA as number }))
+    : []
+  // A session does not pass on the mean alone: one criterion below the threshold fails
+  // the record too, which is exactly what the live gate now enforces.
+  const belowThreshold = criteria.filter(entry => !(entry.score >= threshold))
+  const outcome = winner === 'tie'
+    ? 'tie'
+    : winner === 'A' && score !== undefined && score >= threshold && belowThreshold.length === 0 ? 'passed' : 'below-threshold'
+  return {
+    phase,
+    outcome,
+    ...(score !== undefined ? { score } : {}),
+    ...(baselineScore !== undefined ? { baselineScore } : {}),
+    ...(criteria.length > 0 ? { criteria } : {}),
+    ...(winner !== undefined ? { winner } : {}),
+    threshold,
+  }
+}
 
 export interface InvocationRecord {
   id: string
@@ -140,6 +235,14 @@ function cleanVerdict(input: VerdictSummary | undefined): VerdictSummary | undef
   if (Array.isArray(input.scores)) {
     const scores = input.scores.filter((entry): entry is number => typeof entry === 'number' && Number.isFinite(entry)).slice(0, MAX_VERDICT_SCORES)
     if (scores.length > 0) verdict.scores = scores
+  }
+  if (typeof input.scoreB === 'number' && Number.isFinite(input.scoreB)) verdict.scoreB = input.scoreB
+  if (Array.isArray(input.criteria)) {
+    const criteria = input.criteria
+      .filter((entry): entry is { id: string; score: number } => typeof entry === 'object' && entry !== null && typeof (entry as { id?: unknown }).id === 'string' && typeof (entry as { score?: unknown }).score === 'number' && Number.isFinite((entry as { score: number }).score))
+      .slice(0, MAX_VERDICT_CRITERIA)
+      .map(entry => ({ id: entry.id, score: entry.score }))
+    if (criteria.length > 0) verdict.criteria = criteria
   }
   if (typeof input.baselineScore === 'number' && Number.isFinite(input.baselineScore)) verdict.baselineScore = input.baselineScore
   if (input.winner === 'A' || input.winner === 'B' || input.winner === 'tie') verdict.winner = input.winner

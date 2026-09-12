@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { analyzeStructuredRoute, AutoVerifierRouter, boundDecision, buildSemanticRoutePrompt, estimateRoutedCalls, latestDirectUserSeq, MAX_ROUTED_CHECKPOINTS, parseSemanticRoute, semanticDecision, semanticRouteHint, type RouterPolicy } from './router.ts'
+import { analyzeStructuredRoute, AutoVerifierRouter, boundDecision, buildSemanticRoutePrompt, estimateRoutedCalls, latestDirectUserSeq, MAX_ROUTED_CHECKPOINTS, parseSemanticRoute, routedRepeats, semanticDecision, semanticRouteHint, type RouterPolicy } from './router.ts'
 import { sanitizeVerifierText } from './session.ts'
 
 function session() {
@@ -105,6 +105,76 @@ describe('production structured routing', () => {
     }
   })
 
+  it('re-routes the same todo snapshots once the rendered evidence changed', () => {
+    // Regression: the fingerprint covered only the todo snapshots, so a route whose
+    // prompt had changed (new evidence, new narration) was refused as "already routed".
+    const value = session()
+    tool(value, 'pwsh', 'run-a', 'first output')
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    tool(value, 'pwsh', 'run-b', 'second output')
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    const first = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    const again = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(first?.kind).toBe('track')
+    // An unchanged log keeps its identity, so the budget guard still works.
+    expect(again?.fingerprint).toBe(first?.fingerprint)
+    assistant(value, 'Report: the deliverable is ready.', 2, 1)
+    const afterNarration = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(afterNarration?.fingerprint).not.toBe(first?.fingerprint)
+    if (first?.kind !== 'track' || afterNarration?.kind !== 'track') return
+    expect(afterNarration.steps.at(-1)).toContain('Report: the deliverable is ready.')
+  })
+
+  it('renders the newest checkpoint as the state at routing time', () => {
+    // Regression: evidence was frozen at the last todo snapshot's seq, so work done
+    // after it — often the actual verification run — never reached the judge.
+    const value = session()
+    tool(value, 'pwsh', 'first', 'first run output')
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    tool(value, 'pwsh', 'second', 'verification run output')
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    tool(value, 'pwsh', 'third', 'output after the last snapshot')
+    const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind !== 'track') return
+    // Historical checkpoints keep the output that was current for them...
+    expect(decision.steps[0]).toContain('first run output')
+    expect(decision.steps[0]).not.toContain('verification run output')
+    // ...while the newest one carries the newest output and says so.
+    expect(decision.steps[1]).toContain('at routing time')
+    expect(decision.steps[1]).toContain('output after the last snapshot')
+  })
+
+  it('treats a wrapper that only dispatched bookkeeping as bookkeeping', () => {
+    // Regression: a PTC program that only called todo_write produced a run_code result
+    // whose text was the todo list echoed back, and the wrapper's name hid what it did.
+    const value = session()
+    tool(value, 'pwsh', 'run', 'all tests passed: 91 passed')
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    value.append('tool/call', { turn: 1, step: 1, callId: 'wrap' as never, name: 'run_code', arguments: '{}' })
+    value.append('tool/ptc-dispatch' as never, { rootCallId: 'wrap', subCallId: 'wrap:ptc:1', name: 'todo_write', arguments: '{}', isError: false, content: [{ type: 'text', text: '{todos:[{content:"Implement",status:"completed"}]}' }] } as never)
+    value.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'wrap' as never, content: [{ type: 'text', text: '{ todos: [ { content: "Implement", status: "completed" } ], counts: {} }' }], isError: false }) }, { surfaceOp: 'append' })
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind !== 'track') return
+    expect(decision.steps[1]).toContain('all tests passed')
+    expect(decision.steps[1]).not.toContain('counts:')
+  })
+
+  it('keeps a wrapper that dispatched real work', () => {
+    const value = session()
+    value.append('tool/call', { turn: 1, step: 1, callId: 'wrap' as never, name: 'run_code', arguments: '{}' })
+    value.append('tool/ptc-dispatch' as never, { rootCallId: 'wrap', subCallId: 'wrap:ptc:1', name: 'pwsh', arguments: '{}', isError: false, content: [{ type: 'text', text: 'tests passed' }] } as never)
+    value.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'wrap' as never, content: [{ type: 'text', text: 'tests passed in the wrapper output' }], isError: false }) }, { surfaceOp: 'append' })
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind !== 'track') return
+    expect(decision.steps[1]).toContain('tests passed in the wrapper output')
+  })
+
   it('deduplicates identical todo snapshots', () => {
     const value = session()
     const todos = [{ content: 'Implement', status: 'in_progress' as const }, { content: 'Test', status: 'pending' as const }]
@@ -157,6 +227,30 @@ describe('semantic evidence references', () => {
     expect(semanticRouteHint(value.events)).toBe(true)
     const parsed = parseSemanticRoute(JSON.stringify({ kind: 'compare', confidence: 0.92, reason: 'PTC alternatives', candidateCallIds: ['c-1', 'c-2'], checkpointSeqs: [] }))!
     expect(semanticDecision(parsed, value.events)).toMatchObject({ kind: 'compare', source: 'semantic' })
+  })
+
+  it('never offers bookkeeping calls as semantic candidates', () => {
+    // Regression: the artifact list carried every paired tool result, so the classifier
+    // could cite two goal/agent-control calls as "competing alternatives".
+    const value = session()
+    tool(value, 'subagent', 'a', 'candidate A from a real subagent')
+    tool(value, 'create_goal', 'goal', '{"goal":{"id":"g1","phase":"active"}}')
+    tool(value, 'skill', 'skill', 'loaded review skill body')
+    const prompt = buildSemanticRoutePrompt('pick the better one', value.events, 8, 20000, 60000)
+    expect(prompt).toContain('candidate A from a real subagent')
+    expect(prompt).not.toContain('"phase":"active"')
+    expect(prompt).not.toContain('loaded review skill body')
+  })
+
+  it('rejects a semantic decision that cites bookkeeping evidence', () => {
+    const value = session()
+    tool(value, 'create_goal', 'goal-1', '{"goal":{"id":"g1"}}')
+    tool(value, 'create_goal', 'goal-2', '{"goal":{"id":"g2"}}')
+    const parsed = parseSemanticRoute(JSON.stringify({ kind: 'compare', confidence: .95, reason: 'alternatives', candidateCallIds: ['goal-1', 'goal-2'], checkpointSeqs: [] }))
+    expect(parsed?.kind).toBe('compare')
+    // Fail closed: the whole decision is dropped, and the caller records the reference
+    // as invalid instead of comparing metadata.
+    expect(semanticDecision(parsed!, value.events)).toBeUndefined()
   })
 
   it('resolves candidates emitted via Session V3 tool/ptc-dispatch', () => {
@@ -270,9 +364,27 @@ describe('semantic evidence references', () => {
     const value = session()
     value.append('team/task' as never, { task: { id: 'task-1', revision: 1, subject: 'Backend API', status: 'in_progress' } } as never)
     value.append('team/task' as never, { task: { id: 'task-1', revision: 2, subject: 'Backend API', status: 'completed' } } as never)
-    expect(semanticRouteHint(value.events)).toBe(true)
+    // Snapshots are structured material, not a semantic hint: the structured pass claims
+    // them first, so asking the classifier about them would only ever pay for a route
+    // that could not have been produced anyway.
+    expect(semanticRouteHint(value.events)).toBe(false)
     const decision = analyzeStructuredRoute(value.events)
     expect(decision).toMatchObject({ kind: 'track', source: 'structured', reason: 'changed durable team tasks' })
+  })
+
+  it('hints a classification only for material the structured pass never consumes', () => {
+    const subagent = session(); tool(subagent, 'subagent', 'a', 'candidate A')
+    expect(semanticRouteHint(subagent.events)).toBe(true)
+    const plan = session()
+    plan.append('tool/call', { turn: 1, step: 1, callId: 'plan' as never, name: 'exit_plan_mode', arguments: '{}' })
+    plan.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'plan' as never, content: [{ type: 'text', text: 'approved' }], isError: false }) }, { surfaceOp: 'append' })
+    expect(semanticRouteHint(plan.events)).toBe(true)
+    // Todo snapshots alone (all lists shorter than two items) are still structured-only.
+    const todos = session()
+    todos.append('todo/write', { todos: [{ content: 'Only step', status: 'in_progress' }] })
+    todos.append('todo/write', { todos: [{ content: 'Only step', status: 'completed' }] })
+    expect(analyzeStructuredRoute(todos.events)).toBeUndefined()
+    expect(semanticRouteHint(todos.events)).toBe(false)
   })
 })
 
@@ -316,6 +428,22 @@ describe('transactional router state', () => {
     value.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'next task' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
     expect(router.claimExhaustedNotice(agent)).toBe(true)
   })
+  it('rounds compare repeats up to an even count and leaves the other routes alone', () => {
+    // compare judges ONE pair, so an odd count leaves its A/B preference uncorrected
+    // (the engine only swaps positions on odd repeat indices). select is already
+    // symmetric per pair and track has no slots, so both keep the configured count.
+    const compare = { kind: 'compare', candidates: [{}, {}] } as never
+    const select = { kind: 'select', candidates: [{}, {}, {}] } as never
+    const track = { kind: 'track', steps: [] } as never
+    expect(routedRepeats(compare, 1)).toBe(2)
+    expect(routedRepeats(compare, 2)).toBe(2)
+    expect(routedRepeats(compare, 3)).toBe(4)
+    expect(routedRepeats(select, 1)).toBe(1)
+    expect(routedRepeats(select, 3)).toBe(3)
+    expect(routedRepeats(track, 1)).toBe(1)
+    expect(routedRepeats(track, 3)).toBe(3)
+  })
+
   it('estimates routed calls from the real tournament shape', () => {
     const candidate = { id: 'c', groupId: 'g', label: 'c', content: 'x', callId: 'a', fromSeq: 1, toSeq: 2 }
     const base = { source: 'structured' as const, confidence: 1, reason: 'r', fingerprint: 'f' }

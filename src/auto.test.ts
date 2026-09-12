@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { AutoVerificationBudget, analyzeAutoTask, automaticFeedback, isSubagentSession } from './auto.ts'
+import { analyzeAutoTask, automaticFeedback, failedAcceptanceCriteria, isSubagentSession, sessionAccepted } from './auto.ts'
 
 function taskSession() {
   const session = Session.create('session-00000000-0000-4000-8000-000000000009' as never)
@@ -22,6 +22,34 @@ function sessionVerify(session: ReturnType<typeof taskSession>, id: string, payl
   session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: id as never, content: [{ type: 'text', text: payload }], isError: false }) }, { surfaceOp: 'append' })
 }
 const verdict = (score: number, winner = 'A') => JSON.stringify({ sessionId: 's', problem: 'p', score, baselineScore: 0.2, winner, fromSeq: 0, toSeq: 9, omittedCharacters: 0, calls: 3, stats: {} })
+
+describe('session acceptance', () => {
+  const criteria = [
+    { id: 'specification', name: 'Specification Adherence', score: 1 },
+    { id: 'output_match', name: 'Output Match', score: 1 },
+    { id: 'error_signals', name: 'Error Signal Detection', score: 0 },
+  ]
+
+  it('rejects a session whose mean passes but one criterion failed', () => {
+    // 0.667 clears the 0.65 mean, and the empty-work baseline always scores 0, so
+    // without the per-criterion floor a completely failed requirement was invisible.
+    expect(sessionAccepted({ score: 0.6667, winner: 'A', criteria }, 0.65)).toBe(false)
+    expect(failedAcceptanceCriteria(criteria, 0.65).map(value => value.id)).toEqual(['error_signals'])
+    // A criterion exactly at the threshold is accepted; the boundary is not a failure.
+    expect(sessionAccepted({ score: 0.65, winner: 'A', criteria: [{ id: 'a', score: 0.65 }] }, 0.65)).toBe(true)
+    // Without a breakdown the mean still decides.
+    expect(sessionAccepted({ score: 0.6667, winner: 'A' }, 0.65)).toBe(true)
+    // Losing to the baseline, or missing the mean, never passes.
+    expect(sessionAccepted({ score: 1, winner: 'B' }, 0.65)).toBe(false)
+    expect(sessionAccepted({ score: 0.5, winner: 'A', criteria: [] }, 0.65)).toBe(false)
+  })
+
+  it('names the failing criteria in the feedback and stays silent without them', () => {
+    const message = automaticFeedback(0.6667, 0, 'A', 0.65, [{ id: 'error_signals', name: 'Error Signal Detection', score: 0 }])
+    expect(message).toContain('Criteria below the threshold: Error Signal Detection 0.0%.')
+    expect(automaticFeedback(0.4, 0, 'A', 0.65)).not.toContain('Criteria below the threshold')
+  })
+})
 
 describe('automatic verification policy', () => {
   it('requires consequential work and enough evidence in smart mode', () => {
@@ -60,6 +88,19 @@ describe('automatic verification policy', () => {
     sessionVerify(failing, 'four', verdict(0.2, 'B'))
     expect(analyzeAutoTask(failing.events, smart)).toMatchObject({ eligible: true, hasManualSessionVerification: true, manualVerificationAccepted: false })
 
+    // A pass whose MEAN clears the threshold but whose breakdown has a failed
+    // requirement does not count: the automatic gate keeps the same floor, so the
+    // explicit path must not be a loophole around it.
+    const failedCriterion = taskSession()
+    call(failedCriterion, 'edit', 'one'); call(failedCriterion, 'pwsh', 'two'); call(failedCriterion, 'read', 'three')
+    sessionVerify(failedCriterion, 'four', JSON.stringify({ score: 0.7, baselineScore: 0, winner: 'A', criteria: [{ id: 'specification', scoreA: 1 }, { id: 'error_signals', scoreA: 0 }] }))
+    expect(analyzeAutoTask(failedCriterion.events, smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false, eligible: true })
+    // A breakdown that clears every criterion still counts.
+    const cleanCriteria = taskSession()
+    call(cleanCriteria, 'edit', 'one'); call(cleanCriteria, 'pwsh', 'two'); call(cleanCriteria, 'read', 'three')
+    sessionVerify(cleanCriteria, 'four', JSON.stringify({ score: 0.7, baselineScore: 0, winner: 'A', criteria: [{ id: 'specification', scoreA: 0.65 }, { id: 'error_signals', scoreA: 0.9 }] }))
+    expect(analyzeAutoTask(cleanCriteria.events, smart)).toMatchObject({ manualVerificationAccepted: true, eligible: false, reason: 'already-verified' })
+
     // A pass below the configured threshold does not count either.
     const belowThreshold = taskSession()
     call(belowThreshold, 'edit', 'one'); call(belowThreshold, 'pwsh', 'two'); call(belowThreshold, 'read', 'three')
@@ -85,28 +126,6 @@ describe('automatic verification policy', () => {
     session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Implement the assigned team task' }], source: { kind: 'team-message' } as never }), { surfaceOp: 'append' })
     call(session, 'edit', 'one'); call(session, 'pwsh', 'two'); call(session, 'read', 'three')
     expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: true, consequentialToolCalls: 2 })
-  })
-
-  it('resets per-task attempts for a new direct user message and enforces the session cap', () => {
-    const session = taskSession()
-    call(session, 'edit', 'one')
-    call(session, 'read', 'two')
-    call(session, 'pwsh', 'three')
-    const agent = { id: session.id, session } as never
-    const budget = new AutoVerificationBudget()
-    const policy = { ...smart, maxPerTask: 1, maxPerSession: 2 }
-    expect(budget.claim(agent, analyzeAutoTask(session.events, policy), policy)).toBe(true)
-    expect(budget.claim(agent, analyzeAutoTask(session.events, policy), policy)).toBe(false)
-    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Do another task' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
-    call(session, 'write', 'four')
-    call(session, 'read', 'five')
-    call(session, 'pwsh', 'six')
-    expect(budget.claim(agent, analyzeAutoTask(session.events, policy), policy)).toBe(true)
-    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Third task' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
-    call(session, 'edit', 'seven')
-    call(session, 'read', 'eight')
-    call(session, 'pwsh', 'nine')
-    expect(budget.claim(agent, analyzeAutoTask(session.events, policy), policy)).toBe(false)
   })
 
   it('recognizes delegated child sessions that must not be gated by default', () => {

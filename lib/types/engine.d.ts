@@ -67,6 +67,25 @@ export interface SelectResult {
     stats: RunStats;
     judges: JudgeScore[];
 }
+/**
+ * Deterministic A/B slot for one pivot-round pair, balanced by construction.
+ *
+ * The round used to emit `[candidate, pivot]` for every edge, so the ring leaders sat
+ * in trajectory B in all of their extra matches: with a judge that merely prefers slot A
+ * the pivots averaged 0.36 against 0.60 for everyone else and sank in the final ranking.
+ * Alternating on the sum of the two RANKS — not the raw indices: the pivot set is
+ * selected by score, so its indices can share a parity and a parity rule would then
+ * handicap half the field — gives every pivot and every candidate both slots within one
+ * edge of each other, without a second model call.
+ *
+ * Deliberately NOT in core.ts: `pivotRoundPairs` is compared against the upstream Python
+ * reference in `parity.test.ts`, so the orientation stays an orchestration-side decision.
+ * @param pair - one unordered pair from the pivot round.
+ * @param pivotRanks - pivot index → its rank among the pivots.
+ * @param nonPivotRanks - candidate index → its rank among the non-pivots.
+ * @returns The pair in the order it should be presented.
+ */
+export declare function orientRoundPairs(pairs: readonly (readonly [number, number])[]): Array<[number, number]>;
 export declare class VerifierEngine {
     readonly client: VerifierClientConfig;
     readonly clients: readonly VerifierClientConfig[];

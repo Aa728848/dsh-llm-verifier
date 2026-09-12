@@ -129,6 +129,7 @@ export declare const zh: {
     'stats.outcome.passed': string;
     'stats.outcome.below-threshold': string;
     'stats.outcome.tie': string;
+    'stats.outcome.compared': string;
     'stats.outcome.error': string;
     'stats.outcome.dropped-over-budget': string;
     'stats.outcome.invalid-references': string;
@@ -137,6 +138,7 @@ export declare const zh: {
     'stats.verdict.scoreThreshold': string;
     'stats.verdict.scoreOnly': string;
     'stats.verdict.checkpoints': string;
+    'stats.verdict.criteria': string;
     'metric.cacheHitRate': string;
     'metric.cacheHitNote': string;
     'metric.tokens': string;
@@ -314,6 +316,7 @@ export declare const dictionaries: {
         'stats.outcome.passed': string;
         'stats.outcome.below-threshold': string;
         'stats.outcome.tie': string;
+        'stats.outcome.compared': string;
         'stats.outcome.error': string;
         'stats.outcome.dropped-over-budget': string;
         'stats.outcome.invalid-references': string;
@@ -322,6 +325,7 @@ export declare const dictionaries: {
         'stats.verdict.scoreThreshold': string;
         'stats.verdict.scoreOnly': string;
         'stats.verdict.checkpoints': string;
+        'stats.verdict.criteria': string;
         'metric.cacheHitRate': string;
         'metric.cacheHitNote': string;
         'metric.tokens': string;
@@ -496,6 +500,7 @@ export declare const dictionaries: {
         'stats.outcome.passed': string;
         'stats.outcome.below-threshold': string;
         'stats.outcome.tie': string;
+        'stats.outcome.compared': string;
         'stats.outcome.error': string;
         'stats.outcome.dropped-over-budget': string;
         'stats.outcome.invalid-references': string;
@@ -504,6 +509,7 @@ export declare const dictionaries: {
         'stats.verdict.scoreThreshold': string;
         'stats.verdict.scoreOnly': string;
         'stats.verdict.checkpoints': string;
+        'stats.verdict.criteria': string;
         'metric.cacheHitRate': string;
         'metric.cacheHitNote': string;
         'metric.tokens': string;
@@ -562,6 +568,13 @@ export interface VerdictSummary {
     score?: number;
     /** Per-checkpoint progression of a `verifier_track` verdict, oldest first; absent on older records. */
     scores?: number[];
+    /** Candidate B's score of a two-way comparison; `score` is the winning side. */
+    scoreB?: number;
+    /** Per-criterion A-side scores of a session acceptance; the mean alone can hide a failed requirement. */
+    criteria?: Array<{
+        id: string;
+        score: number;
+    }>;
     baselineScore?: number;
     winner?: 'A' | 'B' | 'tie';
     threshold?: number;
@@ -593,7 +606,7 @@ export declare function sameSettingValue(left: unknown, right: unknown): boolean
  * write-everything behavior.
  */
 export declare function sectionForSave(user: Record<string, unknown>, draft: Record<string, unknown>, base: Record<string, unknown> | undefined): Record<string, unknown>;
-/** An eight-candidate select: ring + pivot rounds (18 pairs) x three criteria, one repeat. */
+/** An eight-candidate select: ring + pivot rounds (18 pairs) x three criteria, one round (the per-pair orientation removes the slot bias). */
 export declare const WORST_CASE_ROUTE_CALLS_PER_JUDGE = 54;
 /** Final acceptance: three criteria x the default two repeats (one per A/B position). */
 export declare const WORST_CASE_FINAL_CALLS_PER_JUDGE = 6;
@@ -619,6 +632,7 @@ export declare function formatVerdictDetails(verdict: VerdictSummary, t: I18nDic
     phaseText?: string;
     scoreText?: string;
     checkpointsText?: string;
+    criteriaText?: string;
     winnerText?: string;
     isFailed: boolean;
 };

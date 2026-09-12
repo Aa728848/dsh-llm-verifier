@@ -12,12 +12,12 @@ import { ScoreCache, SingleFlight, resolveCacheFile, stableHash, type CachedPair
 import { VerifierEngine, normalizeCriteria, type JudgeScore, type RunStats } from './engine.ts'
 import { loadVerifierImages } from './images.ts'
 import { extractSession, sanitizeVerifierText, sessionEvents } from './session.ts'
-import { analyzeAutoTask, automaticFeedback, isSubagentSession } from './auto.ts'
-import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRoutePrompt, estimateRoutedCalls, parseSemanticRoute, semanticDecision, semanticRouteHint, type RouteDecision, type RoutedVerifierKind } from './router.ts'
+import { analyzeAutoTask, automaticFeedback, failedAcceptanceCriteria, isSubagentSession, sessionAccepted, type AcceptanceCriterion } from './auto.ts'
+import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRoutePrompt, estimateRoutedCalls, parseSemanticRoute, routedRepeats, semanticDecision, semanticRouteHint, type RouteDecision, type RoutedVerifierKind } from './router.ts'
 import { DEFAULT_CRITERIA } from './core.ts'
 import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from './plan-gate.ts'
 import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from './team-gate.ts'
-import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, parseStatisticsQuery, resolveStatisticsFile, type StatisticsOverview, type VerifierToolName, type VerdictSummary } from './statistics.ts'
+import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, parseStatisticsQuery, resolveStatisticsFile, summarizeVerdict, type StatisticsOverview, type VerifierToolName } from './statistics.ts'
 import { resolveTopicDataDir, type SessionArtifactLocator } from './topic-storage.ts'
 
 export const name = 'llm-verifier'
@@ -98,7 +98,7 @@ function rpcSuccess<T>(value: T) { return { ok: true as const, value } }
 function rpcFailure(message: string) { return { ok: false as const, error: { code: 'bad-request' as const, message, details: { issues: [] } } } }
 
 interface SessionVerificationOptions { fromSeq?: number; toSeq?: number; includeAssistantText?: boolean; redactPatterns?: readonly string[]; maxChars?: number; repeats?: number }
-interface SessionVerificationResult { sessionId: string; problem: string; score: number; baselineScore: number; winner: 'A' | 'B' | 'tie'; fromSeq: number; toSeq: number; omittedCharacters: number; calls: number; stats: RunStats; judges: JudgeScore[]; agreement: number }
+interface SessionVerificationResult { sessionId: string; problem: string; score: number; baselineScore: number; winner: 'A' | 'B' | 'tie'; criteria: AcceptanceCriterion[]; fromSeq: number; toSeq: number; omittedCharacters: number; calls: number; stats: RunStats; judges: JudgeScore[]; agreement: number }
 
 export function apply(ctx: Context, config: Config = {}): void {
   const services = ctx as Context & { attachments: AttachmentStore; connection: HostConnectionHandle; sessionPersistence: SessionArtifactLocator & { list(signal?: AbortSignal): Promise<readonly unknown[]> } }
@@ -139,46 +139,12 @@ export function apply(ctx: Context, config: Config = {}): void {
   const images = (values: readonly string[] | undefined, signal: AbortSignal) => loadVerifierImages(values, signal)
   const route = (selected: { provider: string; model: string }) => ({ provider: selected.provider, model: selected.model })
   const requireEnabled = () => { if (!current().enabled) throw new Error('llm-verifier: verifier tools are disabled — enable them in Settings → LLM Verifier') }
-  /**
-   * Compact summary of what the judges decided, stored beside the call counters so
-   * the dashboard can answer "why did this fail?" instead of only "how much did it cost".
-   * @param toolName - the verifier tool that produced the value.
-   * @param value - its rendered result.
-   * @param phase - which stage produced it (explicit | compare | select | track | final | ...).
-   * @returns A verdict summary; score fields are omitted when the tool has none.
-   */
-  const verdictFrom = (toolName: VerifierToolName, value: unknown, phase: string): VerdictSummary => {
+  const verdictFrom = (toolName: VerifierToolName, value: unknown, phase: string) => {
     const selected = current()
-    const row = typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
-    const numberAt = (key: string): number | undefined => (typeof row[key] === 'number' && Number.isFinite(row[key]) ? row[key] as number : undefined)
-    const scores = Array.isArray(row.scores) ? row.scores.filter((entry): entry is number => typeof entry === 'number' && Number.isFinite(entry)) : []
-    const winner = row.winner === 'A' || row.winner === 'B' || row.winner === 'tie' ? row.winner : undefined
-    if (toolName === 'verifier_route_classify') return { phase, outcome: 'classified' }
-    if (toolName === 'verifier_select') {
-      const index = numberAt('index')
-      const best = index === undefined ? undefined : scores[index]
-      return { phase, outcome: 'ranked', ...(best !== undefined ? { score: best } : {}) }
-    }
-    if (toolName === 'verifier_track') {
-      // The verdict reports the newest checkpoint (the one the continuation decision
-      // uses) plus the whole progression. Reporting only Math.min() made every routed
-      // track look like a 0% failure on the dashboard, because the first checkpoint of
-      // a task is always the untouched plan.
-      const latest = scores.length > 0 ? scores[scores.length - 1] : undefined
-      const threshold = selected.autoTrackCompletionThreshold
-      return {
-        phase,
-        outcome: latest !== undefined && latest >= threshold ? 'passed' : 'below-threshold',
-        ...(latest !== undefined ? { score: latest } : {}),
-        ...(scores.length > 1 ? { scores: [...scores] } : {}),
-        threshold,
-      }
-    }
-    const score = numberAt('score') ?? numberAt('scoreA')
-    const baselineScore = numberAt('baselineScore')
-    const threshold = selected.autoVerifyThreshold
-    const outcome = winner === 'tie' ? 'tie' : winner === 'A' && score !== undefined && score >= threshold ? 'passed' : 'below-threshold'
-    return { phase, outcome, ...(score !== undefined ? { score } : {}), ...(baselineScore !== undefined ? { baselineScore } : {}), ...(winner !== undefined ? { winner } : {}), threshold }
+    return summarizeVerdict(toolName, value, phase, {
+      autoVerifyThreshold: selected.autoVerifyThreshold,
+      autoTrackCompletionThreshold: selected.autoTrackCompletionThreshold,
+    })
   }
   const record = async <T>(toolName: VerifierToolName, agent: Agent, operation: () => Promise<{ result: T; selected: { provider: string; model: string } }>, phase = 'explicit'): Promise<T & { provider: string; model: string }> => {
     const startedAt = Date.now()
@@ -228,7 +194,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (!extracted.problem.trim()) throw new Error('llm-verifier: no direct user task found in the selected session range — widen from_seq so the task statement is included')
     const { verifier, selected } = await engine(agent)
     const compared = await verifier.compare({ problem: extracted.problem, candidateA: extracted.trace, candidateB: '(No useful work or verification was performed.)', repeats: positive(options.repeats, 2, 'repeats'), images: extracted.images }, signal)
-    const result: SessionVerificationResult = { sessionId: extracted.sessionId, problem: extracted.problem, score: compared.scoreA, baselineScore: compared.scoreB, winner: compared.winner, fromSeq: extracted.fromSeq, toSeq: extracted.toSeq, omittedCharacters: extracted.omittedCharacters, calls: compared.calls, stats: compared.stats, judges: compared.judges, agreement: compared.agreement }
+    const result: SessionVerificationResult = { sessionId: extracted.sessionId, problem: extracted.problem, score: compared.scoreA, baselineScore: compared.scoreB, winner: compared.winner, criteria: compared.criteria.map(row => ({ id: row.id, name: row.name, score: row.scoreA })), fromSeq: extracted.fromSeq, toSeq: extracted.toSeq, omittedCharacters: extracted.omittedCharacters, calls: compared.calls, stats: compared.stats, judges: compared.judges, agreement: compared.agreement }
     return { result, selected }
   }, phase)
   const compareCandidates = async (agent: Agent, problem: string, candidateA: string, candidateB: string, repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit') => record('verifier_compare', agent, async () => {
@@ -403,8 +369,11 @@ export function apply(ctx: Context, config: Config = {}): void {
           if (!stillCurrent()) { autoRouter.fail(agent, taskReservation, false); return }
           const verdict = parseVerdictLetter(classified.text)
           if (verdict === undefined) {
-            autoRouter.fail(agent, taskReservation, false)
-            ctx.logger.warn('llm-verifier team task verification produced no verdict line; task ' + task.id + ' was not gated')
+            // Fail closed in strict mode like every other routed phase: an unparseable
+            // verdict must not silently leave the task ungated.
+            const strict = selected.autoVerifyMode === 'strict'
+            autoRouter.fail(agent, taskReservation, strict)
+            ctx.logger.warn('llm-verifier team task verification produced no verdict line; task ' + task.id + (strict ? ' stays blocked' : ' was not gated'))
             continue
           }
           if (verdict.score >= selected.autoVerifyThreshold) {
@@ -472,8 +441,10 @@ export function apply(ctx: Context, config: Config = {}): void {
 
     if (!stillCurrent()) return
     if (decision) {
-      // Every judge scores every match, so the reservation has to cover the ensemble.
-      const expectedCalls = estimateRoutedCalls(decision, selected.autoVerifyRepeats, DEFAULT_CRITERIA.length) * selected.judges.length
+      // Every judge scores every match, and compare/select round the repeat count up to an
+      // even number so the A/B slots get swapped, so the reservation has to cover both.
+      const repeats = routedRepeats(decision, selected.autoVerifyRepeats)
+      const expectedCalls = estimateRoutedCalls(decision, repeats, DEFAULT_CRITERIA.length) * selected.judges.length
       const reservation = autoRouter.reserve(agent, decision.kind, decision.fingerprint, expectedCalls, policy)
       if (reservation === undefined) {
         // A refused reservation used to drop the whole routed decision silently.
@@ -493,7 +464,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         try {
           const extracted = await extractTask(agent, evidence.taskStartSeq, admittedLastSeq, selected.autoVerifyMaxChars, signal)
           if (decision.kind === 'compare') {
-            const result = await compareCandidates(agent, extracted.problem, decision.candidates[0].content, decision.candidates[1].content, selected.autoVerifyRepeats, signal, extracted.images, 'compare')
+            const result = await compareCandidates(agent, extracted.problem, decision.candidates[0].content, decision.candidates[1].content, repeats, signal, extracted.images, 'compare')
             if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return }
             if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
             const winner = result.winner === 'A' ? decision.candidates[0].label : result.winner === 'B' ? decision.candidates[1].label : 'tie'
@@ -501,14 +472,14 @@ export function apply(ctx: Context, config: Config = {}): void {
             return
           }
           if (decision.kind === 'select') {
-            const result = await selectCandidates(agent, extracted.problem, decision.candidates.map(candidate => candidate.content), selected.autoVerifyRepeats, signal, extracted.images, 'select')
+            const result = await selectCandidates(agent, extracted.problem, decision.candidates.map(candidate => candidate.content), repeats, signal, extracted.images, 'select')
             if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return }
             if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
             const ranking = result.ranking.map((index, rank) => (rank + 1) + '. ' + decision.candidates[index]!.label).join('\n')
             agent.steer(routeFeedback(decision, 'Ranking:\n' + ranking + '\nProceed with ' + decision.candidates[result.index]!.label + '.'))
             return
           }
-          const result = await trackProgress(agent, extracted.problem, decision.steps, decision.checkpoints, selected.autoVerifyRepeats, signal, extracted.images, 'track')
+          const result = await trackProgress(agent, extracted.problem, decision.steps, decision.checkpoints, repeats, signal, extracted.images, 'track')
           if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return }
           if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
           const detail = result.scores.map((score, index) => 'Checkpoint step ' + decision.checkpoints[index] + ': ' + (score * 100).toFixed(1) + '%').join('\n')
@@ -557,11 +528,15 @@ export function apply(ctx: Context, config: Config = {}): void {
     try {
       const result = await verifySession(agent, { fromSeq: finalFromSeq, toSeq: admittedLastSeq, includeAssistantText: true, maxChars: selected.autoVerifyMaxChars, repeats: selected.autoVerifyFinalRepeats }, signal, 'final')
       if (!stillCurrent()) { autoRouter.fail(agent, finalReservation, false); return }
-      const passed = result.winner === 'A' && result.score >= selected.autoVerifyThreshold
+      // The mean over criteria used to hide a single failed requirement, and the fixed
+      // empty-work baseline can never win on its own, so the gate is (a) the winner,
+      // (b) the mean score and (c) every criterion on its own.
+      const failed = failedAcceptanceCriteria(result.criteria, selected.autoVerifyThreshold)
+      const passed = sessionAccepted({ score: result.score, winner: result.winner, criteria: result.criteria }, selected.autoVerifyThreshold)
       if (passed) autoRouter.commit(agent, finalReservation)
       else {
         autoRouter.fail(agent, finalReservation, selected.autoVerifyMode === 'strict')
-        agent.steer(createUserMessage({ content: [{ type: 'text', text: automaticFeedback(result.score, result.baselineScore, result.winner, selected.autoVerifyThreshold) }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+        agent.steer(createUserMessage({ content: [{ type: 'text', text: automaticFeedback(result.score, result.baselineScore, result.winner, selected.autoVerifyThreshold, failed) }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
       }
     } catch (error) {
       autoRouter.fail(agent, finalReservation, selected.autoVerifyMode === 'strict')

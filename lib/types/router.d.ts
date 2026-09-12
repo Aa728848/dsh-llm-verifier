@@ -114,6 +114,15 @@ export declare function buildEvidenceIndex(events: readonly SessionEvent[]): Evi
  */
 export declare const MAX_ROUTED_CHECKPOINTS = 6;
 export declare function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandidates?: number, maxItemChars?: number, maxInputChars?: number): RouteDecision | undefined;
+/**
+ * Whether a smart-mode stop boundary is worth a semantic classification call.
+ *
+ * The semantic phase only runs when the structured pass produced nothing, so this
+ * answers "is there material the structured pass never consumes?" — never "are there
+ * todo/team snapshots?", which the structured pass would have used already.
+ * @param events - Session event log.
+ * @returns True when a subagent/workflow/plan artifact exists.
+ */
 export declare function semanticRouteHint(events: readonly SessionEvent[]): boolean;
 export declare function buildSemanticRoutePrompt(problem: string, events: readonly SessionEvent[], maxCandidates: number, maxItemChars?: number, maxInputChars?: number): string;
 export declare function parseSemanticRoute(text: string, maxCandidates?: number): SemanticRouteOutput | undefined;
@@ -129,6 +138,23 @@ export declare function semanticDecision(output: SemanticRouteOutput, events: re
  * @param criteriaCount - number of criteria evaluated per comparison.
  * @returns The planned model-call count, never below 1.
  */
+/**
+ * Scoring repeats a routed decision actually runs.
+ *
+ * `compare` judges ONE unordered pair, and `VerifierEngine.compare` only swaps the
+ * candidates on odd repeat indices — with the shipped default of a single round the
+ * first candidate therefore always sat in slot A, so the winner was partly decided by
+ * listing order. Rounding its count up to an even number averages a swapped round and
+ * cancels that.
+ *
+ * `select` does not need it: its ring is symmetric by construction and the pivot round
+ * is oriented per pair by the engine, so one round is already unbiased. `track` scores
+ * a single checkpoint list and has no slots at all.
+ * @param decision - the routed decision about to run.
+ * @param configured - the configured auto-route repeat count.
+ * @returns The repeat count to pass to the engine.
+ */
+export declare function routedRepeats(decision: RouteDecision, configured: number): number;
 export declare function estimateRoutedCalls(decision: RouteDecision, repeats: number, criteriaCount: number): number;
 export declare function boundDecision(decision: RouteDecision | undefined, policy: RouterPolicy): RouteDecision | undefined;
 export declare class AutoVerifierRouter {
