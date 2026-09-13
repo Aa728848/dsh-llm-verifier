@@ -18,16 +18,17 @@
  *   node scripts/eval-replay.mjs --dir <topic-dir>  # one topic directory (repeatable)
  *   node scripts/eval-replay.mjs --thresholds 0.5,0.65,0.8
  *   node scripts/eval-replay.mjs --json
+ *   node scripts/eval-replay.mjs --samples samples/strategy   # labeled trigger evaluation
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { parseStatisticsRecords, replayDecisionScores, sweepThresholds } from '../lib/replay.js'
+import { parseEvaluationSample, parseStatisticsRecords, replayDecisionScores, summarizeEvaluation, summarizeRouteCycles, sweepThresholds } from '../lib/replay.js'
 
 const DEFAULT_THRESHOLDS = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.9]
 
 function parseArgs(argv) {
-  const options = { dirs: [], thresholds: DEFAULT_THRESHOLDS, json: false }
+  const options = { dirs: [], thresholds: DEFAULT_THRESHOLDS, json: false, samples: undefined }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--dir') { const value = argv[index + 1]; if (value) { options.dirs.push(value); index += 1 } }
@@ -38,8 +39,9 @@ function parseArgs(argv) {
         if (parsed.length > 0) options.thresholds = parsed
         index += 1
       }
-    } else if (arg === '--json') options.json = true
-    else if (arg === '--help' || arg === '-h') { console.log('usage: node scripts/eval-replay.mjs [--dir <topic-dir>]... [--thresholds 0.5,0.65] [--json]'); process.exit(0) }
+    } else if (arg === '--samples') { const value = argv[index + 1]; if (value) { options.samples = value; index += 1 } }
+    else if (arg === '--json') options.json = true
+    else if (arg === '--help' || arg === '-h') { console.log('usage: node scripts/eval-replay.mjs [--dir <topic-dir>]... [--thresholds 0.5,0.65] [--samples <sample-dir>] [--json]'); process.exit(0) }
   }
   return options
 }
@@ -81,6 +83,25 @@ for (const directory of dirs) {
   } catch { /* an unreadable snapshot file is not a reason to fail the replay */ }
 }
 
+// S05-B offline layer: what the recorded routing cycles actually did, and (when a labeled
+// sample directory is supplied) how the deterministic routing layers score against real labels.
+const cycles = summarizeRouteCycles(invocations)
+const samples = []
+if (options.samples !== undefined) {
+  let files = []
+  try { files = readdirSync(options.samples).filter(name => name.endsWith('.json')) } catch { files = [] }
+  for (const name of files) {
+    try {
+      const document = JSON.parse(readFileSync(join(options.samples, name), 'utf8'))
+      for (const entry of Array.isArray(document) ? document : [document]) {
+        const sample = parseEvaluationSample(entry)
+        if (sample !== undefined) samples.push(sample)
+      }
+    } catch { /* an unreadable sample file is skipped, not fatal */ }
+  }
+}
+const evaluation = samples.length > 0 ? summarizeEvaluation(samples) : undefined
+
 const rows = sweepThresholds(invocations, options.thresholds)
 const replay = replayDecisionScores(decisions)
 const byChannel = new Map()
@@ -91,7 +112,7 @@ for (const row of replay) {
 }
 
 if (options.json) {
-  console.log(JSON.stringify({ topics: dirs.length, invocations: invocations.length, thresholds: rows, parser: [...byChannel.values()] }, null, 2))
+  console.log(JSON.stringify({ topics: dirs.length, invocations: invocations.length, thresholds: rows, parser: [...byChannel.values()], routeCycles: cycles, evaluation }, null, 2))
 } else {
   console.log('LLM verifier offline replay')
   console.log('  topics scanned     ' + dirs.length)
@@ -103,6 +124,24 @@ if (options.json) {
     console.log('  ' + row.threshold.toFixed(3).padEnd(9) + ' | ' + String(row.total).padStart(6) + ' | ' + String(row.accepted).padStart(8) + ' | ' + String(row.rejectedMean).padStart(10) + ' | ' + String(row.rejectedCriterion).padStart(15) + ' | ' + String(row.rejectedVerdict).padStart(7) + ' | ' + String(row.unscored).padStart(8))
   }
   console.log('  (criterion-short = the mean passed but the per-criterion floor rejected it)')
+  console.log('')
+  console.log('  automatic routing cycles (from the S05-A route observations):')
+  console.log('    cycles            ' + cycles.cycles)
+  console.log('    rows              classification ' + cycles.classificationRows + ', execution ' + cycles.executionRows + ', final ' + cycles.finalRows + ', skipped ' + cycles.skippedRows)
+  console.log('    reserved vs used  ' + cycles.reservedCalls + ' reserved / ' + cycles.actualScoringCalls + ' actual scoring calls')
+  console.log('    classification-only ' + cycles.classificationOnly + '  canceled ' + cycles.canceled + '  usage-incomplete ' + cycles.usageIncomplete)
+  console.log('    pre-step share    ' + (cycles.preStepShare * 100).toFixed(1) + '% of executions reached a decision before implementation')
+  console.log('    by trigger        ' + JSON.stringify(cycles.byTrigger))
+  console.log('    by skip reason    ' + JSON.stringify(cycles.bySkipReason))
+  if (evaluation !== undefined) {
+    console.log('')
+    console.log('  labeled sample evaluation (' + evaluation.samples + ' samples):')
+    console.log('    trigger precision ' + (evaluation.precision * 100).toFixed(1) + '%  recall ' + (evaluation.recall * 100).toFixed(1) + '%  (hits ' + evaluation.hits + ', misses ' + evaluation.misses + ', false-triggers ' + evaluation.falseTriggers + ', correct-skips ' + evaluation.correctSkips + ')')
+    for (const row of evaluation.byCategory) if (row.samples > 0) console.log('    ' + row.category.padEnd(14) + 'n ' + String(row.samples).padStart(3) + '  hit ' + String(row.hits).padStart(3) + '  miss ' + String(row.misses).padStart(3) + '  false ' + String(row.falseTriggers).padStart(3))
+    console.log('    phase coverage    ' + evaluation.phaseMatches.map(row => row.phase + ' ' + row.observed + '/' + row.expected).join(', '))
+    console.log('    note: this counts SAMPLES, not model calls; real-model cost, latency and')
+    console.log('    false-accept rates require the labeled real comparison described in README.')
+  }
   console.log('')
   console.log('  parser replay of ' + replay.length + ' captured judge answers:')
   if (replay.length === 0) console.log('    no decision snapshots found (capture disabled, or nothing captured yet)')

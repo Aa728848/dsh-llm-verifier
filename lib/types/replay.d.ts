@@ -1,8 +1,27 @@
+import type { SessionEvent } from '@deepseek-ai/dsh-session';
+import { type AutoVerifyPolicy } from './auto.ts';
+/** One persisted routing-cycle observation, reduced to what the offline report needs. */
+export interface ReplayRouteObservation {
+    cycleId: string;
+    trigger: string;
+    stage: string;
+    destination: string;
+    attempt?: number;
+    reservedCalls?: number;
+    skipReason?: string;
+    evidenceKept?: number;
+    evidenceOmitted?: number;
+    evidenceChars?: number;
+    usageIncomplete?: boolean;
+    canceled?: boolean;
+}
 /** One persisted invocation, reduced to the fields an acceptance decision depends on. */
 export interface ReplayInvocation {
     toolName: string;
     startedAt: number;
     success: boolean;
+    /** Model calls the invocation actually completed (stats.calls). */
+    calls: number;
     score?: number;
     baselineScore?: number;
     winner?: 'A' | 'B' | 'tie';
@@ -10,7 +29,11 @@ export interface ReplayInvocation {
         id: string;
         score: number;
     }>;
+    /** Automatic routing-cycle observation, when the record carries one. */
+    route?: ReplayRouteObservation;
 }
+/** Loose reader for one persisted route observation; an unknown shape is dropped, never fatal. */
+export declare function parseRouteObservation(value: unknown): ReplayRouteObservation | undefined;
 /**
  * Read one topic's statistics file into the records a threshold sweep can replay.
  *
@@ -85,4 +108,112 @@ export declare function replayDecisionScores(calls: ReadonlyArray<{
     output: string;
     score?: number;
 }>): DecisionReplayRow[];
+/** Aggregate of the routing-cycle observations in one replay corpus. */
+export interface RouteCycleSummary {
+    cycles: number;
+    classificationRows: number;
+    executionRows: number;
+    finalRows: number;
+    skippedRows: number;
+    /** Cycles that classified successfully but could not afford their execution. */
+    classificationOnly: number;
+    canceled: number;
+    usageIncomplete: number;
+    /** Execution rows whose trigger was the early agent/pre-step entry. */
+    preStepExecutions: number;
+    /** Conservative calls the cycles reserved. */
+    reservedCalls: number;
+    /** Model calls the executed rows actually completed. */
+    actualScoringCalls: number;
+    /** Share of judged objects that reached a decision before implementation (S02). */
+    preStepShare: number;
+    /** Share of classifications that never executed their decision. */
+    classificationOnlyShare: number;
+    byTrigger: Record<string, number>;
+    byDestination: Record<string, number>;
+    bySkipReason: Record<string, number>;
+}
+/**
+ * Summarize the automatic routing cycles recorded by S05-A.
+ *
+ * Every unit here is deliberately distinct: a CYCLE is not a model call, a diagnostic row is
+ * not a purchase, and a reserved call is not an actual one. The report exists so those three
+ * are never added together.
+ * @param invocations - records from parseStatisticsRecords.
+ * @returns Counts and shares across every observed cycle.
+ */
+export declare function summarizeRouteCycles(invocations: readonly ReplayInvocation[]): RouteCycleSummary;
+/** Sample strata the labeled evaluation must cover (the plan six groups). */
+export declare const EVALUATION_CATEGORIES: readonly ["code", "research", "writing", "candidates", "long-task", "conversational"];
+export type EvaluationCategory = typeof EVALUATION_CATEGORIES[number];
+/** One desensitised, labeled sample for the offline trigger/phase replay. */
+export interface EvaluationSample {
+    id: string;
+    category: EvaluationCategory;
+    /** Session event log, already desensitised. */
+    events: readonly SessionEvent[];
+    /** Whether this task SHOULD have been reviewed at all. */
+    shouldReview: boolean;
+    /** Phases the strategy should have used, when shouldReview is true. */
+    expectedPhases?: ReadonlyArray<"compare" | "select" | "track" | "final">;
+}
+/** What the deterministic routing layers would do with one sample, with no model call. */
+export interface SampleOutcome {
+    id: string;
+    category: string;
+    expectedReview: boolean;
+    observedTrigger: boolean;
+    observedPhases: string[];
+    deliveryReady: boolean;
+    eligible: boolean;
+    outcome: "hit" | "miss" | "false-trigger" | "correct-skip";
+}
+/** Trigger precision/recall and phase coverage over a labeled sample set. */
+export interface EvaluationReport {
+    samples: number;
+    hits: number;
+    misses: number;
+    falseTriggers: number;
+    correctSkips: number;
+    precision: number;
+    recall: number;
+    byCategory: Array<{
+        category: string;
+        samples: number;
+        hits: number;
+        misses: number;
+        falseTriggers: number;
+        correctSkips: number;
+    }>;
+    phaseMatches: Array<{
+        phase: string;
+        expected: number;
+        observed: number;
+    }>;
+    outcomes: SampleOutcome[];
+}
+/**
+ * Run the deterministic routing layers over one labeled sample.
+ *
+ * Uses the PRODUCTION detectors (structured route, semantic hint, delivery phase, eligibility)
+ * instead of a reimplementation, so the offline numbers cannot drift from the shipped
+ * scheduling. It never calls a model: a semantic hint is only a hint, and whether the
+ * classifier would really route is a question for the real-model comparison.
+ * @param sample - labeled sample.
+ * @param policy - eligibility policy; defaults to the shipped smart defaults.
+ * @returns What the strategy would do.
+ */
+export declare function evaluateSample(sample: EvaluationSample, policy?: AutoVerifyPolicy): SampleOutcome;
+/**
+ * Aggregate the labeled evaluation.
+ *
+ * Precision/recall are reported together with the sample counts and the per-category breakdown,
+ * because a 30-sample set cannot establish a low false-accept rate on its own.
+ * @param samples - labeled samples.
+ * @param policy - eligibility policy.
+ * @returns Trigger precision/recall, per-category counts and per-phase coverage.
+ */
+export declare function summarizeEvaluation(samples: readonly EvaluationSample[], policy?: AutoVerifyPolicy): EvaluationReport;
+/** Loose reader for one labeled sample file entry. */
+export declare function parseEvaluationSample(value: unknown): EvaluationSample | undefined;
 //# sourceMappingURL=replay.d.ts.map

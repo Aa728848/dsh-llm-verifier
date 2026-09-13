@@ -1,20 +1,58 @@
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { extractScore } from './core.ts'
-import { sessionAccepted } from './auto.ts'
+import { analyzeAutoTask, sessionAccepted, type AutoVerifyPolicy } from './auto.ts'
+import { analyzeStructuredRoute, inspectDeliveryPhase, latestDirectUserSeq, semanticRouteHint } from './router.ts'
+
+/** One persisted routing-cycle observation, reduced to what the offline report needs. */
+export interface ReplayRouteObservation {
+  cycleId: string
+  trigger: string
+  stage: string
+  destination: string
+  attempt?: number
+  reservedCalls?: number
+  skipReason?: string
+  evidenceKept?: number
+  evidenceOmitted?: number
+  evidenceChars?: number
+  usageIncomplete?: boolean
+  canceled?: boolean
+}
 
 /** One persisted invocation, reduced to the fields an acceptance decision depends on. */
 export interface ReplayInvocation {
   toolName: string
   startedAt: number
   success: boolean
+  /** Model calls the invocation actually completed (stats.calls). */
+  calls: number
   score?: number
   baselineScore?: number
   winner?: 'A' | 'B' | 'tie'
   criteria: Array<{ id: string; score: number }>
+  /** Automatic routing-cycle observation, when the record carries one. */
+  route?: ReplayRouteObservation
 }
 
 function numberAt(row: Record<string, unknown>, key: string): number | undefined {
   const value = row[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/** Loose reader for one persisted route observation; an unknown shape is dropped, never fatal. */
+export function parseRouteObservation(value: unknown): ReplayRouteObservation | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const row = value as Record<string, unknown>
+  if (typeof row.cycleId !== 'string' || !row.cycleId || typeof row.trigger !== 'string' || typeof row.stage !== 'string' || typeof row.destination !== 'string') return undefined
+  const observation: ReplayRouteObservation = { cycleId: row.cycleId, trigger: row.trigger, stage: row.stage, destination: row.destination }
+  for (const key of ['attempt', 'reservedCalls', 'evidenceKept', 'evidenceOmitted', 'evidenceChars'] as const) {
+    const candidate = row[key]
+    if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 0) observation[key] = Math.trunc(candidate)
+  }
+  if (typeof row.skipReason === 'string' && row.skipReason) observation.skipReason = row.skipReason
+  if (row.usageIncomplete === true) observation.usageIncomplete = true
+  if (row.canceled === true) observation.canceled = true
+  return observation
 }
 
 /**
@@ -47,14 +85,18 @@ export function parseStatisticsRecords(text: string): ReplayInvocation[] {
     const score = numberAt(verdict, 'score')
     const baselineScore = numberAt(verdict, 'baselineScore')
     const winner = verdict.winner === 'A' || verdict.winner === 'B' || verdict.winner === 'tie' ? verdict.winner : undefined
+    const stats = typeof row.stats === 'object' && row.stats !== null ? row.stats as Record<string, unknown> : {}
+    const route = parseRouteObservation(row.route)
     out.push({
       toolName: typeof row.toolName === 'string' ? row.toolName : '',
       startedAt: numberAt(row, 'startedAt') ?? 0,
       success: row.success === true,
+      calls: numberAt(stats, 'calls') ?? 0,
       criteria,
       ...(score !== undefined ? { score } : {}),
       ...(baselineScore !== undefined ? { baselineScore } : {}),
       ...(winner !== undefined ? { winner } : {}),
+      ...(route !== undefined ? { route } : {}),
     })
   }
   return out
@@ -152,4 +194,181 @@ export function replayDecisionScores(calls: ReadonlyArray<{ label: string; chann
     if (reparsed === undefined) return { ...head, mode: 'unreadable' as const }
     return { ...head, reparsed, mode: call.score !== undefined && Math.abs(call.score - reparsed) < 1e-9 ? 'match' as const : 'drift' as const }
   })
+}
+
+/** Aggregate of the routing-cycle observations in one replay corpus. */
+export interface RouteCycleSummary {
+  cycles: number
+  classificationRows: number
+  executionRows: number
+  finalRows: number
+  skippedRows: number
+  /** Cycles that classified successfully but could not afford their execution. */
+  classificationOnly: number
+  canceled: number
+  usageIncomplete: number
+  /** Execution rows whose trigger was the early agent/pre-step entry. */
+  preStepExecutions: number
+  /** Conservative calls the cycles reserved. */
+  reservedCalls: number
+  /** Model calls the executed rows actually completed. */
+  actualScoringCalls: number
+  /** Share of judged objects that reached a decision before implementation (S02). */
+  preStepShare: number
+  /** Share of classifications that never executed their decision. */
+  classificationOnlyShare: number
+  byTrigger: Record<string, number>
+  byDestination: Record<string, number>
+  bySkipReason: Record<string, number>
+}
+
+/**
+ * Summarize the automatic routing cycles recorded by S05-A.
+ *
+ * Every unit here is deliberately distinct: a CYCLE is not a model call, a diagnostic row is
+ * not a purchase, and a reserved call is not an actual one. The report exists so those three
+ * are never added together.
+ * @param invocations - records from parseStatisticsRecords.
+ * @returns Counts and shares across every observed cycle.
+ */
+export function summarizeRouteCycles(invocations: readonly ReplayInvocation[]): RouteCycleSummary {
+  const routed = invocations.filter(record => record.route !== undefined)
+  const summary: RouteCycleSummary = { cycles: 0, classificationRows: 0, executionRows: 0, finalRows: 0, skippedRows: 0, classificationOnly: 0, canceled: 0, usageIncomplete: 0, preStepExecutions: 0, reservedCalls: 0, actualScoringCalls: 0, preStepShare: 0, classificationOnlyShare: 0, byTrigger: {}, byDestination: {}, bySkipReason: {} }
+  const cycles = new Set<string>()
+  for (const record of routed) {
+    const route = record.route!
+    cycles.add(route.cycleId)
+    summary.byTrigger[route.trigger] = (summary.byTrigger[route.trigger] ?? 0) + 1
+    summary.byDestination[route.destination] = (summary.byDestination[route.destination] ?? 0) + 1
+    if (route.skipReason !== undefined) summary.bySkipReason[route.skipReason] = (summary.bySkipReason[route.skipReason] ?? 0) + 1
+    summary.reservedCalls += route.reservedCalls ?? 0
+    if (route.canceled === true) summary.canceled += 1
+    if (route.usageIncomplete === true) summary.usageIncomplete += 1
+    if (route.skipReason === 'classification-only-budget') summary.classificationOnly += 1
+    if (route.stage === 'classification') summary.classificationRows += 1
+    else if (route.stage === 'execution') {
+      summary.executionRows += 1
+      summary.actualScoringCalls += record.calls
+      if (route.trigger === 'pre-step') summary.preStepExecutions += 1
+    } else if (route.stage === 'final') { summary.finalRows += 1; summary.actualScoringCalls += record.calls }
+    else if (route.stage === 'skipped') summary.skippedRows += 1
+  }
+  summary.cycles = cycles.size
+  summary.preStepShare = summary.executionRows > 0 ? summary.preStepExecutions / summary.executionRows : 0
+  summary.classificationOnlyShare = summary.classificationRows > 0 ? summary.classificationOnly / summary.classificationRows : 0
+  return summary
+}
+
+/** Sample strata the labeled evaluation must cover (the plan six groups). */
+export const EVALUATION_CATEGORIES = ["code", "research", "writing", "candidates", "long-task", "conversational"] as const
+export type EvaluationCategory = typeof EVALUATION_CATEGORIES[number]
+
+/** One desensitised, labeled sample for the offline trigger/phase replay. */
+export interface EvaluationSample {
+  id: string
+  category: EvaluationCategory
+  /** Session event log, already desensitised. */
+  events: readonly SessionEvent[]
+  /** Whether this task SHOULD have been reviewed at all. */
+  shouldReview: boolean
+  /** Phases the strategy should have used, when shouldReview is true. */
+  expectedPhases?: ReadonlyArray<"compare" | "select" | "track" | "final">
+}
+
+/** What the deterministic routing layers would do with one sample, with no model call. */
+export interface SampleOutcome {
+  id: string
+  category: string
+  expectedReview: boolean
+  observedTrigger: boolean
+  observedPhases: string[]
+  deliveryReady: boolean
+  eligible: boolean
+  outcome: "hit" | "miss" | "false-trigger" | "correct-skip"
+}
+
+/** Trigger precision/recall and phase coverage over a labeled sample set. */
+export interface EvaluationReport {
+  samples: number
+  hits: number
+  misses: number
+  falseTriggers: number
+  correctSkips: number
+  precision: number
+  recall: number
+  byCategory: Array<{ category: string; samples: number; hits: number; misses: number; falseTriggers: number; correctSkips: number }>
+  phaseMatches: Array<{ phase: string; expected: number; observed: number }>
+  outcomes: SampleOutcome[]
+}
+
+const DEFAULT_EVALUATION_POLICY: AutoVerifyPolicy = { mode: "smart", minToolCalls: 3, maxPerTask: 2, maxPerSession: 8, threshold: 0.65 }
+
+/**
+ * Run the deterministic routing layers over one labeled sample.
+ *
+ * Uses the PRODUCTION detectors (structured route, semantic hint, delivery phase, eligibility)
+ * instead of a reimplementation, so the offline numbers cannot drift from the shipped
+ * scheduling. It never calls a model: a semantic hint is only a hint, and whether the
+ * classifier would really route is a question for the real-model comparison.
+ * @param sample - labeled sample.
+ * @param policy - eligibility policy; defaults to the shipped smart defaults.
+ * @returns What the strategy would do.
+ */
+export function evaluateSample(sample: EvaluationSample, policy: AutoVerifyPolicy = DEFAULT_EVALUATION_POLICY): SampleOutcome {
+  const events = sample.events
+  const observedPhases: string[] = []
+  let observedTrigger = false
+  if (latestDirectUserSeq(events) !== undefined) {
+    const decision = analyzeStructuredRoute(events, 8, 20_000, 60_000)
+    if (decision !== undefined) { observedTrigger = true; observedPhases.push(decision.kind) }
+    else if (semanticRouteHint(events)) { observedTrigger = true; observedPhases.push("semantic") }
+  }
+  const delivery = inspectDeliveryPhase(events)
+  const deliveryReady = delivery !== undefined && delivery.todosComplete && delivery.verification !== undefined
+  const eligible = analyzeAutoTask(events, policy).eligible
+  if (eligible) observedPhases.push("final")
+  const outcome: SampleOutcome["outcome"] = sample.shouldReview
+    ? (observedTrigger ? "hit" : "miss")
+    : (observedTrigger ? "false-trigger" : "correct-skip")
+  return { id: sample.id, category: sample.category, expectedReview: sample.shouldReview, observedTrigger, observedPhases, deliveryReady, eligible, outcome }
+}
+
+function ratio(numerator: number, denominator: number): number { return denominator > 0 ? numerator / denominator : 0 }
+
+/**
+ * Aggregate the labeled evaluation.
+ *
+ * Precision/recall are reported together with the sample counts and the per-category breakdown,
+ * because a 30-sample set cannot establish a low false-accept rate on its own.
+ * @param samples - labeled samples.
+ * @param policy - eligibility policy.
+ * @returns Trigger precision/recall, per-category counts and per-phase coverage.
+ */
+export function summarizeEvaluation(samples: readonly EvaluationSample[], policy: AutoVerifyPolicy = DEFAULT_EVALUATION_POLICY): EvaluationReport {
+  const outcomes = samples.map(sample => evaluateSample(sample, policy))
+  const hits = outcomes.filter(entry => entry.outcome === "hit").length
+  const misses = outcomes.filter(entry => entry.outcome === "miss").length
+  const falseTriggers = outcomes.filter(entry => entry.outcome === "false-trigger").length
+  const correctSkips = outcomes.filter(entry => entry.outcome === "correct-skip").length
+  const byCategory = EVALUATION_CATEGORIES.map(category => {
+    const rows = outcomes.filter(entry => entry.category === category)
+    return { category, samples: rows.length, hits: rows.filter(entry => entry.outcome === "hit").length, misses: rows.filter(entry => entry.outcome === "miss").length, falseTriggers: rows.filter(entry => entry.outcome === "false-trigger").length, correctSkips: rows.filter(entry => entry.outcome === "correct-skip").length }
+  })
+  const phaseMatches = ["compare", "select", "track", "final"].map(phase => ({
+    phase,
+    expected: samples.filter(sample => sample.expectedPhases?.includes(phase as never) === true).length,
+    observed: outcomes.filter(entry => entry.observedPhases.includes(phase)).length,
+  }))
+  return { samples: samples.length, hits, misses, falseTriggers, correctSkips, precision: ratio(hits, hits + falseTriggers), recall: ratio(hits, hits + misses), byCategory, phaseMatches, outcomes }
+}
+
+/** Loose reader for one labeled sample file entry. */
+export function parseEvaluationSample(value: unknown): EvaluationSample | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined
+  const row = value as Record<string, unknown>
+  if (typeof row.id !== "string" || !row.id || !EVALUATION_CATEGORIES.includes(row.category as EvaluationCategory) || typeof row.shouldReview !== "boolean" || !Array.isArray(row.events)) return undefined
+  const expected = Array.isArray(row.expectedPhases)
+    ? row.expectedPhases.filter((phase): phase is "compare" | "select" | "track" | "final" => phase === "compare" || phase === "select" || phase === "track" || phase === "final")
+    : undefined
+  return { id: row.id, category: row.category as EvaluationCategory, events: row.events as SessionEvent[], shouldReview: row.shouldReview, ...(expected === undefined ? {} : { expectedPhases: expected }) }
 }

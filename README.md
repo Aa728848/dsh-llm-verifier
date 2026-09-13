@@ -341,16 +341,23 @@ flowchart LR
 
 ## 离线回放评测（`scripts/eval-replay.mjs`）
 
-不需要任何模型调用，回答两个问题：
+不需要任何模型调用，回答四个问题：
 
 ```bash
 pnpm run build                 # 脚本导入 lib/replay.js
 node scripts/eval-replay.mjs   # 扫描 ~/.dsh/sessions 下所有话题
 node scripts/eval-replay.mjs --dir <话题目录> --thresholds 0.5,0.65,0.8
+node scripts/eval-replay.mjs --samples <样本目录>   # 有标注样本时
 ```
 
 1. **阈值扫描**：每条 `verifier_current_session` 记录都存有会话分数、空工作基线、胜者与逐项判据分数——也就是门控看过的全部信息——因此可以用**当前生效的验收规则**在每个阈值上重新判定，并区分"均分不够""逐项不达标""输给基线""无法解析"四种落选原因。
 2. **解析器回放**：决策快照保存了判官原始回答，脚本用当前解析器重新解析并报告 drift——提示词或解析逻辑的回归会在**没有模型调用**的情况下暴露出来。`top-logprobs` 通道的分数是 token 分布上的期望，快照不保存分布，因此其文本通道重解析出现 drift 属预期，仅供参考。
+3. **路由周期汇总**：读取 S05-A 的 `route` 观测，按周期、阶段、触发点与跳过原因计数，并分开报告**保守预留调用**与**真实评分调用**、分类无执行比例、取消与用量不完整、以及早评审（`agent/pre-step`）介入实施之前的比例。周期不是模型调用，诊断行不是购买。
+4. **标注样本回放**：`--samples <目录>` 读取形如 `{ id, category, shouldReview, expectedPhases, events }` 的脱敏样本 JSON（每个文件一条或一个数组），用**生产用的**结构化路由、语义线索、交付阶段与资格判定逐条重放，报告触发 precision/recall 与各阶段覆盖。它只使用确定性层：语义线索只代表"值得分类"，分类器是否真的会路由属于真实对比。
+
+> 六类样本固定为 `code / research / writing / candidates / long-task / conversational`；`evaluateSample` 与 `summarizeEvaluation` 由 `replay.test.ts` 直接覆盖。
+>
+> **尚未交付（S05-B 的真实对比层）**：约 30 条真实标注样本，以及「manual vs 当前 smart vs 新 smart」在真实模型下的对比报告（路由 precision/recall、最终误放行/误阻断、重复评分次数、分类无执行比例、每任务额外判官调用、主 Agent 继续步数、已知 token、P50/P95 延迟、缺失用量，并区分 explicit-tag 与 top-logprobs、区分判官降级）仍未产出——它需要先选定数据与明确的模型调用预算。在此之前**不调整** `autoVerifyThreshold`、`autoTrackCompletionThreshold`、`autoRouteMinConfidence` 与各重复轮次。
 
 > 在本仓库作者机器上的真实数据里，14 次验收在 0.5–0.9 的所有阈值下**全部通过**：判官给每次会话都打了 1.00。这正是这个工具要暴露的事实——阈值调参的前提是判官能区分候选，详见 `.agents/notes/implemented/feature/2026-09-13-best-of-n-generation-side-selection.md` 记录的判别探针结论与当前通道现状。
 

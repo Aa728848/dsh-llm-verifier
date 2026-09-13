@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseStatisticsRecords, replayDecisionScores, sweepThresholds } from './replay.ts'
+import { evaluateSample, parseEvaluationSample, parseStatisticsRecords, replayDecisionScores, summarizeEvaluation, summarizeRouteCycles, sweepThresholds } from './replay.ts'
 
 const statistics = JSON.stringify({
   version: 1,
@@ -78,5 +78,110 @@ describe('replayDecisionScores', () => {
     expect(rows[0]).toMatchObject({ mode: 'match', reparsed: 1 })
     expect(rows[1]).toMatchObject({ mode: 'drift', reparsed: 1 })
     expect(rows[2]!.mode).toBe('not-scored')
+  })
+})
+
+const routeStatistics = JSON.stringify({
+  version: 1,
+  records: [
+    { toolName: 'verifier_route_classify', startedAt: 1, success: true, stats: { calls: 1 }, verdict: { phase: 'semantic', outcome: 'classified' }, route: { cycleId: 'c1', trigger: 'turn-stopping', stage: 'classification', destination: 'unresolved', attempt: 1, reservedCalls: 1 } },
+    { toolName: 'verifier_compare', startedAt: 2, success: true, stats: { calls: 6 }, verdict: { phase: 'compare', outcome: 'compared' }, route: { cycleId: 'c1', trigger: 'turn-stopping', stage: 'execution', destination: 'compare', attempt: 1, reservedCalls: 7 } },
+    { toolName: 'verifier_select', startedAt: 3, success: true, stats: { calls: 3 }, verdict: { phase: 'select', outcome: 'ranked' }, route: { cycleId: 'c2', trigger: 'pre-step', stage: 'execution', destination: 'select', attempt: 2, reservedCalls: 3 } },
+    { toolName: 'verifier_compare', startedAt: 4, success: true, stats: { calls: 0 }, verdict: { phase: 'semantic', outcome: 'classification-only-budget' }, route: { cycleId: 'c3', trigger: 'turn-stopping', stage: 'skipped', destination: 'compare', attempt: 3, reservedCalls: 1, skipReason: 'classification-only-budget', usageIncomplete: true } },
+    { toolName: 'verifier_current_session', startedAt: 5, success: true, stats: { calls: 6 }, verdict: { phase: 'final', outcome: 'passed' }, route: { cycleId: 'c4', trigger: 'turn-stopping', stage: 'final', destination: 'final', attempt: 1, reservedCalls: 6 } },
+  ],
+})
+
+describe('summarizeRouteCycles', () => {
+  it('separates cycles, rows, reserved calls and actual scoring calls', () => {
+    const records = parseStatisticsRecords(routeStatistics)
+    expect(records[0]!.calls).toBe(1)
+    expect(records[0]!.route).toMatchObject({ cycleId: 'c1', trigger: 'turn-stopping', stage: 'classification' })
+    const summary = summarizeRouteCycles(records)
+    // c1 (classification + execution), c2 (pre-step execution), c3 (skipped), c4 (final).
+    expect(summary.cycles).toBe(4)
+    expect(summary.classificationRows).toBe(1)
+    expect(summary.executionRows).toBe(2)
+    expect(summary.finalRows).toBe(1)
+    expect(summary.skippedRows).toBe(1)
+    expect(summary.classificationOnly).toBe(1)
+    expect(summary.usageIncomplete).toBe(1)
+    expect(summary.preStepExecutions).toBe(1)
+    expect(summary.preStepShare).toBe(0.5)
+    expect(summary.reservedCalls).toBe(1 + 7 + 3 + 1 + 6)
+    expect(summary.actualScoringCalls).toBe(6 + 3 + 6)
+    expect(summary.classificationOnlyShare).toBe(1)
+    expect(summary.bySkipReason).toEqual({ 'classification-only-budget': 1 })
+  })
+
+  it('ignores records without an observation and survives a malformed one', () => {
+    const records = parseStatisticsRecords(JSON.stringify({ version: 1, records: [
+      { toolName: 'verifier_compare', startedAt: 1, success: true, stats: { calls: 3 } },
+      { toolName: 'verifier_compare', startedAt: 2, success: true, stats: { calls: 3 }, route: { cycleId: 'x' } },
+    ] }))
+    expect(records).toHaveLength(2)
+    expect(records[0]!.route).toBeUndefined()
+    expect(records[1]!.route).toBeUndefined()
+    expect(summarizeRouteCycles(records)).toMatchObject({ cycles: 0, executionRows: 0, reservedCalls: 0 })
+  })
+})
+
+const userEvent = (seq, text) => ({ type: 'user/message', seq, data: { source: { kind: 'user' }, content: [{ type: 'text', text }] } })
+const callEvent = (seq, id, name) => ({ type: 'tool/call', seq, data: { turn: 1, step: 1, callId: id, name, arguments: '{}' } })
+const resultEvent = (seq, id, text) => ({ type: 'tool/result', seq, data: { turn: 1, step: 1, message: { source: { callId: id }, content: [{ type: 'text', text }] } } })
+const todoEvent = (seq, todos) => ({ type: 'todo/write', seq, data: { todos } })
+const candidate = (id, label) => ({ id, label, status: 'completed', content: 'body ' + id })
+const workflowText = (rows) => 'workflow "w" completed (' + rows.length + ' agents).\nReturn value:\n' + JSON.stringify({ protocol: 'dsh-verifier-candidates', version: 1, groupId: 'g', candidates: rows })
+const envelopeEvents = (rows) => [userEvent(0, 'Pick one and build it'), callEvent(1, 'w', 'workflow'), resultEvent(2, 'w', workflowText(rows))]
+
+const SAMPLE_SET = [
+  { id: 'code-compare', category: 'code', shouldReview: true, expectedPhases: ['compare'], events: envelopeEvents([candidate('1', 'C1'), candidate('2', 'C2')]) },
+  { id: 'research-subagents', category: 'research', shouldReview: true, expectedPhases: ['compare'], events: [userEvent(0, 'Research both'), callEvent(1, 's', 'subagent'), resultEvent(2, 's', 'findings')] },
+  { id: 'long-task-track', category: 'long-task', shouldReview: true, expectedPhases: ['track'], events: [userEvent(0, 'Implement it'), todoEvent(1, [{ content: 'a', status: 'in_progress' }, { content: 'b', status: 'pending' }]), callEvent(2, 'e', 'edit'), resultEvent(3, 'e', 'edited'), todoEvent(4, [{ content: 'a', status: 'completed' }, { content: 'b', status: 'completed' }])] },
+  { id: 'candidates-select', category: 'candidates', shouldReview: true, expectedPhases: ['select'], events: envelopeEvents([candidate('1', 'C1'), candidate('2', 'C2'), candidate('3', 'C3')]) },
+  { id: 'chat-false-trigger', category: 'conversational', shouldReview: false, events: envelopeEvents([candidate('1', 'C1'), candidate('2', 'C2')]) },
+  { id: 'writing-plain', category: 'writing', shouldReview: false, events: [userEvent(0, 'Draft a note'), callEvent(1, 'e', 'edit'), resultEvent(2, 'e', 'drafted')] },
+  { id: 'chat-plain', category: 'conversational', shouldReview: false, events: [userEvent(0, 'What does this flag do?')] },
+]
+
+describe('labeled offline evaluation', () => {
+  it('scores trigger precision and recall against real labels without a model call', () => {
+    const report = summarizeEvaluation(SAMPLE_SET)
+    expect(report.samples).toBe(7)
+    expect(report.hits).toBe(4)
+    expect(report.misses).toBe(0)
+    expect(report.falseTriggers).toBe(1)
+    expect(report.correctSkips).toBe(2)
+    expect(report.precision).toBeCloseTo(4 / 5)
+    expect(report.recall).toBe(1)
+    // Phase coverage counts samples, so a labeled compare that the detector finds is visible.
+    // Two samples are labeled "compare", and the detector finds both (one structured, one from
+    // the false-trigger sample), so the coverage row counts samples rather than model calls.
+    expect(report.phaseMatches.find(row => row.phase === 'compare')).toMatchObject({ expected: 2, observed: 2 })
+    expect(report.phaseMatches.find(row => row.phase === 'track')!.observed).toBeGreaterThanOrEqual(1)
+  })
+
+  it('uses the production detectors, so a delivery-ready sample is reported as eligible', () => {
+    const sample = {
+      id: 'delivery', category: 'long-task', shouldReview: true,
+      events: [
+        userEvent(0, 'Implement and test'), callEvent(1, 'e', 'edit'), resultEvent(2, 'e', 'edited'),
+        callEvent(3, 'r', 'read'), resultEvent(4, 'r', 'file contents'),
+        callEvent(5, 'p', 'pwsh'), resultEvent(6, 'p', 'Tests 3 passed'),
+        todoEvent(7, [{ content: 'a', status: 'completed' }, { content: 'b', status: 'completed' }]),
+      ],
+    }
+    const outcome = evaluateSample(sample)
+    expect(outcome.deliveryReady).toBe(true)
+    expect(outcome.eligible).toBe(true)
+    expect(outcome.observedPhases).toContain('final')
+  })
+
+  it('validates sample files loosely and rejects an unknown category', () => {
+    const valid = parseEvaluationSample({ id: 's1', category: 'code', shouldReview: true, events: [], expectedPhases: ['compare', 'nonsense'] })
+    expect(valid).toMatchObject({ id: 's1', category: 'code', expectedPhases: ['compare'] })
+    expect(parseEvaluationSample({ id: 's2', category: 'nope', shouldReview: true, events: [] })).toBeUndefined()
+    expect(parseEvaluationSample({ id: 's3', category: 'code', shouldReview: true })).toBeUndefined()
+    expect(parseEvaluationSample(null)).toBeUndefined()
   })
 })
