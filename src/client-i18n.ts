@@ -35,7 +35,7 @@ export const zh = {
   'field.criteriaPreset.sampleA': '（示例轨迹 A）运行 pytest -k login，输出 1 failed … 修改 auth.py … 再次运行，输出 1 passed。',
   'field.criteriaPreset.sampleB': '（示例轨迹 B）已经改好了，应该没问题。',
   'field.criteriaFile.title': '判据文件',
-  'field.criteriaFile.help': 'Markdown 判据文件路径：## Criteria 下每个 ### 判据名 一条判据，可选 {#id} 锚定 id，可选 ## Ground Truth Note。文件缺失或解析失败时退回「编码」判据并在日志中告警，不会让验收失效。',
+  'field.criteriaFile.help': 'Markdown 判据文件路径：## Criteria 下每个 ### 判据名 一条判据，可选 {#id} 锚定 id，可选 ## Ground Truth Note。文件缺失或解析失败时退回「编码」判据并在日志中告警，不会让验收失效。注意：预算告警按 3 条判据估算，自定义文件条数更多时请按比例调高「任务/会话模型调用预算」，否则可能在验收中途耗尽。',
   'field.autoRouteSemantic.title': '混合语义路由',
   'field.autoRouteSemantic.help': '结构化候选或检查点不足时，由裁判模型保守识别真实的 compare/select/track 对象。智能模式仅在有候选线索时运行；严格模式每次结束边界都会检查。',
   'field.autoRouteMinConfidence.title': '语义路由置信度',
@@ -296,7 +296,7 @@ export const en: I18nDict = {
   'field.criteriaPreset.sampleA': '(sample trajectory A) Ran pytest -k login: 1 failed … changed auth.py … ran it again: 1 passed.',
   'field.criteriaPreset.sampleB': '(sample trajectory B) Already fixed it, should be fine.',
   'field.criteriaFile.title': 'Criteria File',
-  'field.criteriaFile.help': 'Path to a markdown rubric: one ### Criterion Name per criterion under ## Criteria, an optional {#id} anchor, an optional ## Ground Truth Note. A missing or unparsable file falls back to the coding rubric with a logged warning instead of disabling the gate.',
+  'field.criteriaFile.help': 'Path to a markdown rubric: one ### Criterion Name per criterion under ## Criteria, an optional {#id} anchor, an optional ## Ground Truth Note. A missing or unparsable file falls back to the coding rubric with a logged warning instead of disabling the gate. Note: the budget warning assumes three criteria, so raise the task/session call budget proportionally when your file has more.',
   'field.autoRouteSemantic.title': 'Hybrid Semantic Routing',
   'field.autoRouteSemantic.help': 'When structured candidates or checkpoints are lacking, the judge model conservatively identifies real compare/select/track targets. Smart mode only runs when candidate clues exist; Strict mode checks at every task boundary.',
   'field.autoRouteMinConfidence.title': 'Semantic Route Confidence',
@@ -672,10 +672,23 @@ export function sectionForSave(
   return section
 }
 
-/** An eight-candidate select: ring + pivot rounds (18 pairs) x three criteria, one round (the per-pair orientation removes the slot bias). */
-export const WORST_CASE_ROUTE_CALLS_PER_JUDGE = 54
-/** Final acceptance: three criteria x the default two repeats (one per A/B position). */
-export const WORST_CASE_FINAL_CALLS_PER_JUDGE = 6
+/**
+ * Criteria per comparison the worst-case estimate assumes.
+ *
+ * All five built-in presets have three, which is what keeps the historical constants below
+ * unchanged. A CUSTOM rubric file can have any number, and the engine reserves budget from the
+ * real count (\`rubric.criteria.length\`), so a custom file with more criteria needs a larger
+ * budget than a warning built on three would suggest — pass the count in when it is known.
+ */
+export const WORST_CASE_CRITERIA_PER_COMPARISON = 3
+/** An eight-candidate select: 18 pairs (ring + pivot rounds) x criteria, one round (the per-pair orientation removes the slot bias). */
+export function worstCaseRouteCallsPerJudge(criteria = WORST_CASE_CRITERIA_PER_COMPARISON): number { return 18 * Math.max(1, criteria) }
+/** Final acceptance: criteria x the default two repeats (one per A/B position). */
+export function worstCaseFinalCallsPerJudge(criteria = WORST_CASE_CRITERIA_PER_COMPARISON, repeats = 2): number { return Math.max(1, criteria) * Math.max(1, repeats) }
+/** @deprecated Kept at the three-criteria value; prefer {@link worstCaseRouteCallsPerJudge}. */
+export const WORST_CASE_ROUTE_CALLS_PER_JUDGE = worstCaseRouteCallsPerJudge()
+/** @deprecated Kept at the three-criteria value; prefer {@link worstCaseFinalCallsPerJudge}. */
+export const WORST_CASE_FINAL_CALLS_PER_JUDGE = worstCaseFinalCallsPerJudge()
 export const WORST_CASE_TASK_PER_JUDGE = WORST_CASE_ROUTE_CALLS_PER_JUDGE + WORST_CASE_FINAL_CALLS_PER_JUDGE
 export const WORST_CASE_SESSION_PER_JUDGE = 160
 
@@ -683,13 +696,13 @@ export function computeJudgeCount(extraJudgesCount: number): number {
   return 1 + Math.max(0, extraJudgesCount)
 }
 
-export function computeWorstCaseBudget(judgeCount: number): {
+export function computeWorstCaseBudget(judgeCount: number, criteria = WORST_CASE_CRITERIA_PER_COMPARISON): {
   worstCaseTask: number
   worstCaseSession: number
 } {
   const count = Math.max(1, judgeCount)
   return {
-    worstCaseTask: count * WORST_CASE_TASK_PER_JUDGE,
+    worstCaseTask: count * (worstCaseRouteCallsPerJudge(criteria) + worstCaseFinalCallsPerJudge(criteria)),
     worstCaseSession: count * WORST_CASE_SESSION_PER_JUDGE,
   }
 }
@@ -707,10 +720,11 @@ export function evaluateBudgetWarning(
   extraJudgesCount: number,
   autoMaxModelCallsPerTask: number,
   autoMaxModelCallsPerSession: number,
+  criteria = WORST_CASE_CRITERIA_PER_COMPARISON,
 ): BudgetWarningState | null {
   if (autoVerifyMode === 'manual') return null
   const judgeCount = computeJudgeCount(extraJudgesCount)
-  const { worstCaseTask, worstCaseSession } = computeWorstCaseBudget(judgeCount)
+  const { worstCaseTask, worstCaseSession } = computeWorstCaseBudget(judgeCount, criteria)
   const warnTask = autoMaxModelCallsPerTask < worstCaseTask
   const warnSession = autoMaxModelCallsPerSession < worstCaseSession
   if (!warnTask && !warnSession) return null

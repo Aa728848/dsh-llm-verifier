@@ -9,7 +9,7 @@ import {
   zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage,
   compact, money, duration, dateTime, type I18nDict,
   type VerdictSummary, resolveCacheDirOnSave, sameSettingValue, sectionForSave,
-  WORST_CASE_ROUTE_CALLS_PER_JUDGE, WORST_CASE_FINAL_CALLS_PER_JUDGE, WORST_CASE_TASK_PER_JUDGE, WORST_CASE_SESSION_PER_JUDGE,
+  WORST_CASE_ROUTE_CALLS_PER_JUDGE, WORST_CASE_FINAL_CALLS_PER_JUDGE, WORST_CASE_TASK_PER_JUDGE, WORST_CASE_SESSION_PER_JUDGE, WORST_CASE_CRITERIA_PER_COMPARISON,
   computeJudgeCount, computeWorstCaseBudget, type BudgetWarningState,
   evaluateBudgetWarning, isVerdictFailed, formatPercentage, formatVerdictDetails,
 } from './client-i18n.ts'
@@ -172,13 +172,18 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
   }
   const budgetWarning = useMemo(() => {
     if (!draft) return null
+    // The engine reserves budget from the REAL criteria count. A built-in preset's count is known
+    // here; a custom file's is not (it lives on the server), so the estimate falls back to the
+    // three-criteria default and the file field's help says as much.
+    const criteria = draft.criteriaPreset === 'custom' ? WORST_CASE_CRITERIA_PER_COMPARISON : CRITERIA_PRESETS[draft.criteriaPreset].length
     return evaluateBudgetWarning(
       draft.autoVerifyMode,
       draft.extraJudges.length,
       draft.autoMaxModelCallsPerTask,
       draft.autoMaxModelCallsPerSession,
+      criteria,
     )
-  }, [draft?.autoVerifyMode, draft?.extraJudges.length, draft?.autoMaxModelCallsPerTask, draft?.autoMaxModelCallsPerSession])
+  }, [draft?.autoVerifyMode, draft?.criteriaPreset, draft?.extraJudges.length, draft?.autoMaxModelCallsPerTask, draft?.autoMaxModelCallsPerSession])
   // The saved section holds only real overrides: a draft field equal to the
   // composition base is dropped so a later plugin default still reaches this
   // install (see sectionForSave).

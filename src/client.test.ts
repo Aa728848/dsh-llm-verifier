@@ -8,6 +8,9 @@ import {
   WORST_CASE_FINAL_CALLS_PER_JUDGE,
   WORST_CASE_TASK_PER_JUDGE,
   WORST_CASE_SESSION_PER_JUDGE,
+  WORST_CASE_CRITERIA_PER_COMPARISON,
+  worstCaseRouteCallsPerJudge,
+  worstCaseFinalCallsPerJudge,
   computeJudgeCount,
   computeWorstCaseBudget,
   evaluateBudgetWarning,
@@ -473,6 +476,23 @@ describe('budget worst case and sanity warnings', () => {
     expect(computeWorstCaseBudget(1)).toEqual({ worstCaseTask: 60, worstCaseSession: 160 })
     expect(computeWorstCaseBudget(2)).toEqual({ worstCaseTask: 120, worstCaseSession: 320 })
     expect(computeWorstCaseBudget(3)).toEqual({ worstCaseTask: 180, worstCaseSession: 480 })
+  })
+
+  it('scales the route estimate with the criteria count the engine actually reserves for', () => {
+    // All built-in presets have three criteria, which is why the historical constants still hold.
+    expect(WORST_CASE_CRITERIA_PER_COMPARISON).toBe(3)
+    expect(worstCaseRouteCallsPerJudge()).toBe(WORST_CASE_ROUTE_CALLS_PER_JUDGE)
+    expect(worstCaseFinalCallsPerJudge()).toBe(WORST_CASE_FINAL_CALLS_PER_JUDGE)
+    // A custom rubric file with more criteria costs proportionally more.
+    expect(worstCaseRouteCallsPerJudge(6)).toBe(108)
+    expect(worstCaseFinalCallsPerJudge(6)).toBe(12)
+    expect(computeWorstCaseBudget(1, 6)).toEqual({ worstCaseTask: 120, worstCaseSession: 160 })
+    // Degenerate counts are clamped, never zero or negative.
+    expect(worstCaseRouteCallsPerJudge(0)).toBe(18)
+    expect(worstCaseFinalCallsPerJudge(0)).toBe(2)
+    // The warning follows: the shipped 96/240 clears three criteria but not six.
+    expect(evaluateBudgetWarning('smart', 0, 96, 240, 3)).toBeNull()
+    expect(evaluateBudgetWarning('smart', 0, 96, 240, 6)).toMatchObject({ warnTask: true, warnSession: false, worstCaseTask: 120 })
   })
 
   it('suppresses budget warnings in manual mode', () => {

@@ -747,14 +747,27 @@ export declare function sameSettingValue(left: unknown, right: unknown): boolean
  * write-everything behavior.
  */
 export declare function sectionForSave(user: Record<string, unknown>, draft: Record<string, unknown>, base: Record<string, unknown> | undefined): Record<string, unknown>;
-/** An eight-candidate select: ring + pivot rounds (18 pairs) x three criteria, one round (the per-pair orientation removes the slot bias). */
-export declare const WORST_CASE_ROUTE_CALLS_PER_JUDGE = 54;
-/** Final acceptance: three criteria x the default two repeats (one per A/B position). */
-export declare const WORST_CASE_FINAL_CALLS_PER_JUDGE = 6;
+/**
+ * Criteria per comparison the worst-case estimate assumes.
+ *
+ * All five built-in presets have three, which is what keeps the historical constants below
+ * unchanged. A CUSTOM rubric file can have any number, and the engine reserves budget from the
+ * real count (\`rubric.criteria.length\`), so a custom file with more criteria needs a larger
+ * budget than a warning built on three would suggest — pass the count in when it is known.
+ */
+export declare const WORST_CASE_CRITERIA_PER_COMPARISON = 3;
+/** An eight-candidate select: 18 pairs (ring + pivot rounds) x criteria, one round (the per-pair orientation removes the slot bias). */
+export declare function worstCaseRouteCallsPerJudge(criteria?: number): number;
+/** Final acceptance: criteria x the default two repeats (one per A/B position). */
+export declare function worstCaseFinalCallsPerJudge(criteria?: number, repeats?: number): number;
+/** @deprecated Kept at the three-criteria value; prefer {@link worstCaseRouteCallsPerJudge}. */
+export declare const WORST_CASE_ROUTE_CALLS_PER_JUDGE: number;
+/** @deprecated Kept at the three-criteria value; prefer {@link worstCaseFinalCallsPerJudge}. */
+export declare const WORST_CASE_FINAL_CALLS_PER_JUDGE: number;
 export declare const WORST_CASE_TASK_PER_JUDGE: number;
 export declare const WORST_CASE_SESSION_PER_JUDGE = 160;
 export declare function computeJudgeCount(extraJudgesCount: number): number;
-export declare function computeWorstCaseBudget(judgeCount: number): {
+export declare function computeWorstCaseBudget(judgeCount: number, criteria?: number): {
     worstCaseTask: number;
     worstCaseSession: number;
 };
@@ -765,7 +778,7 @@ export interface BudgetWarningState {
     warnTask: boolean;
     warnSession: boolean;
 }
-export declare function evaluateBudgetWarning(autoVerifyMode: string, extraJudgesCount: number, autoMaxModelCallsPerTask: number, autoMaxModelCallsPerSession: number): BudgetWarningState | null;
+export declare function evaluateBudgetWarning(autoVerifyMode: string, extraJudgesCount: number, autoMaxModelCallsPerTask: number, autoMaxModelCallsPerSession: number, criteria?: number): BudgetWarningState | null;
 export declare function isVerdictFailed(verdict?: VerdictSummary | null, success?: boolean): boolean;
 export declare function formatPercentage(val: number): string;
 export declare function formatVerdictDetails(verdict: VerdictSummary, t: I18nDict): {
