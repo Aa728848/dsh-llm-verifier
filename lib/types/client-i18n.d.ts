@@ -130,6 +130,7 @@ export declare const zh: {
     'probe.running': string;
     'probe.title': string;
     'probe.note': string;
+    'probe.reprobed': string;
     'probe.rubric': string;
     'probe.rubricFallback': string;
     'probe.channel': string;
@@ -364,6 +365,7 @@ export declare const dictionaries: {
         'probe.running': string;
         'probe.title': string;
         'probe.note': string;
+        'probe.reprobed': string;
         'probe.rubric': string;
         'probe.rubricFallback': string;
         'probe.channel': string;
@@ -595,6 +597,7 @@ export declare const dictionaries: {
         'probe.running': string;
         'probe.title': string;
         'probe.note': string;
+        'probe.reprobed': string;
         'probe.rubric': string;
         'probe.rubricFallback': string;
         'probe.channel': string;

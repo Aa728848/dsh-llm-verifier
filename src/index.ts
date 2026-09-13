@@ -322,6 +322,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       for (const client of verifier.clients) {
         const label = client.label ?? client.provider + '/' + client.model
         const startedAt = Date.now()
+        // Forget the cached channel verdict for this judge before probing. A mark written up to 24h
+        // ago — possibly before the provider was (re)configured, and certainly before a host
+        // restart — would make the probe replay a stale answer instead of checking, which is the one
+        // thing a diagnostic must not do. It also means a provider that CAN return logprobs starts
+        // using that better channel for subsequent real verifications.
+        client.topLogprobCapabilities.forget(client.provider, client.model)
         try {
           const completion = await callVerifier({ ...client, timeoutMs: Math.min(client.timeoutMs, PROBE_TIMEOUT_MS), maxRetries: 0 }, prompt)
           judges.push({
@@ -329,6 +335,7 @@ export function apply(ctx: Context, config: Config = {}): void {
             provider: client.provider,
             model: client.model,
             ok: true,
+            channelProbed: true,
             channel: completion.scoringMode,
             scoreA: extractScore(completion, '<score_A>'),
             scoreB: extractScore(completion, '<score_B>'),
@@ -341,6 +348,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
       return rpcSuccess({
         judges,
+        channelProbed: true,
         rubric: { source: rubric.source, count: rubric.criteria.length, ...(rubric.file ? { file: rubric.file } : {}), ...(rubric.error ? { error: rubric.error } : {}) },
       })
     } catch (error) { return rpcFailure(error instanceof Error ? error.message : String(error)) }

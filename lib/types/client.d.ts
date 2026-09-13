@@ -125,6 +125,7 @@ export interface JudgeProbeView {
     model: string;
     ok: boolean;
     channel?: string;
+    channelProbed?: boolean;
     scoreA?: number;
     scoreB?: number;
     latencyMs: number;
@@ -136,6 +137,7 @@ export interface JudgeProbeView {
 }
 export interface ProbeResultView {
     judges: JudgeProbeView[];
+    channelProbed?: boolean;
     rubric: {
         source: string;
         count: number;

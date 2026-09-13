@@ -61,6 +61,23 @@ export declare class TopLogprobCapabilityCache {
     /** Hydrates persisted marks once; in-process marks always win over file contents. */
     ensureLoaded(): Promise<void>;
     markUnsupported(provider: string, model: string): void;
+    /**
+     * Forget one provider/model mark so the next call re-probes instead of replaying a cached answer.
+     *
+     * The judge probe exists to answer "which scoring channel is this judge on". Replaying a mark
+     * written up to {@link CAPABILITY_TTL_MS} ago — possibly under a different provider
+     * configuration — would answer a different, stale question. The removal is persisted, so a host
+     * restart cannot resurrect the old mark.
+     *
+     * The delete is repeated INSIDE the serialized write: hydration max-merges the file into memory,
+     * so deleting only beforehand would let the very write we schedule put the entry back.
+     * @param provider - provider id the mark belongs to.
+     * @param model - model id the mark belongs to.
+     */
+    forget(provider: string, model: string): void;
+    /** Serialize behind hydration so an early mark never clobbers not-yet-loaded entries. */
+    private persist;
+    private writeDocument;
     /** Resolves once the trailing persistence attempt settles; exposed for tests. */
     flush(): Promise<void>;
 }

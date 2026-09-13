@@ -42,6 +42,34 @@ describe('TopLogprobCapabilityCache persistence', () => {
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
+  it('forgets a mark and persists the removal, even when it is forgotten before hydration', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-caps-'))
+    try {
+      const file = join(dir, 'capabilities-v1.json')
+      writeFileSync(file, JSON.stringify({ version: 1, entries: { 'openai\0gpt-5': Date.now(), 'openai\0keep': Date.now() } }))
+
+      // Forgotten BEFORE the file is hydrated: hydration max-merges the file into memory, so a
+      // delete that only happened up front would be undone by the write this schedule performs.
+      const cache = new TopLogprobCapabilityCache(file)
+      cache.forget('openai', 'gpt-5')
+      await cache.flush()
+      expect(cache.isUnsupported('openai', 'gpt-5')).toBe(false)
+      // The other mark survives: forgetting one judge must not erase the topic's memory.
+      expect(cache.isUnsupported('openai', 'keep')).toBe(true)
+
+      // Persisted: a fresh instance (a restarted host) must not resurrect the stale answer.
+      const restarted = new TopLogprobCapabilityCache(file)
+      await restarted.ensureLoaded()
+      expect(restarted.isUnsupported('openai', 'gpt-5')).toBe(false)
+      expect(restarted.isUnsupported('openai', 'keep')).toBe(true)
+
+      // Forgetting an unmarked judge is a no-op that still settles.
+      restarted.forget('openai', 'never-marked')
+      await restarted.flush()
+      expect(restarted.isUnsupported('openai', 'never-marked')).toBe(false)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
   it('re-probes a mark that expires while the process is running', () => {
     let now = 1_000_000
     const cache = new TopLogprobCapabilityCache(undefined, () => now)

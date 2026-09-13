@@ -71,8 +71,8 @@ interface VerifierRemote {
   }
 }
 
-export interface JudgeProbeView { label: string; provider: string; model: string; ok: boolean; channel?: string; scoreA?: number; scoreB?: number; latencyMs: number; calls?: number; inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; error?: string }
-export interface ProbeResultView { judges: JudgeProbeView[]; rubric: { source: string; count: number; file?: string; error?: string } }
+export interface JudgeProbeView { label: string; provider: string; model: string; ok: boolean; channel?: string; channelProbed?: boolean; scoreA?: number; scoreB?: number; latencyMs: number; calls?: number; inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; error?: string }
+export interface ProbeResultView { judges: JudgeProbeView[]; channelProbed?: boolean; rubric: { source: string; count: number; file?: string; error?: string } }
 
 interface VerifierSettingsProps { remote: VerifierRemote }
 interface StatisticsPageProps {
@@ -553,7 +553,7 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
               <strong>{judge.label}</strong>
               <span style={muted}>{judge.provider}/{judge.model}</span>
               {judge.ok ? <>
-                {judge.channel !== undefined && <span style={muted}>{tFormat(t['probe.channel'], { channel: judge.channel })}</span>}
+                {judge.channel !== undefined && <span style={muted}>{tFormat(t['probe.channel'], { channel: judge.channel })}{judge.channelProbed === true ? ' · ' + t['probe.reprobed'] : ''}</span>}
                 {judge.scoreA !== undefined && judge.scoreB !== undefined && <span style={muted}>{tFormat(t['probe.scores'], { a: formatPercentage(judge.scoreA), b: formatPercentage(judge.scoreB) })}</span>}
                 <span style={muted}>{tFormat(t['probe.latency'], { ms: String(judge.latencyMs) })}</span>
                 {judge.calls !== undefined && <span style={muted}>{tFormat(t['probe.calls'], { calls: String(judge.calls) })}</span>}
