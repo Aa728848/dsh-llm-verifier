@@ -146,9 +146,35 @@ export function apply(ctx: Context, config: Config = {}): void {
   // coding preset instead of disabling the gate.
   const criteriaResolver = new CriteriaResolver()
   const configuredCriteria = () => criteriaResolver.resolve(current().criteriaPreset, current().criteriaFile)
-  const engine = async (agent: Agent) => {
+  /**
+   * Every known topic header, newest first.
+   *
+   * The statistics and decision dashboards merge all topics; anything that needs exactly ONE
+   * topic (the judge probe's per-topic capability memory) takes the newest, because that is where
+   * the operator's current work lives. Legacy backends handed back the header directly instead of
+   * wrapping it in \`{ header }`, so both shapes are accepted.
+   * @returns Session headers, newest first; entries without an id are dropped.
+   */
+  const sessionHeaders = async (): Promise<SessionHeader[]> => {
+    const items = await services.sessionPersistence.list()
+    return items
+      .map(item => item && typeof item === 'object' && 'header' in item ? (item as { header: SessionHeader }).header : item as SessionHeader)
+      .filter(header => header !== undefined && header.id !== undefined)
+      .sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0))
+  }
+
+  /**
+   * Build the judge ensemble for one topic.
+   *
+   * Takes a session header rather than an Agent because the judge probe is started from the global
+   * statistics dashboard, where there is no current initiator. The diagnostic still needs a topic
+   * for the per-topic capability memory, so it attaches to the most recent one (see handleProbe).
+   * @param header - session header owning the topic whose sidecars the judges use.
+   * @returns The engine plus the resolved configuration it was built from.
+   */
+  const engineForHeader = async (header: SessionHeader) => {
     const selected = current()
-    const topicEntry = topic(agent.session.header)
+    const topicEntry = topic(header)
     // One client per configured judge: the judge identity is part of the scoring
     // cache key, so each judge caches and de-duplicates independently. `judges[0]`
     // is the primary, which keeps a single-judge configuration on exactly the old path.
@@ -159,6 +185,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     return { verifier: new VerifierEngine(clients, selected.maxConcurrency, topicEntry.cache, { input: selected.estimatedInputUsdPerMillion, output: selected.estimatedOutputUsdPerMillion }, topicEntry.flights), selected }
   }
+  const engine = async (agent: Agent) => engineForHeader(agent.session.header)
   const images = (values: readonly string[] | undefined, signal: AbortSignal) => loadVerifierImages(values, signal)
   const route = (selected: { provider: string; model: string }) => ({ provider: selected.provider, model: selected.model })
   const requireEnabled = () => { if (!current().enabled) throw new Error('llm-verifier: verifier tools are disabled — enable them in Settings → LLM Verifier') }
@@ -262,10 +289,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (!parsed.ok) return rpcFailure(parsed.message)
     const query = parsed.query
     try {
-      const items = await services.sessionPersistence.list()
-      const headers: SessionHeader[] = items
-        .map(item => item && typeof item === 'object' && 'header' in item ? (item as { header: SessionHeader }).header : item as SessionHeader)
-        .filter(header => header !== undefined && (query.sessionId === undefined || String(header.id) === query.sessionId))
+      const headers = (await sessionHeaders()).filter(header => query.sessionId === undefined || String(header.id) === query.sessionId)
       const settled = await Promise.allSettled(headers.map(async header => topic(header).statistics.overview(query)))
       const overviews: StatisticsOverview[] = []
       for (const result of settled) {
@@ -287,11 +311,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const handleDecisionQuery = async (id: unknown) => {
     if (typeof id !== 'string' || id.length === 0) return rpcFailure('decision id must be a non-empty string')
     try {
-      const items = await services.sessionPersistence.list()
-      const headers: SessionHeader[] = items
-        .map(item => item && typeof item === 'object' && 'header' in item ? (item as { header: SessionHeader }).header : item as SessionHeader)
-        .filter(header => header !== undefined)
-      for (const header of headers) {
+      for (const header of await sessionHeaders()) {
         const found = await topic(header).decisions.find(id).catch(() => undefined)
         if (found) return rpcSuccess({ decision: found })
       }
@@ -312,8 +332,13 @@ export function apply(ctx: Context, config: Config = {}): void {
    */
   const handleProbe = async () => {
     try {
-      const agent = requireAgent(undefined)
-      const { verifier } = await engine(agent)
+      // The dashboard is a GLOBAL page: there is usually no current initiator, so requiring one
+      // made the probe unusable exactly where its button lives. Fall back to the newest topic,
+      // which is also where the re-probed channel verdict should be remembered.
+      const initiator = ctx.agents.currentInitiator()
+      const header = initiator?.session.header ?? (await sessionHeaders())[0]
+      if (header === undefined) return rpcFailure('llm-verifier: the judge probe needs one session to attach its capability memory to, and no session exists yet — start a session, then probe again')
+      const { verifier } = await engineForHeader(header)
       const rubric = await configuredCriteria()
       const criterion = rubric.criteria[0]
       if (criterion === undefined) return rpcFailure('llm-verifier: the configured rubric has no criteria')

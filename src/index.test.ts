@@ -16,7 +16,7 @@ afterEach(() => { for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive:
  * reject a model-driven call BEFORE any model/topic work happens, both of which
  * were previously uncovered (every other module has a sibling spec).
  */
-function assemble(config: Record<string, unknown> = {}, options: { root?: string; initiator?: unknown } = {}) {
+function assemble(config: Record<string, unknown> = {}, options: { root?: string; initiator?: unknown; sessions?: unknown[] } = {}) {
   const tools = new Map<string, { output: { schema: { properties: Record<string, unknown> } }; execute: (args: unknown, exec: unknown) => Promise<unknown> }>()
   const warnings: string[] = []
   const rpc = new Map<string, (endpoint: string, payload: unknown) => unknown>()
@@ -27,7 +27,8 @@ function assemble(config: Record<string, unknown> = {}, options: { root?: string
     tools: { register(definition: never) { tools.set((definition as unknown as { name: string }).name, definition as never) } },
     agents: { currentInitiator() { return options.initiator } },
     llm: { resolveCallConfig: async () => ({}) },
-    attachments: {}, sessionPersistence: { root: options.root ?? tempDir() },
+    attachments: {},
+    sessionPersistence: { root: options.root ?? tempDir(), list: async () => options.sessions ?? [] },
     // Older hosts answer statistics over the plugin RPC channel; capturing the handler
     // lets the payload contract be tested without any host I/O.
     connection: { rpc: { handle(channel: string, handler: (endpoint: string, payload: unknown) => unknown) { rpc.set(channel, handler) } } },
@@ -73,19 +74,25 @@ describe('plugin assembly', () => {
     expect(await handler!('other', {})).toMatchObject({ ok: false, error: { message: expect.stringMatching(/unknown llm-verifier endpoint/) } })
   })
 
-  it('dispatches the judge probe with no agent, with the coding rubric by default, and reports judge failures', async () => {
-    // No initiator: the probe must say why it cannot run instead of pretending to have probed.
-    const anonymous = assemble()
-    expect(await anonymous.rpc.get('/llm-verifier')!('probe', undefined)).toMatchObject({ ok: false, error: { message: expect.stringMatching(/agent-owned topic/) } })
+  it('runs the judge probe from the global dashboard, attaching to the newest topic when there is no initiator', async () => {
+    // The dashboard is a global page: no current initiator, and possibly no session at all. The
+    // probe must explain what it needs instead of leaking a message about topic deletion.
+    const empty = assemble()
+    expect(await empty.rpc.get('/llm-verifier')!('probe', undefined)).toMatchObject({ ok: false, error: { message: expect.stringMatching(/needs one session/) } })
 
-    // With an agent the probe runs for real: the stub has no llm.stream, so the single judge must
-    // come back as a REPORTED failure — not a crash, and not a silent success.
-    const { rpc } = assemble({}, { initiator: exec.agent })
-    const outcome = await rpc.get('/llm-verifier')!('probe', undefined) as { ok: boolean; value: { judges: Array<Record<string, unknown>>; rubric: Record<string, unknown> } }
+    // With topics it runs for real against the NEWEST one. The stub has no llm.stream, so the
+    // single judge must come back as a REPORTED failure — not a crash, not a silent success.
+    const { rpc } = assemble({}, { sessions: [{ id: 'older', createdAt: 1 }, { id: 'newest', createdAt: 2 }] })
+    const outcome = await rpc.get('/llm-verifier')!('probe', undefined) as { ok: boolean; value: { judges: Array<Record<string, unknown>>; rubric: Record<string, unknown>; channelProbed?: boolean } }
     expect(outcome.ok).toBe(true)
+    expect(outcome.value.channelProbed).toBe(true)
     expect(outcome.value.rubric).toMatchObject({ source: 'coding', count: 3 })
     expect(outcome.value.judges).toHaveLength(1)
     expect(outcome.value.judges[0]).toMatchObject({ ok: false })
+
+    // A current initiator still wins over the fallback.
+    const withAgent = assemble({}, { sessions: [{ id: 'other', createdAt: 1 }], initiator: exec.agent })
+    expect((await withAgent.rpc.get('/llm-verifier')!('probe', undefined) as { ok: boolean }).ok).toBe(true)
   })
 
   it('resolves the configured rubric through the probe, and degrades a broken custom file instead of failing', async () => {
