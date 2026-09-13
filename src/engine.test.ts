@@ -541,6 +541,22 @@ describe('VerifierEngine N-judge ensemble', () => {
     expect(stats.cacheMisses).toBe(1)
   })
 
+  it('prices the partial usage before the failure row reads it', async () => {
+    // partialStats returns a normalized COPY, so pricing it in place used to be discarded and
+    // the failure row recorded an estimated cost of zero.
+    const llm = {
+      stream: (options: any) => promptTextOf(options).includes('second requirement')
+        ? (async function* () { throw new Error('judge exploded') })()
+        : streamOf(chunks('<score_A> A </score_A>\n<score_B> T </score_B>')),
+    }
+    const engine = new VerifierEngine(clientConfig({ llm } as any), 1, undefined, { input: 8, output: 2 })
+    const error = await engine.compare({ problem: 'task', candidateA: 'AA', candidateB: 'BB', criteria: threeCriteria, repeats: 1 }).catch(reason => reason)
+    const partial = partialStats(error)
+    // The first criterion succeeded: 7 input + 3 cached input + 4 output tokens.
+    expect(partial?.inputTokens).toBe(7)
+    expect(partial?.estimatedCostUsd).toBeCloseTo((10 * 8 + 4 * 2) / 1_000_000)
+  })
+
   it('All judges fail: compare rejects with the first error', async () => {
     const client1 = clientConfig({
       provider: 'prov-1',

@@ -6,7 +6,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import { Config, installVerifierSettings, resolveConfig } from './config.ts'
-import { RequestLimiter, addUsage, attachUsage, callVerifier, callVerifierText, generateCandidate, requestAttempts, type UsageStats, type VerifierClientConfig } from './caller.ts'
+import { RequestLimiter, attachUsage, callVerifier, callVerifierText, generateCandidate, requestAttempts, type UsageStats, type VerifierClientConfig } from './caller.ts'
 import { TopLogprobCapabilityCache, resolveCapabilityFile } from './top-logprobs.ts'
 import { ScoreCache, SingleFlight, resolveCacheFile, stableHash, type CachedPairScore } from './cache.ts'
 import { VerifierEngine, mergeRunStats, normalizeCriteria, partialStats, type JudgeScore, type RunStats } from './engine.ts'
@@ -411,9 +411,9 @@ export function apply(ctx: Context, config: Config = {}): void {
         trace?.({ label: 'draft ' + (index + 1), channel: completion.scoringMode, prompt, output: completion.text })
         return { ok: true as const, text: completion.text, usage: completion.usage, truncated: completion.truncated }
       } catch (error) {
-        // Carry the error OBJECT (not just its message): a failed draft may already have paid for
-        // a response, and that usage rides on the error.
-        return { ok: false as const, message: error instanceof Error ? error.message : String(error), billed: partialStats(error) }
+        // Carry the error OBJECT (not just its message): the retry chain folds every attempt's
+        // tokens and attempt count into it, and a response-less failure still knows its attempts.
+        return { ok: false as const, message: error instanceof Error ? error.message : String(error), billed: partialStats(error), attempts: requestAttempts(error) }
       }
     }))
     const survivors: Array<{ attempt: number; text: string; usage: UsageStats; truncated: boolean }> = []
@@ -421,12 +421,19 @@ export function apply(ctx: Context, config: Config = {}): void {
     attempts.forEach((attempt, index) => {
       if (attempt.ok) {
         survivors.push({ attempt: index + 1, text: attempt.text, usage: attempt.usage, truncated: attempt.truncated })
-        addUsage(generation, attempt.usage)
+        // mergeRunStats (not addUsage) so a survivor whose earlier retry attempt lost its usage
+        // keeps the usageIncomplete flag it carries.
+        mergeRunStats(generation, attempt.usage)
       } else {
         failures.push('draft ' + (index + 1) + ': ' + attempt.message)
+        if (attempt.billed !== undefined) mergeRunStats(generation, attempt.billed)
+        else {
+          // No usage carrier at all: the attempt count the transport knows about still counts.
+          generation.attempts += attempt.attempts
+          generation.retries += Math.max(0, attempt.attempts - 1)
+        }
         // A draft whose tokens never came back makes the total a floor, not a measurement.
-        if (attempt.billed === undefined) unknownDrafts += 1
-        else mergeRunStats(generation, attempt.billed)
+        if (attempt.billed === undefined || attempt.billed.usageIncomplete === true) unknownDrafts += 1
       }
     })
     if (survivors.length < MIN_BEST_OF_N) failWithUsage(new Error('llm-verifier: best-of-n produced ' + survivors.length + ' usable draft(s) out of ' + count + '; at least ' + MIN_BEST_OF_N + ' are required to choose between them' + (failures.length === 0 ? '' : ' — ' + failures.join('; '))))

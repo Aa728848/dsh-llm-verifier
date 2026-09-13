@@ -299,9 +299,10 @@ export class VerifierEngine {
     await Promise.all(runners)
     if (failed) {
       const partial = partialStats(failure)
-      // All workers have settled, so the accumulator is final: price the known tokens before
-      // the failure row records them.
-      if (partial !== undefined) this.finishStats(partial)
+      // All workers have settled, so the accumulator is final. partialStats returns a normalized
+      // COPY, so pricing it in place would be discarded: price it and write it back onto the
+      // error the failure row actually reads.
+      if (partial !== undefined) attachUsage(failure, this.finishStats(partial))
       throw failure
     }
     return results

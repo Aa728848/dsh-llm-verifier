@@ -241,6 +241,30 @@ describe('verifier_best_of_n', () => {
     // Draft 1 was generated and billed; the failure must not erase it.
     expect(partial?.calls ?? 0).toBeGreaterThanOrEqual(1)
     expect(partial?.inputTokens ?? 0).toBeGreaterThan(0)
+    // Both failed drafts still made one request each, and the survivor one: 3 attempts in total.
+    expect(partial?.attempts).toBe(3)
+  })
+
+  it('keeps a survivor usageIncomplete when an earlier attempt lost its usage', async () => {
+    const draftAttempts = new Map<number, number>()
+    const stream = (options: { messages: readonly unknown[] }) => {
+      const prompt = promptText(options)
+      const draft = /Draft (\d+) of \d+\./.exec(prompt)
+      if (draft !== null) {
+        const number = Number(draft[1])
+        const seen = (draftAttempts.get(number) ?? 0) + 1
+        draftAttempts.set(number, seen)
+        if (number === 1 && seen === 1) return (async function* () { throw new Error('network hiccup') })()
+        return textStream('draft ' + number + ' body')
+      }
+      return textStream('reasoning\n<score_A> A </score_A>\n<score_B> T </score_B>')
+    }
+    const definition = assemble({ ...JUDGE, maxRetries: 2, retryBaseDelayMs: 1 }, { stream, sessions: [{ id: 'session-1', createdAt: 1 }] }).tools.get('verifier_best_of_n')!
+    const result = await definition.execute({ task: 'do the thing', n: 3 }, exec) as Record<string, any>
+    expect(result.failed).toBe(0)
+    // Draft 1's first attempt failed with unknown usage; the surviving attempt's tokens are a
+    // floor, and addUsage() used to drop that flag.
+    expect(result.stats.usageIncomplete).toBe(true)
   })
 
   it('keeps generation and tournament usage when the baseline comparison fails', async () => {

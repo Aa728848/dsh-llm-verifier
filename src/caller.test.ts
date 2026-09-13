@@ -164,6 +164,36 @@ describe('automatic verifier scoring', () => {
     expect(result.usage.usageIncomplete).toBeUndefined()
   })
 
+  it('keeps every attempt billed tokens when the retry chain finally fails', async () => {
+    const cfg = config(async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'partial' }
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 0 } }
+      yield { type: 'finish', reason: { kind: 'error', failure: { message: 'rate limited upstream' } } }
+    }, vi.fn(), ctx(), { maxRetries: 2, retryBaseDelayMs: 1 })
+    const error = await callVerifier(cfg, 'prompt').catch(reason => reason)
+    // Three billable attempts; the last response alone would report only 10.
+    expect(partialUsage(error)?.inputTokens).toBe(30)
+    expect(requestAttempts(error)).toBe(3)
+  })
+
+  it('keeps the tokens spent before a cancel during the retry wait', async () => {
+    const controller = new AbortController()
+    const cfg = config(async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'partial' }
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 0 } }
+      yield { type: 'finish', reason: { kind: 'error', failure: { message: 'rate limited upstream' } } }
+    }, vi.fn(), ctx(), { maxRetries: 3, retryBaseDelayMs: 5_000 })
+    const pending = callVerifier(cfg, 'prompt', controller.signal).catch(reason => reason)
+    await new Promise(resolve => setTimeout(resolve, 3))
+    controller.abort(new Error('cancelled during backoff'))
+    const error = await pending
+    // The first attempt's response was billed before the wait; cancelling must not erase it.
+    expect(partialUsage(error)?.inputTokens).toBe(10)
+    expect(requestAttempts(error)).toBe(1)
+  })
+
   it('keeps the attempt count when a request is cancelled while it runs', async () => {
     const controller = new AbortController()
     const cfg = config(async function* (options: any) {
