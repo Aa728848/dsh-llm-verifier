@@ -237,6 +237,48 @@ export declare const zh: {
     'field.captureDecisions.help': string;
     'field.autoVerifySubagents.title': string;
     'field.autoVerifySubagents.help': string;
+    'section.routing': string;
+    'section.budgets': string;
+    'section.storage': string;
+    'settings.advancedBadge': string;
+    'settings.expandAll': string;
+    'settings.collapseAll': string;
+    'settings.sectionExpand': string;
+    'settings.sectionCollapse': string;
+    'settings.jumpToIssue': string;
+    'settings.invalid.summary': string;
+    'settings.invalid.required': string;
+    'settings.invalid.range': string;
+    'settings.invalid.min': string;
+    'settings.invalid.max': string;
+    'settings.invalid.integer': string;
+    'settings.invalid.cacheDirRelative': string;
+    'settings.invalid.routeBudget': string;
+    'settings.fieldReset': string;
+    'settings.fieldChanged': string;
+    'settings.recommend': string;
+    'settings.profile.title': string;
+    'settings.profile.hint': string;
+    'settings.profile.custom': string;
+    'settings.profile.balanced': string;
+    'settings.profile.strict': string;
+    'settings.profile.frugal': string;
+    'settings.profile.toolsOnly': string;
+    'settings.summary.line': string;
+    'settings.summary.manual': string;
+    'settings.summary.judges': string;
+    'settings.summary.on': string;
+    'settings.summary.off': string;
+    'settings.summary.manualShort': string;
+    'settings.summary.mode': string;
+    'settings.summary.routing': string;
+    'settings.summary.budgets': string;
+    'settings.summary.storage': string;
+    'settings.summary.execution': string;
+    'settings.unit.ms': string;
+    'settings.unit.chars': string;
+    'settings.unit.calls': string;
+    'settings.unit.tokens': string;
 };
 export type I18nDict = typeof zh;
 export declare const en: I18nDict;
@@ -480,6 +522,48 @@ export declare const dictionaries: {
         'field.captureDecisions.help': string;
         'field.autoVerifySubagents.title': string;
         'field.autoVerifySubagents.help': string;
+        'section.routing': string;
+        'section.budgets': string;
+        'section.storage': string;
+        'settings.advancedBadge': string;
+        'settings.expandAll': string;
+        'settings.collapseAll': string;
+        'settings.sectionExpand': string;
+        'settings.sectionCollapse': string;
+        'settings.jumpToIssue': string;
+        'settings.invalid.summary': string;
+        'settings.invalid.required': string;
+        'settings.invalid.range': string;
+        'settings.invalid.min': string;
+        'settings.invalid.max': string;
+        'settings.invalid.integer': string;
+        'settings.invalid.cacheDirRelative': string;
+        'settings.invalid.routeBudget': string;
+        'settings.fieldReset': string;
+        'settings.fieldChanged': string;
+        'settings.recommend': string;
+        'settings.profile.title': string;
+        'settings.profile.hint': string;
+        'settings.profile.custom': string;
+        'settings.profile.balanced': string;
+        'settings.profile.strict': string;
+        'settings.profile.frugal': string;
+        'settings.profile.toolsOnly': string;
+        'settings.summary.line': string;
+        'settings.summary.manual': string;
+        'settings.summary.judges': string;
+        'settings.summary.on': string;
+        'settings.summary.off': string;
+        'settings.summary.manualShort': string;
+        'settings.summary.mode': string;
+        'settings.summary.routing': string;
+        'settings.summary.budgets': string;
+        'settings.summary.storage': string;
+        'settings.summary.execution': string;
+        'settings.unit.ms': string;
+        'settings.unit.chars': string;
+        'settings.unit.calls': string;
+        'settings.unit.tokens': string;
     };
     en: {
         'settings.title': string;
@@ -720,6 +804,48 @@ export declare const dictionaries: {
         'field.captureDecisions.help': string;
         'field.autoVerifySubagents.title': string;
         'field.autoVerifySubagents.help': string;
+        'section.routing': string;
+        'section.budgets': string;
+        'section.storage': string;
+        'settings.advancedBadge': string;
+        'settings.expandAll': string;
+        'settings.collapseAll': string;
+        'settings.sectionExpand': string;
+        'settings.sectionCollapse': string;
+        'settings.jumpToIssue': string;
+        'settings.invalid.summary': string;
+        'settings.invalid.required': string;
+        'settings.invalid.range': string;
+        'settings.invalid.min': string;
+        'settings.invalid.max': string;
+        'settings.invalid.integer': string;
+        'settings.invalid.cacheDirRelative': string;
+        'settings.invalid.routeBudget': string;
+        'settings.fieldReset': string;
+        'settings.fieldChanged': string;
+        'settings.recommend': string;
+        'settings.profile.title': string;
+        'settings.profile.hint': string;
+        'settings.profile.custom': string;
+        'settings.profile.balanced': string;
+        'settings.profile.strict': string;
+        'settings.profile.frugal': string;
+        'settings.profile.toolsOnly': string;
+        'settings.summary.line': string;
+        'settings.summary.manual': string;
+        'settings.summary.judges': string;
+        'settings.summary.on': string;
+        'settings.summary.off': string;
+        'settings.summary.manualShort': string;
+        'settings.summary.mode': string;
+        'settings.summary.routing': string;
+        'settings.summary.budgets': string;
+        'settings.summary.storage': string;
+        'settings.summary.execution': string;
+        'settings.unit.ms': string;
+        'settings.unit.chars': string;
+        'settings.unit.calls': string;
+        'settings.unit.tokens': string;
     };
 };
 export declare const toolLabels: Record<'zh' | 'en', Record<string, string>>;
@@ -755,6 +881,20 @@ export declare function resolveCacheDirOnSave(draft: string | undefined | null, 
  * so identity comparison is never enough.
  */
 export declare function sameSettingValue(left: unknown, right: unknown): boolean;
+export interface SectionForSaveOptions {
+    /**
+     * Build a complete replacement layer (default) instead of a patch to merge.
+     *
+     * The two host write modes are not interchangeable. `settings.replace`
+     * re-inherits every key the caller leaves out, so omitting a field *undoes*
+     * its override. `settings.update` merges the patch into the stored section,
+     * where an omitted key simply keeps its old value — the stored
+     * `autoVerifyMode: 'strict'` survived every save of a draft that read
+     * 'smart', because 'smart' equalled the base and was therefore pruned.
+     * A client that can only merge must pin every draft value instead.
+     */
+    reInheritBase?: boolean;
+}
 /**
  * Build the user layer for one settings save.
  *
@@ -772,8 +912,12 @@ export declare function sameSettingValue(left: unknown, right: unknown): boolean
  *
  * A host that reports no `base` cannot be pruned against and keeps the old
  * write-everything behavior.
+ *
+ * Dropping a key only clears it when the caller writes the result with
+ * `replace`; see {@link SectionForSaveOptions.reInheritBase} for the merge
+ * fallback (`reInheritBase: false`), which pins the draft instead.
  */
-export declare function sectionForSave(user: Record<string, unknown>, draft: Record<string, unknown>, base: Record<string, unknown> | undefined): Record<string, unknown>;
+export declare function sectionForSave(user: Record<string, unknown>, draft: Record<string, unknown>, base: Record<string, unknown> | undefined, options?: SectionForSaveOptions): Record<string, unknown>;
 /**
  * Criteria per comparison the worst-case estimate assumes.
  *

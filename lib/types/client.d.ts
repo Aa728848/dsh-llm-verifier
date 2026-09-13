@@ -1,52 +1,8 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
 import type { ModelProviderGroup, SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client';
 import { zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage, compact, money, duration, dateTime, type I18nDict, type VerdictSummary, resolveCacheDirOnSave, sameSettingValue, sectionForSave, WORST_CASE_ROUTE_CALLS_PER_JUDGE, WORST_CASE_FINAL_CALLS_PER_JUDGE, WORST_CASE_TASK_PER_JUDGE, WORST_CASE_SESSION_PER_JUDGE, computeJudgeCount, computeWorstCaseBudget, type BudgetWarningState, evaluateBudgetWarning, isVerdictFailed, formatPercentage, formatVerdictDetails } from './client-i18n.ts';
-import { type ExtraJudgeDraft } from './client-judges.ts';
+export type { Values } from './client-fields.ts';
 export { zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage, compact, money, duration, dateTime, type I18nDict, type VerdictSummary, resolveCacheDirOnSave, sameSettingValue, sectionForSave, WORST_CASE_ROUTE_CALLS_PER_JUDGE, WORST_CASE_FINAL_CALLS_PER_JUDGE, WORST_CASE_TASK_PER_JUDGE, WORST_CASE_SESSION_PER_JUDGE, computeJudgeCount, computeWorstCaseBudget, type BudgetWarningState, evaluateBudgetWarning, isVerdictFailed, formatPercentage, formatVerdictDetails, };
-export interface Values {
-    enabled: boolean;
-    captureDecisions: boolean;
-    autoProcessSelection: boolean;
-    autoVerifyMode: 'manual' | 'smart' | 'strict';
-    autoVerifyThreshold: number;
-    autoVerifyRepeats: number;
-    autoTrackRepeats: number;
-    autoVerifyFinalRepeats: number;
-    autoVerifyMinToolCalls: number;
-    autoVerifyMaxChars: number;
-    autoVerifyMaxPerTask: number;
-    autoVerifyMaxPerSession: number;
-    autoRouteSemantic: boolean;
-    autoRouteMinConfidence: number;
-    autoRouteMaxCandidates: number;
-    autoRouteMaxPerTask: number;
-    autoRouteMaxPerSession: number;
-    autoTrackCompletionThreshold: number;
-    autoRouteMaxItemChars: number;
-    autoRouteMaxInputChars: number;
-    autoMaxModelCallsPerTask: number;
-    autoMaxModelCallsPerSession: number;
-    autoVerifyTeamTasks: boolean;
-    autoVerifyPlanMode: boolean;
-    criteriaPreset: 'coding' | 'debug' | 'research' | 'ops' | 'writing' | 'custom';
-    criteriaFile: string;
-    provider: string;
-    model: string;
-    reasoningEffort?: string;
-    maxTokens: number;
-    temperature: number;
-    label?: string;
-    maxConcurrency: number;
-    maxRetries: number;
-    retryBaseDelayMs: number;
-    timeoutMs: number;
-    cacheDir: string;
-    cacheMaxEntries: number;
-    estimatedInputUsdPerMillion: number;
-    estimatedOutputUsdPerMillion: number;
-    autoVerifySubagents: boolean;
-    extraJudges: ExtraJudgeDraft[];
-}
 export interface Loaded {
     groups: readonly ModelProviderGroup[];
     settings: SettingsNamespaceView;
@@ -133,7 +89,23 @@ interface VerifierRemote {
                 message: string;
             };
         }>;
+        /**
+         * Merge a patch into the stored section. Absent keys keep their stored
+         * value, so this cannot undo an override.
+         */
         update(ns: string, patch: Record<string, unknown>, expectedRevision: number | undefined): Promise<{
+            ok: boolean;
+            value: SettingsNamespaceView;
+            error: {
+                message: string;
+            };
+        }>;
+        /**
+         * Replace the stored section wholesale, so keys left out re-inherit the
+         * composition base. Optional: a host without it falls back to 'update'
+         * with every draft value pinned.
+         */
+        replace?(ns: string, section: Record<string, unknown>, expectedRevision: number | undefined): Promise<{
             ok: boolean;
             value: SettingsNamespaceView;
             error: {

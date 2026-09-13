@@ -24,6 +24,32 @@ import {
   removeExtraJudge,
   serializeExtraJudges,
 } from './client-judges.ts'
+import {
+  FIELDS,
+  PROFILES,
+  SECTIONS,
+  acceptsNumber,
+  activeProfile,
+  applyProfile,
+  isFieldChanged,
+  issueMap,
+  issueMessageKey,
+  recommendedBudgets,
+  resetField,
+  sectionSummary,
+  renderSections,
+  textIssue,
+  validateValues,
+  valuesFromView,
+  type FieldIssue,
+  type FieldSpec,
+  type Format,
+  type ProfileId,
+  type Translate,
+  type Values,
+} from './client-fields.ts'
+
+export type { Values } from './client-fields.ts'
 
 export {
   zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage, compact, money, duration, dateTime, type I18nDict,
@@ -36,7 +62,6 @@ const NS = 'llm-verifier'
 interface DecisionCallView { label: string; channel: string; prompt: string; output: string; score?: number }
 interface DecisionRecordView { id: string; toolName: string; phase: string; provider: string; model: string; startedAt: number; calls: DecisionCallView[] }
 
-export interface Values { enabled: boolean; captureDecisions: boolean; autoProcessSelection: boolean; autoVerifyMode: 'manual'|'smart'|'strict'; autoVerifyThreshold: number; autoVerifyRepeats: number; autoTrackRepeats: number; autoVerifyFinalRepeats: number; autoVerifyMinToolCalls: number; autoVerifyMaxChars: number; autoVerifyMaxPerTask: number; autoVerifyMaxPerSession: number; autoRouteSemantic: boolean; autoRouteMinConfidence: number; autoRouteMaxCandidates: number; autoRouteMaxPerTask: number; autoRouteMaxPerSession: number; autoTrackCompletionThreshold: number; autoRouteMaxItemChars: number; autoRouteMaxInputChars: number; autoMaxModelCallsPerTask: number; autoMaxModelCallsPerSession: number; autoVerifyTeamTasks: boolean; autoVerifyPlanMode: boolean; criteriaPreset: 'coding'|'debug'|'research'|'ops'|'writing'|'custom'; criteriaFile: string; provider: string; model: string; reasoningEffort?: string; maxTokens: number; temperature: number; label?: string; maxConcurrency: number; maxRetries: number; retryBaseDelayMs: number; timeoutMs: number; cacheDir: string; cacheMaxEntries: number; estimatedInputUsdPerMillion: number; estimatedOutputUsdPerMillion: number; autoVerifySubagents: boolean; extraJudges: ExtraJudgeDraft[] }
 export interface Loaded { groups: readonly ModelProviderGroup[]; settings: SettingsNamespaceView; writable: boolean; failures: string[] }
 export interface RunStats { calls: number; attempts: number; retries: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningTokens: number; cacheHits: number; cacheMisses: number; estimatedCostUsd: number; topLogprobScores: number; explicitTagScores: number; usageIncomplete?: boolean; channelFallbacks?: number }
 /** S05-A routing-cycle observation, as persisted on the record (all fields optional/lenient). */
@@ -55,21 +80,39 @@ interface VerifierRemote {
       error: { message: string }
     }>
   }
-  settings: {
-    describe(): Promise<{
-      ok: boolean
-      value: { writable: boolean; namespaces: readonly SettingsNamespaceView[] }
-      error: { message: string }
-    }>
-    update(
-      ns: string,
-      patch: Record<string, unknown>,
-      expectedRevision: number | undefined,
-    ): Promise<{
-      ok: boolean
-      value: SettingsNamespaceView
-      error: { message: string }
-    }>
+settings: {
+      describe(): Promise<{
+        ok: boolean
+        value: { writable: boolean; namespaces: readonly SettingsNamespaceView[] }
+        error: { message: string }
+      }>
+      /**
+       * Merge a patch into the stored section. Absent keys keep their stored
+       * value, so this cannot undo an override.
+       */
+      update(
+        ns: string,
+        patch: Record<string, unknown>,
+        expectedRevision: number | undefined,
+      ): Promise<{
+        ok: boolean
+        value: SettingsNamespaceView
+        error: { message: string }
+      }>
+      /**
+       * Replace the stored section wholesale, so keys left out re-inherit the
+       * composition base. Optional: a host without it falls back to 'update'
+       * with every draft value pinned.
+       */
+      replace?(
+        ns: string,
+        section: Record<string, unknown>,
+        expectedRevision: number | undefined,
+      ): Promise<{
+        ok: boolean
+        value: SettingsNamespaceView
+        error: { message: string }
+      }>
   }
 }
 
@@ -89,22 +132,35 @@ const shell: React.CSSProperties = { width: '100%', maxWidth: 720, display: 'fle
 const settingsHeading: React.CSSProperties = { margin: 0, fontSize: 16, fontWeight: 500, lineHeight: '24px', color: 'var(--dsw-alias-label-primary)' }
 const settingsIntro: React.CSSProperties = { margin: 0, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-tertiary)' }
 const group: React.CSSProperties = { width: '100%', display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--dsw-alias-border-l2)' }
-const groupTitle: React.CSSProperties = { margin: 0, padding: '18px 0 8px', fontSize: 14, fontWeight: 500, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' }
-const row: React.CSSProperties = { minHeight: 64, display: 'grid', gridTemplateColumns: 'minmax(180px, 1fr) minmax(230px, 288px)', gap: 24, alignItems: 'center', padding: '12px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)' }
+const sectionTitle: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '18px 0 8px', border: 0, background: 'transparent', cursor: 'pointer', textAlign: 'left', font: 'inherit', color: 'var(--dsw-alias-label-primary)' }
+const sectionHeadingStyle: React.CSSProperties = { fontSize: 14, fontWeight: 500, lineHeight: '22px' }
+const sectionSummaryStyle: React.CSSProperties = { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: '1 1 auto' }
+const badgeStyle: React.CSSProperties = { flex: '0 0 auto', padding: '0 6px', borderRadius: 999, fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)', border: '1px solid var(--dsw-alias-border-l2)' }
+const linkButton: React.CSSProperties = { border: 0, background: 'transparent', padding: 0, font: 'inherit', fontSize: 12, lineHeight: '18px', cursor: 'pointer', color: 'var(--dsw-alias-brand-primary, #4f8cff)' }
+const row: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px 24px', minHeight: 56, padding: '10px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)' }
+const labelCell: React.CSSProperties = { flex: '1 1 220px', minWidth: 0 }
+const controlCell: React.CSSProperties = { flex: '0 1 268px', minWidth: 170, display: 'flex', justifyContent: 'flex-end' }
+const fieldTitle: React.CSSProperties = { fontSize: 14, fontWeight: 400, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' }
+const fieldHelp: React.CSSProperties = { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)', marginTop: 2 }
+const fullLine: React.CSSProperties = { flex: '1 1 100%', margin: '0 0 2px', fontSize: 12, lineHeight: '18px' }
+const unitStyle: React.CSSProperties = { flex: '0 0 auto', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }
+const sliderStyle: React.CSSProperties = { width: '100%', margin: 0, accentColor: 'var(--dsw-alias-brand-primary, #4f8cff)' }
+const toolbarStyle: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '10px 0', borderTop: '1px solid var(--dsw-alias-border-l2)' }
+const summaryLineStyle: React.CSSProperties = { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' }
+const stickyBar: React.CSSProperties = { position: 'sticky', bottom: 0, zIndex: 5, display: 'flex', flexDirection: 'column', gap: 6, padding: '10px 0 12px', borderTop: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-alias-bg-module, #171925)', boxShadow: '0 -10px 24px rgba(0,0,0,.18)' }
+const statusStyle: React.CSSProperties = { fontSize: 12, lineHeight: '18px', display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'wrap' }
 const selectStyle: React.CSSProperties = { boxSizing: 'border-box', width: '100%', height: 36, padding: '0 34px 0 12px', borderRadius: 8, color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-input)', border: '1px solid var(--dsw-alias-border-l2)', font: 'inherit', fontSize: 14, lineHeight: '22px', outline: 'none' }
-const toggleStyle = (enabled: boolean): React.CSSProperties => ({ position: 'relative', justifySelf: 'end', width: 40, height: 22, padding: 0, border: 0, borderRadius: 999, cursor: 'pointer', transition: 'background .15s ease', background: enabled ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-bg-input)' })
+const toggleStyle = (enabled: boolean): React.CSSProperties => ({ position: 'relative', flex: '0 0 auto', width: 40, height: 22, padding: 0, border: 0, borderRadius: 999, cursor: 'pointer', transition: 'background .15s ease', background: enabled ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-bg-input)' })
 const toggleThumbStyle = (enabled: boolean): React.CSSProperties => ({ position: 'absolute', top: 3, left: enabled ? 21 : 3, width: 16, height: 16, borderRadius: '50%', background: 'var(--dsw-static-neutral-00, #fff)', boxShadow: '0 1px 3px rgba(0,0,0,.28)', transition: 'left .15s ease' })
 const dashboardCard: React.CSSProperties = { border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.13))', background: 'color-mix(in srgb, var(--dsw-alias-bg-module, #171925) 88%, transparent)', borderRadius: 16, boxShadow: '0 12px 36px rgba(0,0,0,.12)' }
 const muted: React.CSSProperties = { color: 'var(--dsw-text-secondary)', fontSize: 12 }
 const toolColors: Record<string, string> = { verifier_route_classify: '#d97706', verifier_compare: '#4f8cff', verifier_select: '#8b6df6', verifier_track: '#2fc5c9', verifier_best_of_n: '#e2569b', verifier_current_session: '#f5a524' }
 
 function record(value: unknown): Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {} }
-function values(view: SettingsNamespaceView): Values { const v=record(view.value); const mode=v.autoVerifyMode==='manual'||v.autoVerifyMode==='strict'?v.autoVerifyMode:'smart'; return { enabled:v.enabled!==false,captureDecisions:v.captureDecisions!==false,autoProcessSelection:v.autoProcessSelection===true,autoVerifyMode:mode,autoVerifyThreshold:Number(v.autoVerifyThreshold??.65),autoVerifyRepeats:Number(v.autoVerifyRepeats??1),autoTrackRepeats:Number(v.autoTrackRepeats??3),autoVerifyFinalRepeats:Number(v.autoVerifyFinalRepeats??2),autoVerifyMinToolCalls:Number(v.autoVerifyMinToolCalls??3),autoVerifyMaxChars:Number(v.autoVerifyMaxChars??80000),autoVerifyMaxPerTask:Number(v.autoVerifyMaxPerTask??2),autoVerifyMaxPerSession:Number(v.autoVerifyMaxPerSession??8),autoRouteSemantic:v.autoRouteSemantic!==false,autoRouteMinConfidence:Number(v.autoRouteMinConfidence??.9),autoRouteMaxCandidates:Number(v.autoRouteMaxCandidates??8),autoRouteMaxPerTask:Number(v.autoRouteMaxPerTask??2),autoRouteMaxPerSession:Number(v.autoRouteMaxPerSession??8),autoTrackCompletionThreshold:Number(v.autoTrackCompletionThreshold??.684),autoRouteMaxItemChars:Number(v.autoRouteMaxItemChars??20000),autoRouteMaxInputChars:Number(v.autoRouteMaxInputChars??60000),autoMaxModelCallsPerTask:Number(v.autoMaxModelCallsPerTask??96),autoMaxModelCallsPerSession:Number(v.autoMaxModelCallsPerSession??240),autoVerifyTeamTasks:v.autoVerifyTeamTasks!==false,autoVerifyPlanMode:v.autoVerifyPlanMode!==false,criteriaPreset:(v.criteriaPreset==='debug'||v.criteriaPreset==='research'||v.criteriaPreset==='ops'||v.criteriaPreset==='writing'||v.criteriaPreset==='custom')?v.criteriaPreset:'coding',criteriaFile:typeof v.criteriaFile==='string'?v.criteriaFile.trim():'',provider:String(v.provider??''),model:String(v.model??''),...(typeof v.reasoningEffort==='string'?{reasoningEffort:v.reasoningEffort}:{}),maxTokens:Number(v.maxTokens??32768),temperature:Number(v.temperature??0.2),...(typeof v.label==='string'&&v.label.trim()?{label:v.label.trim()}:{}),maxConcurrency:Number(v.maxConcurrency??8),maxRetries:Number(v.maxRetries??3),retryBaseDelayMs:Number(v.retryBaseDelayMs??500),timeoutMs:Number(v.timeoutMs??300000),cacheDir:typeof v.cacheDir==='string'&&v.cacheDir.trim()?v.cacheDir.trim():'verifier',cacheMaxEntries:Number(v.cacheMaxEntries??10000),estimatedInputUsdPerMillion:Number(v.estimatedInputUsdPerMillion??0),estimatedOutputUsdPerMillion:Number(v.estimatedOutputUsdPerMillion??0),autoVerifySubagents:v.autoVerifySubagents===true,extraJudges:normalizeExtraJudges(v.extraJudges) } }
+function values(view: SettingsNamespaceView): Values { return valuesFromView(record(view.value)) }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 /** The endpoint answered but rejected the request: a transport fallback would only repeat it. */
 class EndpointError extends Error {}
-function Label({title,help}:{title:string;help:string}) { return <div style={{minWidth:0}}><div style={{fontSize:14,fontWeight:400,lineHeight:'22px',color:'var(--dsw-alias-label-primary)'}}>{title}</div><div style={{fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-label-tertiary)',marginTop:2}}>{help}</div></div> }
-function GroupTitle({children}:{children:React.ReactNode}) { return <h3 style={groupTitle}>{children}</h3> }
 function startOfRange(days: number): number { const date = new Date(); date.setHours(0,0,0,0); date.setDate(date.getDate() - days + 1); return date.getTime() }
 function endOfToday(): number { const date = new Date(); date.setHours(0,0,0,0); date.setDate(date.getDate() + 1); return date.getTime() }
 
@@ -112,6 +168,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
   const lang = useLanguage()
   const t = dictionaries[lang]
   const [loaded,setLoaded]=useState<Loaded|null>(null); const [draft,setDraft]=useState<Values|null>(null); const [busy,setBusy]=useState(false); const [error,setError]=useState<string|null>(null); const [saved,setSaved]=useState(false); const [editing,setEditing]=useState<Record<string,string>>({})
+  const [openSections,setOpenSections]=useState<Record<string,boolean>>(()=>Object.fromEntries(SECTIONS.map(section=>[section.id,section.open])))
   const load=async()=>{setError(null);try{const [m,s]=await Promise.all([remote.session.modelCatalog(),remote.settings.describe()]);if(!m.ok)throw new Error(m.error.message);if(!s.ok)throw new Error(s.error.message);const view=s.value.namespaces.find((x:SettingsNamespaceView)=>x.ns===NS);if(!view)throw new Error(t['settings.nsUnregistered']);const next={groups:m.value.groups,settings:view,writable:s.value.writable,failures:m.value.failures.map((f: { id?: string; provider?: string; name?: string; message: string })=>(f.id??f.provider??f.name??'unknown')+': '+f.message)};setLoaded(next);setDraft(values(view));setEditing({})}catch(e){setError(message(e))}}
   useEffect(()=>{void load()},[])
   const dirty=useMemo(()=>loaded!==null&&draft!==null&&!sameSettingValue(draft,values(loaded.settings)),[loaded,draft])
@@ -186,6 +243,10 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
       criteria,
     )
   }, [draft?.autoVerifyMode, draft?.criteriaPreset, draft?.extraJudges.length, draft?.autoMaxModelCallsPerTask, draft?.autoMaxModelCallsPerSession])
+  const translate = useMemo<Translate>(() => (key: string) => (t as unknown as Record<string, string | undefined>)[key], [t])
+  const format = useMemo<Format>(() => (key: string, params?: Record<string, string | number>) => tFormat(translate(key) ?? key, params), [translate])
+  const issues = useMemo(() => (draft ? validateValues(draft) : []), [draft])
+  const issuesByField = useMemo(() => issueMap(issues), [issues])
   // The saved section holds only real overrides: a draft field equal to the
   // composition base is dropped so a later plugin default still reaches this
   // install (see sectionForSave).
@@ -204,154 +265,303 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
         cacheDir:resolveCacheDirOnSave(draft.cacheDir,values(loaded.settings).cacheDir),
       }
       const base=loaded.settings.base===undefined?undefined:record(loaded.settings.base)
-      const section=sectionForSave(record(loaded.settings.user),editable,base)
-      const res=await remote.settings.update(NS,section as never,loaded.settings.revision)
+      // "Restore default" only works through a wholesale replace: the host's
+      // update() merges a patch into the stored section, so a key we leave out
+      // to re-inherit the base keeps its old override instead. Prefer replace
+      // and pin every draft value when only update() is available.
+      const replaceSettings=remote.settings.replace
+      const canReplace=typeof replaceSettings==='function'
+      const section=sectionForSave(record(loaded.settings.user),editable,base,{reInheritBase:canReplace})
+      const res=canReplace
+        ?await replaceSettings.call(remote.settings,NS,section as never,loaded.settings.revision)
+        :await remote.settings.update(NS,section as never,loaded.settings.revision)
       if(!res.ok)throw new Error(res.error.message)
       setLoaded(v=>v?{...v,settings:res.value}:v);setDraft(values(res.value));setEditing({});setSaved(true)
     }catch(e){setError(message(e))}finally{setBusy(false)}
   }
   if(!loaded||!draft)return <div style={shell}><h2 style={settingsHeading}>{t['settings.title']}</h2><p style={settingsIntro}>{error??t['settings.loading']}</p>{error&&<div><Button variant="outline" onClick={()=>void load()}>{t['settings.retry']}</Button></div>}</div>
-  // Fractional settings are typed character by character, so the raw text is
-  // kept while the field has focus: a controlled type="number" input rewrites
-  // "0." back to "0" and swallows the decimal point. The parsed value is
-  // committed on every keystroke that parses, and blur restores canonical text.
-  const numeric=(key:keyof Values,min=0)=><Input
-    style={{width:'100%',height:36,borderRadius:8}}
-    type="text"
-    inputMode="decimal"
-    disabled={busy}
-    aria-label={(t[('field.'+key+'.title') as keyof I18nDict] as string|undefined)??String(key)}
-    value={editing[key]??String(draft[key]??'')}
-    onChange={e=>{const raw=e.target.value;setEditing(current=>current[key]===raw?current:{...current,[key]:raw});const parsed=Number(raw);if(raw.trim()!==''&&Number.isFinite(parsed)&&parsed>=min)patch(key,parsed as never)}}
-    onBlur={()=>setEditing(current=>{if(!(key in current))return current;const next={...current};delete next[key];return next})}
-  />
-  const textField=(key:keyof Values,placeholder?:string)=><Input
-    style={{width:'100%',height:36,borderRadius:8}}
-    type="text"
-    disabled={busy}
-    placeholder={placeholder}
-    aria-label={(t[('field.'+key+'.title') as keyof I18nDict] as string|undefined)??String(key)}
-    value={String(draft[key]??'')}
-    onChange={e=>patch(key,e.target.value as never)}
-  />
+  const criteriaCount = draft.criteriaPreset === 'custom' ? WORST_CASE_CRITERIA_PER_COMPARISON : CRITERIA_PRESETS[draft.criteriaPreset].length
+  const issueText = (issue: FieldIssue): string => tFormat(translate(issueMessageKey(issue)) ?? issueMessageKey(issue), issue.params)
+  const helpFor = (field: FieldSpec): string =>
+    field.key === 'enabled'
+      ? translate(draft.enabled ? field.helpKey : (field.helpKeyOff ?? field.helpKey)) ?? ''
+      : translate(field.helpKey) ?? ''
+  const inputAria = (field: FieldSpec): string => translate(field.titleKey) ?? String(field.key)
+  const setSectionOpen = (id: string, open: boolean) => setOpenSections(current => ({ ...current, [id]: open }))
+  const expandAll = () => setOpenSections(Object.fromEntries(SECTIONS.map(section => [section.id, true])))
+  const collapseAll = () => setOpenSections(Object.fromEntries(SECTIONS.map(section => [section.id, false])))
+  const jumpTo = (key: keyof Values) => {
+    const field = FIELDS.find(candidate => candidate.key === key)
+    if (!field) return
+    setSectionOpen(field.section, true)
+    window.requestAnimationFrame(() => {
+      const node = document.querySelector('[data-field="' + String(key) + '"]')
+      if (!(node instanceof HTMLElement)) return
+      node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      const focusable = node.querySelector('input, select, button, textarea')
+      if (focusable instanceof HTMLElement) focusable.focus({ preventScroll: true })
+    })
+  }
+  const resetOne = (field: FieldSpec) => {
+    setSaved(false)
+    setEditing(current => { if (!(field.key in current)) return current; const next = { ...current }; delete next[field.key]; return next })
+    setDraft(current => (current ? resetField(current, field.key) : current))
+  }
+  const fillRecommended = () => {
+    setSaved(false)
+    setDraft(current => (current ? { ...current, ...recommendedBudgets(computeJudgeCount(current.extraJudges.length), criteriaCount) } : current))
+  }
+  const messageFor = (field: FieldSpec): FieldIssue | null => {
+    const issue = issuesByField.get(field.key)
+    if (issue) return issue
+    if (field.kind === 'number' && editing[field.key] !== undefined) return textIssue(field, editing[field.key])
+    return null
+  }
+  const renderNumber = (field: FieldSpec) => {
+    const key = field.key
+    const current = Number(draft[key])
+    return <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Input
+          style={{ flex: '1 1 auto', minWidth: 0, height: 36, borderRadius: 8 }}
+          type="text"
+          inputMode="decimal"
+          disabled={busy}
+          aria-label={inputAria(field)}
+          aria-invalid={messageFor(field) ? true : undefined}
+          value={editing[key] ?? String(draft[key] ?? '')}
+          onChange={event => {
+            const raw = event.target.value
+            setEditing(state => (state[key] === raw ? state : { ...state, [key]: raw }))
+            if (acceptsNumber(field, raw)) patch(key, Number(raw.trim()) as never)
+          }}
+          onBlur={() => setEditing(state => { if (!(key in state)) return state; const next = { ...state }; delete next[key]; return next })}
+        />
+        {field.unitKey && <span style={unitStyle}>{t[field.unitKey]}</span>}
+      </div>
+      {field.slider && <input
+        type="range"
+        style={sliderStyle}
+        min={field.min ?? 0}
+        max={field.max ?? 1}
+        step={field.max !== undefined && field.max <= 1 ? 0.001 : 1}
+        disabled={busy}
+        aria-label={inputAria(field)}
+        value={Number.isFinite(current) ? current : field.min ?? 0}
+        onChange={event => patch(key, Number(event.target.value) as never)}
+      />}
+    </div>
+  }
+  const renderText = (field: FieldSpec) => {
+    const key = field.key
+    const placeholder = key === 'criteriaFile' ? 'criteria/my-task.md' : key === 'cacheDir' ? 'verifier' : undefined
+    return <Input
+      style={{ width: '100%', height: 36, borderRadius: 8 }}
+      type="text"
+      disabled={busy}
+      placeholder={placeholder}
+      aria-label={inputAria(field)}
+      value={String(draft[key] ?? '')}
+      onChange={event => patch(key, event.target.value as never)}
+    />
+  }
+  const renderSelect = (field: FieldSpec) => {
+    if (field.select === 'mode') return <select style={selectStyle} disabled={busy} aria-label={inputAria(field)} value={draft.autoVerifyMode} onChange={event => patch('autoVerifyMode', event.target.value as Values['autoVerifyMode'])}>
+      <option value="manual">{t['field.autoVerifyMode.manual']}</option>
+      <option value="smart">{t['field.autoVerifyMode.smart']}</option>
+      <option value="strict">{t['field.autoVerifyMode.strict']}</option>
+    </select>
+    if (field.select === 'criteriaPreset') return <select style={selectStyle} disabled={busy} aria-label={inputAria(field)} value={draft.criteriaPreset} onChange={event => patch('criteriaPreset', event.target.value as Values['criteriaPreset'])}>
+      {(['coding','debug','research','ops','writing','custom'] as const).map(id => <option key={id} value={id}>{t[('field.criteriaPreset.' + id) as keyof I18nDict] as string}</option>)}
+    </select>
+    if (field.select === 'provider') return <select style={selectStyle} disabled={busy} aria-label={inputAria(field)} value={draft.provider} onChange={event => {
+      const provider = event.target.value
+      const first = loaded.groups.find(group => group.id === provider)?.models[0]
+      setSaved(false)
+      setDraft({ ...draft, provider, ...(first ? { model: first.id, reasoningEffort: first.reasoning?.defaultEffort } : {}) })
+    }}>
+      {loaded.groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.id}</option>)}
+    </select>
+    if (field.select === 'model') return <select style={selectStyle} disabled={busy} aria-label={inputAria(field)} value={draft.model} onChange={event => {
+      const model = event.target.value
+      const found = models.find(entry => entry.id === model)
+      setSaved(false)
+      setDraft({ ...draft, model, ...(found?.reasoning?.defaultEffort ? { reasoningEffort: found.reasoning.defaultEffort } : { reasoningEffort: undefined }) })
+    }}>
+      {models.map(entry => <option key={entry.id} value={entry.id}>{entry.name} · {entry.id}</option>)}
+    </select>
+    if (field.select === 'effort') return <select style={selectStyle} disabled={busy} aria-label={inputAria(field)} value={draft.reasoningEffort ?? ''} onChange={event => patch('reasoningEffort', event.target.value || undefined)}>
+      <option value="">{t['field.reasoningEffort.default']}</option>
+      {efforts.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}
+    </select>
+    return null
+  }
+  const renderControl = (field: FieldSpec) => {
+    if (field.kind === 'toggle') {
+      const on = Boolean(draft[field.key])
+      return <button type="button" role="switch" aria-checked={on} aria-label={inputAria(field)} disabled={busy} onClick={() => patch(field.key, !on as never)} style={toggleStyle(on)}><span style={toggleThumbStyle(on)}/></button>
+    }
+    if (field.kind === 'number') return renderNumber(field)
+    if (field.kind === 'text') return renderText(field)
+    if (field.kind === 'select') return renderSelect(field)
+    return null
+  }
+  const renderJudges = () => <Fragment key="extraJudges">
+    <div style={row}>
+      <div style={labelCell}>
+        <div style={fieldTitle}>{translate('field.extraJudges.title') ?? 'extraJudges'}</div>
+        <div style={fieldHelp}>{translate('field.extraJudges.help') ?? ''}</div>
+      </div>
+      <div style={controlCell}><Button variant="outline" disabled={busy || draft.extraJudges.length >= MAX_EXTRA_JUDGES} onClick={addJudge}>{t['field.extraJudges.add']}</Button></div>
+    </div>
+    {draft.extraJudges.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '10px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(110px, 1.2fr) minmax(120px, 1.3fr) minmax(95px, 1fr) minmax(95px, 1fr) auto', gap: 8, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', paddingBottom: 2 }}>
+        <div>{t['field.provider.title']}</div>
+        <div>{t['field.model.title']}</div>
+        <div>{t['field.reasoningEffort.title']}</div>
+        <div>{t['field.extraJudges.labelTitle']}</div>
+        <div/>
+      </div>
+      {draft.extraJudges.map((judge, idx) => {
+        const judgeGroup = loaded.groups.find(group => group.id === judge.provider)
+        const judgeModels = judgeGroup?.models ?? []
+        const judgeModel = judgeModels.find(entry => entry.id === judge.model)
+        const judgeEfforts = judgeModel?.reasoning?.efforts ?? []
+        return <div key={idx} style={{ display: 'grid', gridTemplateColumns: 'minmax(110px, 1.2fr) minmax(120px, 1.3fr) minmax(95px, 1fr) minmax(95px, 1fr) auto', gap: 8, alignItems: 'center' }}>
+          <select style={selectStyle} disabled={busy} aria-label={tFormat(t['field.extraJudges.providerAria'], { index: idx + 1 })} value={judge.provider} onChange={event => {
+            const newProvider = event.target.value
+            const targetGroup = loaded.groups.find(group => group.id === newProvider)
+            const firstM = targetGroup?.models[0]
+            updateJudge(idx, { provider: newProvider, model: firstM?.id ?? '', ...(firstM?.reasoning?.defaultEffort ? { reasoningEffort: firstM.reasoning.defaultEffort } : { reasoningEffort: undefined }) })
+          }}>
+            {!loaded.groups.some(group => group.id === judge.provider) && judge.provider && <option value={judge.provider}>{judge.provider}</option>}
+            {loaded.groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.id}</option>)}
+          </select>
+          <select style={selectStyle} disabled={busy} aria-label={tFormat(t['field.extraJudges.modelAria'], { index: idx + 1 })} value={judge.model} onChange={event => {
+            const newModel = event.target.value
+            const found = judgeModels.find(entry => entry.id === newModel)
+            updateJudge(idx, { model: newModel, ...(found?.reasoning?.defaultEffort ? { reasoningEffort: found.reasoning.defaultEffort } : { reasoningEffort: undefined }) })
+          }}>
+            {!judgeModels.some(entry => entry.id === judge.model) && judge.model && <option value={judge.model}>{judge.model}</option>}
+            {judgeModels.map(entry => <option key={entry.id} value={entry.id}>{entry.name} · {entry.id}</option>)}
+          </select>
+          <select style={selectStyle} disabled={busy} aria-label={tFormat(t['field.extraJudges.effortAria'], { index: idx + 1 })} value={judge.reasoningEffort ?? ''} onChange={event => updateJudge(idx, { reasoningEffort: event.target.value || undefined })}>
+            <option value="">{t['field.reasoningEffort.default']}</option>
+            {judgeEfforts.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}
+          </select>
+          <Input style={{ width: '100%', height: 36, borderRadius: 8 }} type="text" disabled={busy} placeholder={t['field.extraJudges.labelPlaceholder']} aria-label={tFormat(t['field.extraJudges.labelAria'], { index: idx + 1 })} value={judge.label ?? ''} onChange={event => updateJudge(idx, { label: event.target.value })}/>
+          <Button variant="outline" disabled={busy} aria-label={tFormat(t['field.extraJudges.removeAria'], { index: idx + 1 })} onClick={() => removeJudge(idx)}>{t['field.extraJudges.remove']}</Button>
+        </div>
+      })}
+    </div>}
+    {conflict && <p style={{ margin: '8px 0 0', fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-warn-label)' }}>{conflict.duplicateOf === 'primary' ? tFormat(t['field.extraJudges.conflictPrimary'], { index: conflict.index + 1, id: judgeIdentity(draft.extraJudges[conflict.index]?.provider ?? '', draft.extraJudges[conflict.index]?.model ?? '') }) : tFormat(t['field.extraJudges.conflictDuplicate'], { index: conflict.index + 1, other: conflict.duplicateOf + 1, id: judgeIdentity(draft.extraJudges[conflict.index]?.provider ?? '', draft.extraJudges[conflict.index]?.model ?? '') })}</p>}
+  </Fragment>
+  const renderRow = (field: FieldSpec) => {
+    const message = messageFor(field)
+    const changed = isFieldChanged(field, draft)
+    const warning = field.key === 'autoMaxModelCallsPerTask' && budgetWarning?.warnTask
+      ? tFormat(translate('field.autoMaxModelCallsPerTask.warnBudget') ?? '', { current: draft.autoMaxModelCallsPerTask, required: budgetWarning.worstCaseTask, judges: budgetWarning.judgeCount })
+      : field.key === 'autoMaxModelCallsPerSession' && budgetWarning?.warnSession
+        ? tFormat(translate('field.autoMaxModelCallsPerSession.warnBudget') ?? '', { current: draft.autoMaxModelCallsPerSession, required: budgetWarning.worstCaseSession, judges: budgetWarning.judgeCount })
+        : null
+    const preview = field.key === 'criteriaPreset' && draft.criteriaPreset !== 'custom' ? (() => {
+      const preset = CRITERIA_PRESETS[draft.criteriaPreset]
+      const first = preset[0]
+      if (!first) return null
+      return <details style={{ margin: '2px 0 6px 4px', fontSize: 12 }}>
+        <summary style={{ cursor: 'pointer', color: 'var(--dsw-text-secondary)' }}>{tFormat(t['field.criteriaPreset.previewSummary'], { count: preset.length })}</summary>
+        <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 240, overflow: 'auto', background: 'var(--dsw-surface-sunken)', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.12))', borderRadius: 8, padding: 10, marginTop: 8 }}>{buildPairwisePrompt(t['field.criteriaPreset.sampleTask'], t['field.criteriaPreset.sampleA'], t['field.criteriaPreset.sampleB'], first, DEFAULT_GROUND_TRUTH_NOTE)}</pre>
+      </details>
+    })() : null
+    return <Fragment key={String(field.key)}>
+      <div style={row} data-field={String(field.key)}>
+        <div style={labelCell}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+            <span style={fieldTitle}>{translate(field.titleKey) ?? String(field.key)}</span>
+            {changed && <span style={badgeStyle}>{t['settings.fieldChanged']}</span>}
+            {changed && <button type="button" style={linkButton} disabled={busy} onClick={() => resetOne(field)}>{t['settings.fieldReset']}</button>}
+          </div>
+          <div style={fieldHelp}>{helpFor(field)}</div>
+        </div>
+        <div style={controlCell}>{renderControl(field)}</div>
+        {message && <p style={{ ...fullLine, color: 'var(--dsw-alias-state-error-primary)' }}>{issueText(message)}</p>}
+        {warning && <p style={{ ...fullLine, color: 'var(--dsw-alias-state-warn-label)' }}>{warning}</p>}
+      </div>
+      {preview}
+    </Fragment>
+  }
+  const currentProfile = activeProfile(draft, criteriaCount)
+  const sections = renderSections(draft)
   return <div style={shell}>
     <h2 style={settingsHeading}>{t['settings.title']}</h2>
     <p style={settingsIntro}>{t['settings.intro']}</p>
+    <p style={summaryLineStyle}>{draft.autoVerifyMode === 'manual'
+      ? translate('settings.summary.manual') ?? ''
+      : tFormat(translate('settings.summary.line') ?? '', {
+          mode: translate('field.autoVerifyMode.' + draft.autoVerifyMode) ?? draft.autoVerifyMode,
+          preset: translate('field.criteriaPreset.' + draft.criteriaPreset) ?? draft.criteriaPreset,
+          threshold: draft.autoVerifyThreshold,
+          judges: tFormat(translate('settings.summary.judges') ?? '{count}', { count: computeJudgeCount(draft.extraJudges.length) }),
+          task: budgetWarning?.worstCaseTask ?? draft.autoMaxModelCallsPerTask,
+          session: budgetWarning?.worstCaseSession ?? draft.autoMaxModelCallsPerSession,
+        })}</p>
 
-    <section style={group}><GroupTitle>{t['section.tools']}</GroupTitle>
-      <div style={row}><Label title={t['field.enabled.title']} help={draft.enabled?t['field.enabled.helpOn']:t['field.enabled.helpOff']}/><button type="button" role="switch" aria-checked={draft.enabled} aria-label={t['field.enabled.title']} onClick={()=>patch('enabled',!draft.enabled)} style={toggleStyle(draft.enabled)}><span style={toggleThumbStyle(draft.enabled)}/></button></div>
-      {!draft.enabled&&<p style={{margin:'8px 0 0',fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-warn-label)'}}>{t['field.enabled.warnDisabled']}</p>}
-    </section>
+    <div style={toolbarStyle}>
+      <span style={{ fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' }}>{t['settings.profile.title']}</span>
+      <select style={{ ...selectStyle, width: 220 }} disabled={busy} title={translate('settings.profile.hint')} aria-label={t['settings.profile.title']} value={currentProfile} onChange={event => {
+        const picked = event.target.value
+        if (picked === 'custom') return
+        setSaved(false)
+        setDraft(current => (current ? applyProfile(current, picked as ProfileId, criteriaCount) : current))
+      }}>
+        {currentProfile === 'custom' && <option value="custom" disabled>{t['settings.profile.custom']}</option>}
+        {PROFILES.map(profile => <option key={profile.id} value={profile.id}>{translate(profile.titleKey) ?? profile.id}</option>)}
+      </select>
+      <span style={{ flex: '1 1 0' }}/>
+      <Button variant="outline" disabled={busy} onClick={expandAll}>{t['settings.expandAll']}</Button>
+      <Button variant="outline" disabled={busy} onClick={collapseAll}>{t['settings.collapseAll']}</Button>
+    </div>
 
-    <section style={group}><GroupTitle>{t['section.autoVerify']}</GroupTitle>
-      <div style={row}><Label title={t['field.autoVerifyMode.title']} help={t['field.autoVerifyMode.help']}/><select style={selectStyle} disabled={busy} aria-label={t['field.autoVerifyMode.title']} value={draft.autoVerifyMode} onChange={e=>patch('autoVerifyMode',e.target.value as Values['autoVerifyMode'])}><option value="manual">{t['field.autoVerifyMode.manual']}</option><option value="smart">{t['field.autoVerifyMode.smart']}</option><option value="strict">{t['field.autoVerifyMode.strict']}</option></select></div>
-      <div style={row}><Label title={t['field.criteriaPreset.title']} help={t['field.criteriaPreset.help']}/><select style={selectStyle} disabled={busy} aria-label={t['field.criteriaPreset.title']} value={draft.criteriaPreset} onChange={e=>patch('criteriaPreset',e.target.value as Values['criteriaPreset'])}>{(['coding','debug','research','ops','writing','custom'] as const).map(id=><option key={id} value={id}>{t[('field.criteriaPreset.'+id) as keyof I18nDict] as string}</option>)}</select></div>
-      {draft.criteriaPreset==='custom'&&<div style={row}><Label title={t['field.criteriaFile.title']} help={t['field.criteriaFile.help']}/>{textField('criteriaFile','criteria/my-task.md')}</div>}
-      {draft.criteriaPreset!=='custom'&&(()=>{const preset=CRITERIA_PRESETS[draft.criteriaPreset];const first=preset[0];if(!first)return null;return <details style={{margin:'2px 0 0 4px',fontSize:12}}><summary style={{cursor:'pointer',color:'var(--dsw-text-secondary)'}}>{tFormat(t['field.criteriaPreset.previewSummary'],{count:preset.length})}</summary><pre style={{whiteSpace:'pre-wrap',wordBreak:'break-word',maxHeight:240,overflow:'auto',background:'var(--dsw-surface-sunken)',border:'1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.12))',borderRadius:8,padding:10,marginTop:8}}>{buildPairwisePrompt(t['field.criteriaPreset.sampleTask'],t['field.criteriaPreset.sampleA'],t['field.criteriaPreset.sampleB'],first,DEFAULT_GROUND_TRUTH_NOTE)}</pre></details>})()}
-      <div style={row}><Label title={t['field.autoRouteSemantic.title']} help={t['field.autoRouteSemantic.help']}/><button type="button" role="switch" aria-checked={draft.autoRouteSemantic} aria-label={t['field.autoRouteSemantic.title']} onClick={()=>patch('autoRouteSemantic',!draft.autoRouteSemantic)} style={toggleStyle(draft.autoRouteSemantic)}><span style={toggleThumbStyle(draft.autoRouteSemantic)}/></button></div>
-      <div style={row}><Label title={t['field.autoVerifyTeamTasks.title']} help={t['field.autoVerifyTeamTasks.help']}/><button type="button" role="switch" aria-checked={draft.autoVerifyTeamTasks} aria-label={t['field.autoVerifyTeamTasks.title']} onClick={()=>patch('autoVerifyTeamTasks',!(draft.autoVerifyTeamTasks))} style={toggleStyle(draft.autoVerifyTeamTasks)}><span style={toggleThumbStyle(draft.autoVerifyTeamTasks)}/></button></div>
-      <div style={row}><Label title={t['field.captureDecisions.title']} help={t['field.captureDecisions.help']}/><button type="button" role="switch" aria-checked={draft.captureDecisions} aria-label={t['field.captureDecisions.title']} onClick={()=>patch('captureDecisions',!draft.captureDecisions)} style={toggleStyle(draft.captureDecisions)}><span style={toggleThumbStyle(draft.captureDecisions)}/></button></div>
-      <div style={row}><Label title={t['field.autoVerifySubagents.title']} help={t['field.autoVerifySubagents.help']}/><button type="button" role="switch" aria-checked={draft.autoVerifySubagents} aria-label={t['field.autoVerifySubagents.title']} onClick={()=>patch('autoVerifySubagents',!draft.autoVerifySubagents)} style={toggleStyle(draft.autoVerifySubagents)}><span style={toggleThumbStyle(draft.autoVerifySubagents)}/></button></div>
-      <div style={row}><Label title={t['field.autoVerifyPlanMode.title']} help={t['field.autoVerifyPlanMode.help']}/><button type="button" role="switch" aria-checked={draft.autoVerifyPlanMode} aria-label={t['field.autoVerifyPlanMode.title']} onClick={()=>patch('autoVerifyPlanMode',!(draft.autoVerifyPlanMode))} style={toggleStyle(draft.autoVerifyPlanMode)}><span style={toggleThumbStyle(draft.autoVerifyPlanMode)}/></button></div>
-      <div style={row}><Label title={t['field.autoProcessSelection.title']} help={t['field.autoProcessSelection.help']}/><button type="button" role="switch" aria-checked={draft.autoProcessSelection} aria-label={t['field.autoProcessSelection.title']} onClick={()=>patch('autoProcessSelection',!draft.autoProcessSelection)} style={toggleStyle(draft.autoProcessSelection)}><span style={toggleThumbStyle(draft.autoProcessSelection)}/></button></div>
-      <div style={row}><Label title={t['field.autoRouteMinConfidence.title']} help={t['field.autoRouteMinConfidence.help']}/>{numeric('autoRouteMinConfidence',0)}</div>
-      <div style={row}><Label title={t['field.autoRouteMaxCandidates.title']} help={t['field.autoRouteMaxCandidates.help']}/>{numeric('autoRouteMaxCandidates',3)}</div>
-      <div style={row}><Label title={t['field.autoRouteMaxPerTask.title']} help={t['field.autoRouteMaxPerTask.help']}/>{numeric('autoRouteMaxPerTask',1)}</div>
-      <div style={row}><Label title={t['field.autoRouteMaxPerSession.title']} help={t['field.autoRouteMaxPerSession.help']}/>{numeric('autoRouteMaxPerSession',1)}</div>
-      <div style={row}><Label title={t['field.autoTrackCompletionThreshold.title']} help={t['field.autoTrackCompletionThreshold.help']}/>{numeric('autoTrackCompletionThreshold',0)}</div>
-      <div style={row}><Label title={t['field.autoRouteMaxItemChars.title']} help={t['field.autoRouteMaxItemChars.help']}/>{numeric('autoRouteMaxItemChars',100)}</div>
-      <div style={row}><Label title={t['field.autoRouteMaxInputChars.title']} help={t['field.autoRouteMaxInputChars.help']}/>{numeric('autoRouteMaxInputChars',1000)}</div>
-      <div style={row}><Label title={t['field.autoMaxModelCallsPerTask.title']} help={t['field.autoMaxModelCallsPerTask.help']}/>{numeric('autoMaxModelCallsPerTask',1)}</div>
-      {budgetWarning?.warnTask&&<p style={{margin:'-4px 0 10px',fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-warn-label)'}}>{tFormat(t['field.autoMaxModelCallsPerTask.warnBudget'],{current:draft.autoMaxModelCallsPerTask,required:budgetWarning.worstCaseTask,judges:budgetWarning.judgeCount})}</p>}
-      <div style={row}><Label title={t['field.autoMaxModelCallsPerSession.title']} help={t['field.autoMaxModelCallsPerSession.help']}/>{numeric('autoMaxModelCallsPerSession',1)}</div>
-      {budgetWarning?.warnSession&&<p style={{margin:'-4px 0 10px',fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-warn-label)'}}>{tFormat(t['field.autoMaxModelCallsPerSession.warnBudget'],{current:draft.autoMaxModelCallsPerSession,required:budgetWarning.worstCaseSession,judges:budgetWarning.judgeCount})}</p>}
-      <div style={row}><Label title={t['field.autoVerifyThreshold.title']} help={t['field.autoVerifyThreshold.help']}/>{numeric('autoVerifyThreshold',0)}</div>
-      <div style={row}><Label title={t['field.autoVerifyRepeats.title']} help={t['field.autoVerifyRepeats.help']}/>{numeric('autoVerifyRepeats',1)}</div>
-      <div style={row}><Label title={t['field.autoTrackRepeats.title']} help={t['field.autoTrackRepeats.help']}/>{numeric('autoTrackRepeats',1)}</div>
-      <div style={row}><Label title={t['field.autoVerifyFinalRepeats.title']} help={t['field.autoVerifyFinalRepeats.help']}/>{numeric('autoVerifyFinalRepeats',1)}</div>
-      <div style={row}><Label title={t['field.autoVerifyMinToolCalls.title']} help={t['field.autoVerifyMinToolCalls.help']}/>{numeric('autoVerifyMinToolCalls',1)}</div>
-      <div style={row}><Label title={t['field.autoVerifyMaxChars.title']} help={t['field.autoVerifyMaxChars.help']}/>{numeric('autoVerifyMaxChars',1000)}</div>
-      <div style={row}><Label title={t['field.autoVerifyMaxPerTask.title']} help={t['field.autoVerifyMaxPerTask.help']}/>{numeric('autoVerifyMaxPerTask',1)}</div>
-      <div style={row}><Label title={t['field.autoVerifyMaxPerSession.title']} help={t['field.autoVerifyMaxPerSession.help']}/>{numeric('autoVerifyMaxPerSession',1)}</div>
-      {draft.autoVerifyMode!=='manual'&&<p style={{margin:'8px 0 0',fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-warn-label)'}}>{t['field.autoVerify.warnNotice']}</p>}
-    </section>
+    {sections.map(entry => {
+      const title = translate(entry.section.titleKey) ?? entry.section.id
+      const open = openSections[entry.section.id] === true
+      const summary = sectionSummary(entry.section.id, draft, translate, format)
+      return <section key={entry.section.id} style={group}>
+        <button type="button" style={sectionTitle} aria-expanded={open} aria-label={tFormat(translate(open ? 'settings.sectionCollapse' : 'settings.sectionExpand') ?? '', { title })} onClick={() => setSectionOpen(entry.section.id, !open)}>
+          <span style={sectionHeadingStyle}>{title}</span>
+          {entry.section.tier === 'advanced' && <span style={badgeStyle}>{t['settings.advancedBadge']}</span>}
+          {summary && <span style={sectionSummaryStyle}>{summary}</span>}
+          <span style={{ marginLeft: summary ? 0 : 'auto', color: 'var(--dsw-alias-label-tertiary)', fontSize: 12 }}>{open ? '▾' : '▸'}</span>
+        </button>
+        {open && entry.fields.map(field => (field.kind === 'custom' ? renderJudges() : renderRow(field)))}
+        {open && entry.section.id === 'tools' && !draft.enabled && <p style={{ margin: '8px 0 0', fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-warn-label)' }}>{t['field.enabled.warnDisabled']}</p>}
+        {open && entry.section.id === 'autoVerify' && draft.autoVerifyMode !== 'manual' && <p style={{ margin: '8px 0 0', fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-warn-label)' }}>{t['field.autoVerify.warnNotice']}</p>}
+        {open && entry.section.id === 'budgets' && <div style={{ padding: '10px 0' }}><Button variant="outline" disabled={busy} onClick={fillRecommended}>{t['settings.recommend']}</Button></div>}
+      </section>
+    })}
 
-    <section style={group}><GroupTitle>{t['section.model']}</GroupTitle>
-      <div style={row}><Label title={t['field.provider.title']} help={t['field.provider.help']}/><select style={selectStyle} disabled={busy} aria-label={t['field.provider.title']} value={draft.provider} onChange={e=>{const provider=e.target.value;const first=loaded.groups.find(g=>g.id===provider)?.models[0];setDraft({...draft,provider,...(first?{model:first.id,reasoningEffort:first.reasoning?.defaultEffort}:{})})}}>{loaded.groups.map(g=><option key={g.id} value={g.id}>{g.name} · {g.id}</option>)}</select></div>
-      <div style={row}><Label title={t['field.model.title']} help={t['field.model.help']}/><select style={selectStyle} disabled={busy} aria-label={t['field.model.title']} value={draft.model} onChange={e=>{const model=e.target.value;const found=models.find(m=>m.id===model);setDraft({...draft,model,...(found?.reasoning?.defaultEffort?{reasoningEffort:found.reasoning.defaultEffort}:{reasoningEffort:undefined})})}}>{models.map(m=><option key={m.id} value={m.id}>{m.name} · {m.id}</option>)}</select></div>
-      <div style={row}><Label title={t['field.reasoningEffort.title']} help={t['field.reasoningEffort.help']}/><select style={selectStyle} disabled={busy} aria-label={t['field.reasoningEffort.title']} value={draft.reasoningEffort??''} onChange={e=>patch('reasoningEffort',e.target.value||undefined)}><option value="">{t['field.reasoningEffort.default']}</option>{efforts.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</select></div>
-      <div style={row}><Label title={t['field.maxTokens.title']} help={t['field.maxTokens.help']}/>{numeric('maxTokens',1)}</div>
-      <div style={row}><Label title={t['field.temperature.title']} help={t['field.temperature.help']}/>{numeric('temperature',0)}</div>
-      <div style={row}><Label title={t['field.label.title']} help={t['field.label.help']}/><Input style={{width:'100%',height:36,borderRadius:8}} type="text" disabled={busy} placeholder={draft.model||t['field.label.placeholder']} aria-label={t['field.label.title']} value={draft.label??''} onChange={e=>patch('label',e.target.value||undefined)}/></div>
-      <div style={{...row,gridTemplateColumns:'minmax(180px, 1fr) auto',minHeight:48}}><Label title={t['field.extraJudges.title']} help={t['field.extraJudges.help']}/><Button variant="outline" disabled={busy||draft.extraJudges.length>=MAX_EXTRA_JUDGES} onClick={addJudge}>{t['field.extraJudges.add']}</Button></div>
-      {draft.extraJudges.length>0&&<div style={{display:'flex',flexDirection:'column',gap:8,padding:'10px 0',borderBottom:'1px solid var(--dsw-alias-border-l2)'}}>
-        <div style={{display:'grid',gridTemplateColumns:'minmax(110px, 1.2fr) minmax(120px, 1.3fr) minmax(95px, 1fr) minmax(95px, 1fr) auto',gap:8,fontSize:12,color:'var(--dsw-alias-label-tertiary)',paddingBottom:2}}>
-          <div>{t['field.provider.title']}</div>
-          <div>{t['field.model.title']}</div>
-          <div>{t['field.reasoningEffort.title']}</div>
-          <div>{t['field.extraJudges.labelTitle']}</div>
-          <div/>
-        </div>
-        {draft.extraJudges.map((judge,idx)=>{
-          const judgeGroup=loaded.groups.find(g=>g.id===judge.provider)
-          const judgeModels=judgeGroup?.models??[]
-          const judgeModel=judgeModels.find(m=>m.id===judge.model)
-          const judgeEfforts=judgeModel?.reasoning?.efforts??[]
-          return <div key={idx} style={{display:'grid',gridTemplateColumns:'minmax(110px, 1.2fr) minmax(120px, 1.3fr) minmax(95px, 1fr) minmax(95px, 1fr) auto',gap:8,alignItems:'center'}}>
-            <select style={selectStyle} disabled={busy} aria-label={tFormat(t['field.extraJudges.providerAria'],{index:idx+1})} value={judge.provider} onChange={e=>{
-              const newProvider=e.target.value
-              const targetGroup=loaded.groups.find(g=>g.id===newProvider)
-              const firstM=targetGroup?.models[0]
-              updateJudge(idx,{
-                provider:newProvider,
-                model:firstM?.id??'',
-                ...(firstM?.reasoning?.defaultEffort?{reasoningEffort:firstM.reasoning.defaultEffort}:{reasoningEffort:undefined}),
-              })
-            }}>
-              {!loaded.groups.some(g=>g.id===judge.provider)&&judge.provider&&<option value={judge.provider}>{judge.provider}</option>}
-              {loaded.groups.map(g=><option key={g.id} value={g.id}>{g.name} · {g.id}</option>)}
-            </select>
-            <select style={selectStyle} disabled={busy} aria-label={tFormat(t['field.extraJudges.modelAria'],{index:idx+1})} value={judge.model} onChange={e=>{
-              const newModel=e.target.value
-              const found=judgeModels.find(m=>m.id===newModel)
-              updateJudge(idx,{
-                model:newModel,
-                ...(found?.reasoning?.defaultEffort?{reasoningEffort:found.reasoning.defaultEffort}:{reasoningEffort:undefined}),
-              })
-            }}>
-              {!judgeModels.some(m=>m.id===judge.model)&&judge.model&&<option value={judge.model}>{judge.model}</option>}
-              {judgeModels.map(m=><option key={m.id} value={m.id}>{m.name} · {m.id}</option>)}
-            </select>
-            <select style={selectStyle} disabled={busy} aria-label={tFormat(t['field.extraJudges.effortAria'],{index:idx+1})} value={judge.reasoningEffort??''} onChange={e=>updateJudge(idx,{reasoningEffort:e.target.value||undefined})}>
-              <option value="">{t['field.reasoningEffort.default']}</option>
-              {judgeEfforts.map(ef=><option key={ef.id} value={ef.id}>{ef.name}</option>)}
-            </select>
-            <Input style={{width:'100%',height:36,borderRadius:8}} type="text" disabled={busy} placeholder={t['field.extraJudges.labelPlaceholder']} aria-label={tFormat(t['field.extraJudges.labelAria'],{index:idx+1})} value={judge.label??''} onChange={e=>updateJudge(idx,{label:e.target.value})}/>
-            <Button variant="outline" disabled={busy} aria-label={tFormat(t['field.extraJudges.removeAria'],{index:idx+1})} onClick={()=>removeJudge(idx)}>{t['field.extraJudges.remove']}</Button>
-          </div>
-        })}
-      </div>}
-      {conflict&&<p style={{margin:'8px 0 0',fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-warn-label)'}}>{conflict.duplicateOf==='primary'?tFormat(t['field.extraJudges.conflictPrimary'],{index:conflict.index+1,id:judgeIdentity(draft.extraJudges[conflict.index]?.provider??'',draft.extraJudges[conflict.index]?.model??'')}):tFormat(t['field.extraJudges.conflictDuplicate'],{index:conflict.index+1,other:conflict.duplicateOf+1,id:judgeIdentity(draft.extraJudges[conflict.index]?.provider??'',draft.extraJudges[conflict.index]?.model??'')})}</p>}
-    </section>
+    {loaded.failures.length > 0 && <div style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--dsw-alias-state-warn-bg)', color: 'var(--dsw-alias-state-warn-label)', fontSize: 12, lineHeight: '18px' }}>
+      <div style={{ fontWeight: 500, marginBottom: 3 }}>{t['settings.catalogFailures']}</div>
+      {loaded.failures.map(failure => <div key={failure}>{failure}</div>)}
+    </div>}
 
-    <section style={group}><GroupTitle>{t['section.execution']}</GroupTitle>
-      <div style={row}><Label title={t['field.maxConcurrency.title']} help={t['field.maxConcurrency.help']}/>{numeric('maxConcurrency',1)}</div>
-      <div style={row}><Label title={t['field.maxRetries.title']} help={t['field.maxRetries.help']}/>{numeric('maxRetries',0)}</div>
-      <div style={row}><Label title={t['field.retryBaseDelayMs.title']} help={t['field.retryBaseDelayMs.help']}/>{numeric('retryBaseDelayMs',1)}</div>
-      <div style={row}><Label title={t['field.timeoutMs.title']} help={t['field.timeoutMs.help']}/>{numeric('timeoutMs',1)}</div>
-      <div style={row}><Label title={t['field.cacheDir.title']} help={t['field.cacheDir.help']}/>{textField('cacheDir','verifier')}</div>
-      <div style={row}><Label title={t['field.cacheMaxEntries.title']} help={t['field.cacheMaxEntries.help']}/>{numeric('cacheMaxEntries',1)}</div>
-    </section>
-
-    <section style={group}><GroupTitle>{t['section.cost']}</GroupTitle>
-      <div style={row}><Label title={t['field.estimatedInputUsdPerMillion.title']} help={t['field.estimatedInputUsdPerMillion.help']}/>{numeric('estimatedInputUsdPerMillion',0)}</div>
-      <div style={row}><Label title={t['field.estimatedOutputUsdPerMillion.title']} help={t['field.estimatedOutputUsdPerMillion.help']}/>{numeric('estimatedOutputUsdPerMillion',0)}</div>
-    </section>
-
-    {loaded.failures.length>0&&<div style={{padding:'10px 12px',borderRadius:8,background:'var(--dsw-alias-state-warn-bg)',color:'var(--dsw-alias-state-warn-label)',fontSize:12,lineHeight:'18px'}}><div style={{fontWeight:500,marginBottom:3}}>{t['settings.catalogFailures']}</div>{loaded.failures.map(x=><div key={x}>{x}</div>)}</div>}
-    {error&&<p style={{margin:0,fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-error-primary)'}}>{error}</p>}{saved&&!dirty&&<p style={{margin:0,fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-success-primary)'}}>{t['settings.saved']}</p>}
-    {dirty&&<p style={{margin:0,fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-warn-label)'}}>{t['settings.unsaved']}</p>}
-    <div style={{display:'flex',justifyContent:'flex-end',gap:8,paddingTop:4}}><Button variant="outline" disabled={busy} onClick={()=>void load()}>{t['settings.reload']}</Button><Button variant="primary" disabled={busy||!loaded.writable||Boolean(conflict)} onClick={()=>void save()}>{busy?t['settings.saving']:t['settings.save']}</Button></div>
+    <div style={stickyBar}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        {issues.length > 0
+          ? <span style={{ ...statusStyle, color: 'var(--dsw-alias-state-error-primary)' }}>{tFormat(t['settings.invalid.summary'], { count: issues.length })}<button type="button" style={linkButton} onClick={() => jumpTo(issues[0].key)}>{t['settings.jumpToIssue']}</button></span>
+          : error
+            ? <span style={{ ...statusStyle, color: 'var(--dsw-alias-state-error-primary)' }}>{error}</span>
+            : saved && !dirty
+              ? <span style={{ ...statusStyle, color: 'var(--dsw-alias-state-success-primary)' }}>{t['settings.saved']}</span>
+              : dirty
+                ? <span style={{ ...statusStyle, color: 'var(--dsw-alias-state-warn-label)' }}>{t['settings.unsaved']}</span>
+                : null}
+        <span style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          <Button variant="outline" disabled={busy} onClick={() => void load()}>{t['settings.reload']}</Button>
+          <Button variant="primary" disabled={busy || !loaded.writable || Boolean(conflict) || issues.length > 0} onClick={() => void save()}>{busy ? t['settings.saving'] : t['settings.save']}</Button>
+        </span>
+      </div>
+    </div>
   </div>
 }
 

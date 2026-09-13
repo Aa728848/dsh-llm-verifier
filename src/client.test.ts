@@ -425,7 +425,27 @@ describe('settings save layer', () => {
     expect(sectionForSave(stored, draft, BASE)).toEqual({ autoMaxModelCallsPerTask: 54 })
   })
 
-  it('keeps user-layer keys this client does not own', () => {
+  it('reverts an override in both host write modes', () => {
+    // The reported regression: 调用策略 had been stored as 'strict', the user
+    // picked 默认平衡 (= the base), pressed 保存, and the stored strict stayed.
+    // The host's update() only merges, so the pruned key kept its old value.
+    const base = { autoVerifyMode: 'smart', enabled: true }
+    const stored = { autoVerifyMode: 'strict', enabled: false }
+    const draft = { autoVerifyMode: 'smart', enabled: false }
+
+    // settings.replace: the returned section IS the new user layer.
+    const replaced = sectionForSave(stored, draft, base)
+    expect(replaced).toEqual({ enabled: false })
+    expect({ ...base, ...replaced }.autoVerifyMode).toBe('smart')
+
+    // settings.update: merge the patch into the stored section, so a key left
+    // out keeps its value — every draft value must be pinned instead.
+    const merged = sectionForSave(stored, draft, base, { reInheritBase: false })
+    expect(merged).toEqual({ enabled: false, autoVerifyMode: 'smart' })
+    expect({ ...base, ...stored, ...merged }.autoVerifyMode).toBe('smart')
+  })
+
+  it('keeps user-layer keys this client does not own in both write modes', () => {
     expect(sectionForSave({ futureKey: 'keep-me' }, { enabled: true }, BASE)).toEqual({ futureKey: 'keep-me' })
   })
 
