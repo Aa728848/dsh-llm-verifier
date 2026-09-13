@@ -1,5 +1,11 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
 import type { AutoVerifyMode } from './auto.ts';
+/**
+ * A unique id for a diagnostic route row that never got a reservation (evidence dropped by the
+ * caps, a delivery-phase skip). Cross-reload safe for the same reason a reservation id is:
+ * without it two plugin incarnations both produce `diagnostic-1` and merge in the summary.
+ */
+export declare function nextDiagnosticCycleId(): string;
 /** One durable todo entry carried by `todo/write` snapshots (DSH 0.1.5 dropped the exported type). */
 export interface TodoItem {
     content: string;

@@ -1,4 +1,4 @@
-import { addUsage, callVerifier, emptyUsage, predictScoringChannel, requestAttempts, type ScoringMode, type UsageStats, type VerifierClientConfig, type VerifierImage } from './caller.ts'
+import { addUsage, attachUsage, callVerifier, emptyUsage, partialUsage, predictScoringChannel, requestAttempts, type ScoringMode, type UsageStats, type VerifierClientConfig, type VerifierImage } from './caller.ts'
 import { ScoreCache, SingleFlight, stableHash, type CachedPairScore } from './cache.ts'
 import type { DecisionTrace } from './decisions.ts'
 import {
@@ -86,17 +86,22 @@ function blankStats(): RunStats { return { ...emptyUsage(), cacheHits: 0, cacheM
  * successful calls then one failure was persisted as one attempt and zero tokens. Attaching
  * the live stats object to the error keeps every known request and token.
  */
-const PARTIAL_STATS = Symbol('llm-verifier.partialStats')
-
 /** Usage accumulated before an invocation failed; undefined when the error carries none. */
 export function partialStats(error: unknown): RunStats | undefined {
-  if (typeof error !== 'object' || error === null) return undefined
-  const value = (error as { [PARTIAL_STATS]?: unknown })[PARTIAL_STATS]
-  return typeof value === 'object' && value !== null ? value as RunStats : undefined
+  return partialUsage<RunStats>(error)
 }
 
-function attachPartialStats(error: unknown, stats: RunStats): void {
-  if (typeof error === 'object' && error !== null) (error as { [PARTIAL_STATS]?: RunStats })[PARTIAL_STATS] = stats
+/** A failed judge result knows its usage through one of two carriers; fold whichever it has. */
+function accountFailure(stats: RunStats, error: unknown): void {
+  const partial = partialStats(error)
+  if (partial !== undefined) {
+    mergeRunStats(stats, partial)
+    return
+  }
+  // The request never returned usage. The attempt count is the one known fact.
+  const attempts = requestAttempts(error)
+  stats.attempts += attempts
+  stats.retries += Math.max(0, attempts - 1)
 }
 
 /** Fold one nested run's counters into an accumulator (usage, cache, channel, incompleteness). */
@@ -217,13 +222,23 @@ export class VerifierEngine {
     let fellBack = false
     const create = async () => {
       const completion = await callVerifier(client, prompt, signal, options.images)
-      const scoreA = extractScore(completion, '<score_A>')
-      const scoreB = extractScore(completion, '<score_B>')
-      fellBack = completion.channelFallback === true
-      // Traced here, not in scoreOne(): a cache hit or a merged in-flight call makes no
-      // model call, and a snapshot that showed one anyway would be a fabrication.
-      options.trace?.({ label: (options.traceLabelPrefix ?? '') + criterion.name + ' repeat ' + (repeat + 1), channel: completion.scoringMode, prompt, output: completion.text, score: scoreA })
-      return { scoreA, scoreB, usage: completion.usage, scoringMode: completion.scoringMode, createdAt: Date.now() }
+      try {
+        const scoreA = extractScore(completion, '<score_A>')
+        const scoreB = extractScore(completion, '<score_B>')
+        fellBack = completion.channelFallback === true
+        // Traced here, not in scoreOne(): a cache hit or a merged in-flight call makes no
+        // model call, and a snapshot that showed one anyway would be a fabrication.
+        options.trace?.({ label: (options.traceLabelPrefix ?? '') + criterion.name + ' repeat ' + (repeat + 1), channel: completion.scoringMode, prompt, output: completion.text, score: scoreA })
+        return { scoreA, scoreB, usage: completion.usage, scoringMode: completion.scoringMode, createdAt: Date.now() }
+      } catch (error) {
+        // The response came back and was billed, but carried no usable score. Keep its usage
+        // on the error so the failed row reports known requests and tokens, not zero.
+        const billed = blankStats()
+        addUsage(billed, completion.usage)
+        if (completion.usage.usageIncomplete) billed.usageIncomplete = true
+        attachUsage(error, billed)
+        throw error
+      }
     }
     const cache = this.cache
     if (cache === undefined) { const value = await create(); return { scores: [value.scoreA, value.scoreB], usage: value.usage, scoringMode: value.scoringMode, hit: false, channelFallback: fellBack } }
@@ -240,8 +255,29 @@ export class VerifierEngine {
 
   private async mapLimited<T, R>(items: readonly T[], worker: (item: T) => Promise<R>): Promise<R[]> {
     const results = new Array<R>(items.length); let cursor = 0
-    const runners = Array.from({ length: Math.min(this.maxConcurrency, items.length) }, async () => { while (cursor < items.length) { const index = cursor++; results[index] = await worker(items[index]!) } })
-    await Promise.all(runners); return results
+    let failed = false
+    let failure: unknown
+    const runners = Array.from({ length: Math.min(this.maxConcurrency, items.length) }, async () => {
+      while (!failed && cursor < items.length) {
+        const index = cursor++
+        try { results[index] = await worker(items[index]!) }
+        catch (error) {
+          // Stop buying NEW work, but let every in-flight call settle first: it was already
+          // paid for, and its usage is merged into the shared accumulator the error carries.
+          // Rejecting immediately (the old Promise.all) discarded those calls' usage.
+          if (!failed) { failed = true; failure = error }
+        }
+      }
+    })
+    await Promise.all(runners)
+    if (failed) {
+      const partial = partialStats(failure)
+      // All workers have settled, so the accumulator is final: price the known tokens before
+      // the failure row records them.
+      if (partial !== undefined) this.finishStats(partial)
+      throw failure
+    }
+    return results
   }
 
   /**
@@ -330,6 +366,7 @@ export class VerifierEngine {
           judgeCalls[r.k] += r.usage.calls
           judgeJobScores[r.k]!.push({ criterionId: criterion.id, scoreA: r.scoreA, scoreB: r.scoreB })
           addUsage(stats, r.usage)
+          if (r.usage.usageIncomplete) stats.usageIncomplete = true
           if (r.hit) stats.cacheHits++
           else stats.cacheMisses++
           if (r.scoringMode === 'top-logprobs') stats.topLogprobScores++
@@ -337,10 +374,10 @@ export class VerifierEngine {
           if (r.channelFallback) stats.channelFallbacks = (stats.channelFallbacks ?? 0) + 1
         } else {
           judgeOk[r.k] = false
-          // The failed request really happened even though its usage is unknown; the attempt
-          // count is kind-independent, so it is kept and the row is marked incomplete rather
-          // than reported as a confident zero-cost call.
-          stats.attempts += requestAttempts(r.error)
+          // The failed request really happened; fold in whatever accounting it carries (billed
+          // but unusable usage, or just its attempt count) and mark the row incomplete rather
+          // than reporting a confident zero-cost call.
+          accountFailure(stats, r.error)
           stats.usageIncomplete = true
           if (judgeErrors[r.k] === undefined) {
             judgeErrors[r.k] = r.error instanceof Error ? r.error.message : String(r.error)
@@ -351,7 +388,7 @@ export class VerifierEngine {
       if (successful.length === 0) {
         const firstFail = judgeResults.find(r => !r.ok)! as Extract<typeof judgeResults[number], { ok: false }>
         // Carry the usage the earlier jobs already spent on this error.
-        attachPartialStats(firstFail.error, stats)
+        attachUsage(firstFail.error, stats)
         throw firstFail.error
       }
       const leafScoreA = median(successful.map(r => r.scoreA))
@@ -478,7 +515,7 @@ export class VerifierEngine {
         // Merge this pair's own partial usage into the shared accumulator, then hand the union
         // to the caller's failure row.
         mergeRunStats(stats, partialStats(error))
-        attachPartialStats(error, stats)
+        attachUsage(error, stats)
         throw error
       }
     })
@@ -529,12 +566,13 @@ export class VerifierEngine {
           judgeCalls[r.k] += r.completion.usage.calls
           judgePerRepeatScores[r.k]!.push(r.scores)
           addUsage(stats, r.completion.usage)
+          if (r.completion.usage.usageIncomplete) stats.usageIncomplete = true
           if (r.completion.scoringMode === 'top-logprobs') stats.topLogprobScores++
           else stats.explicitTagScores++
           if (r.completion.channelFallback) stats.channelFallbacks = (stats.channelFallbacks ?? 0) + 1
         } else {
           judgeOk[r.k] = false
-          stats.attempts += requestAttempts(r.error)
+          accountFailure(stats, r.error)
           stats.usageIncomplete = true
           if (judgeErrors[r.k] === undefined) {
             judgeErrors[r.k] = r.error instanceof Error ? r.error.message : String(r.error)
@@ -545,7 +583,7 @@ export class VerifierEngine {
       const successful = judgeResults.filter((r): r is Extract<typeof r, { ok: true }> => r.ok)
       if (successful.length === 0) {
         const firstFail = judgeResults.find(r => !r.ok)! as Extract<typeof judgeResults[number], { ok: false }>
-        attachPartialStats(firstFail.error, stats)
+        attachUsage(firstFail.error, stats)
         throw firstFail.error
       }
 
@@ -717,7 +755,16 @@ export class VerifierEngine {
     // single match so wins/counts are not double-weighted and no pair is judged twice.
     const ringPairs = new Set(ring.map(pair => unorderedPair(pair[0], pair[1])))
     const rounds = orientRoundPairs(pivotRoundPairs(options.candidates.length, pivots).filter(pair => !ringPairs.has(unorderedPair(pair[0], pair[1]))))
-    const roundScores = await this.scorePairs(options, rounds, signal)
+    // The ring phase is already paid for. Accumulate it BEFORE the pivot phase so a pivot
+    // failure keeps the successful pairs' usage on the thrown error instead of losing it.
+    const stats = blankStats()
+    mergeRunStats(stats, ringScores.stats)
+    const roundScores = await this.scorePairs(options, rounds, signal).catch((error: unknown) => {
+      mergeRunStats(stats, partialStats(error))
+      attachUsage(error, this.finishStats(stats))
+      throw error
+    })
+    mergeRunStats(stats, roundScores.stats)
     const allRewards = new Map([...ringScores.rewards, ...roundScores.rewards])
     const wins = new Array<number>(options.candidates.length).fill(0)
     const counts = new Array<number>(options.candidates.length).fill(0)
@@ -725,16 +772,6 @@ export class VerifierEngine {
     accumulatePairs(rounds, allRewards, wins, counts)
     const ranked = rankScores(wins, counts)
     const index = ranked[0]!.index
-    const stats = blankStats()
-    for (const source of [ringScores.stats, roundScores.stats]) {
-      addUsage(stats, source)
-      stats.cacheHits += source.cacheHits
-      stats.cacheMisses += source.cacheMisses
-      stats.topLogprobScores += source.topLogprobScores
-      stats.explicitTagScores += source.explicitTagScores
-      if (source.usageIncomplete) stats.usageIncomplete = true
-      if (source.channelFallbacks) stats.channelFallbacks = (stats.channelFallbacks ?? 0) + source.channelFallbacks
-    }
 
     const judges: JudgeScore[] = this.clients.map((client, k) => {
       const isOk = ringScores.judgeOk[k]! && roundScores.judgeOk[k]!

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { RequestLimiter, callVerifier, generateCandidate, generationClient, requestAttempts } from './caller.ts'
+import { RequestLimiter, callVerifier, generateCandidate, generationClient, partialUsage, requestAttempts } from './caller.ts'
 import { TopLogprobCapabilityCache } from './top-logprobs.ts'
 
 function chunks(text = '<score_A> A </score_A>') { return [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'text-delta', index: 0, text }, { type: 'block-end', index: 0, block: { type: 'text', text } }, { type: 'usage', usage: { inputTokens: 7, cacheReadTokens: 3, outputTokens: 4, reasoningTokens: 2 } }, { type: 'finish', reason: { kind: 'stop' } }] as any[] }
@@ -93,11 +93,39 @@ describe('automatic verifier scoring', () => {
     expect(requestAttempts(error)).toBe(3)
   })
 
+  it('flags a call whose earlier attempt failed before a later one succeeded', async () => {
+    let attempt = 0
+    const cfg = config(async function* () {
+      attempt += 1
+      if (attempt === 1) throw new Error('rate limited upstream')
+      yield* streamOf(chunks())
+    }, vi.fn(), ctx(), { maxRetries: 2, retryBaseDelayMs: 1 })
+    const result = await callVerifier(cfg, 'prompt')
+    // The first attempt's tokens are unknowable, so the successful usage is a floor, not a total.
+    expect(result.usage.usageIncomplete).toBe(true)
+    expect(result.usage.attempts).toBe(2)
+    expect(result.usage.retries).toBe(1)
+  })
+
   it('reports no attempts for a request cancelled before it ran', async () => {
     const controller = new AbortController()
     controller.abort(new Error('cancelled by the host'))
     const error = await callVerifier(config(async function* () { yield* streamOf(chunks()) }), 'prompt', controller.signal).catch(reason => reason)
     expect(requestAttempts(error)).toBe(0)
+  })
+
+  it('keeps the attempt count when a request is cancelled while it runs', async () => {
+    const controller = new AbortController()
+    const cfg = config(async function* (options: any) {
+      await new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason ?? new Error('aborted')), { once: true }))
+      yield* streamOf(chunks())
+    }, vi.fn(), ctx(), { timeoutMs: 5_000 })
+    const pending = callVerifier(cfg, 'prompt', controller.signal).catch(reason => reason)
+    await new Promise(resolve => setTimeout(resolve, 1))
+    controller.abort(new Error('cancelled mid-flight'))
+    const error = await pending
+    // The request was already in flight, so one attempt really happened.
+    expect(requestAttempts(error)).toBe(1)
   })
 })
 
@@ -327,11 +355,20 @@ describe('best-of-N generation seam', () => {
   it('keeps the judge path fail-closed on a truncated answer', async () => {
     // The tolerance above must not leak into scoring: a truncated verdict has no usable tags.
     const judge = config(async function* () { yield* streamOf(truncatedChunks('<score_A> A </score_A>')) }, vi.fn(), ctx(), { maxRetries: 0 })
-    await expect(callVerifier(judge, 'prompt')).rejects.toThrow(/max tokens/u)
+    const error = await callVerifier(judge, 'prompt').catch(reason => reason)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toMatch(/max tokens/u)
+    // The response was billed even though it is unusable; its usage rides on the error so the
+    // failure row is not reported as free.
+    expect(partialUsage(error)?.calls).toBe(1)
+    expect(partialUsage(error)?.inputTokens).toBe(7)
   })
 
   it('fails closed on an empty draft instead of returning one', async () => {
     const base = config(async function* () { yield* streamOf(chunks('   ')) }, vi.fn(), ctx(), { maxRetries: 0 })
-    await expect(generateCandidate(base, { provider: 'p', model: 'm' }, 'draft this')).rejects.toThrow(/produced no text/u)
+    const error = await generateCandidate(base, { provider: 'p', model: 'm' }, 'draft this').catch(reason => reason)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toMatch(/produced no text/u)
+    expect(partialUsage(error)?.calls).toBe(1)
   })
 })

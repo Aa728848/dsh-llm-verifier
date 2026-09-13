@@ -32,6 +32,11 @@ export interface UsageStats {
     cachedInputTokens: number;
     outputTokens: number;
     reasoningTokens: number;
+    /**
+     * At least one attempt's usage is UNKNOWN (an earlier attempt failed and was retried, or a
+     * response came back unusable). The token counts are a floor, never a confident total.
+     */
+    usageIncomplete?: boolean;
 }
 export type ScoringMode = 'top-logprobs' | 'explicit-tag';
 export interface VerifierCompletion extends CompletionLogprobs {
@@ -46,6 +51,10 @@ export interface VerifierCompletion extends CompletionLogprobs {
 }
 /** Attempts one failed verifier request already spent; 0 when the error carries none. */
 export declare function requestAttempts(error: unknown): number;
+/** Usage a completed-but-unusable response already cost; undefined when the error carries none. */
+export declare function partialUsage<T = UsageStats>(error: unknown): T | undefined;
+/** Attach the usage a completed-but-unusable response already cost to its error. */
+export declare function attachUsage(error: unknown, usage: UsageStats): void;
 export declare class RequestLimiter {
     readonly limit: number;
     private active;

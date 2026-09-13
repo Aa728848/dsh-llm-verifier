@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { analyzeStructuredRoute, AutoVerifierRouter, boundDecision, buildSemanticRoutePrompt, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, latestDirectUserSeq, MAX_ROUTED_CHECKPOINTS, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type RouterPolicy } from './router.ts'
+import { analyzeStructuredRoute, AutoVerifierRouter, boundDecision, buildSemanticRoutePrompt, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, latestDirectUserSeq, MAX_ROUTED_CHECKPOINTS, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type RouterPolicy } from './router.ts'
 import { sanitizeVerifierText } from './session.ts'
 
 function session() {
@@ -895,6 +895,14 @@ describe('transactional router state', () => {
     const second = new AutoVerifierRouter().reserve(agent, 'semantic', 'two', 1, policy)!
     expect(first.id).not.toBe(second.id)
     expect(first.id.length).toBeGreaterThan(1)
+  })
+  it('namespaces diagnostic cycle ids so a plugin reload does not merge them', () => {
+    const first = nextDiagnosticCycleId()
+    const second = nextDiagnosticCycleId()
+    expect(first).not.toBe(second)
+    // A per-module-load epoch: a bare counter would reproduce the same first id after every reload.
+    expect(first).toMatch(/^diagnostic-[a-z0-9]+-\d+$/)
+    expect(first).not.toBe('diagnostic-1')
   })
   it('prefers the final gate after a track route clears the completion threshold', () => {
     const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()

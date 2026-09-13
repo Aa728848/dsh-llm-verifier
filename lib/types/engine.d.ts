@@ -82,6 +82,14 @@ export interface SelectResult {
     /** Set when every candidate was byte-identical: no pair was judged and every score is 0.5. */
     identical?: true;
 }
+/**
+ * Where an invocation records the usage it accumulated before it finally failed.
+ *
+ * The engine aggregates per-judge usage while jobs are still running, so a later job that
+ * throws used to discard everything the earlier jobs had already spent: a run with two
+ * successful calls then one failure was persisted as one attempt and zero tokens. Attaching
+ * the live stats object to the error keeps every known request and token.
+ */
 /** Usage accumulated before an invocation failed; undefined when the error carries none. */
 export declare function partialStats(error: unknown): RunStats | undefined;
 /**

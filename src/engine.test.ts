@@ -439,6 +439,71 @@ describe('VerifierEngine N-judge ensemble', () => {
     expect(partial?.usageIncomplete).toBe(true)
   })
 
+  const promptTextOf = (options: any): string => {
+    const message = options.messages[0]
+    return typeof message.content === 'string' ? message.content : message.content.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('')
+  }
+  const threeCriteria = [
+    { id: 'a', name: 'A', description: 'first requirement' },
+    { id: 'b', name: 'B', description: 'second requirement' },
+    { id: 'c', name: 'C', description: 'third requirement' },
+  ]
+
+  it('keeps concurrent successes that settle after an earlier failure', async () => {
+    // The failure row used to be written before the other in-flight calls returned, losing them.
+    const llm = {
+      // The SECOND criterion fails: it shares a concurrent batch with the third, which is
+      // still in flight when the failure lands. (The first is the warm-up batch, alone.)
+      stream: (options: any) => promptTextOf(options).includes('second requirement')
+        ? (async function* () { throw new Error('judge exploded') })()
+        // Settles clearly AFTER the failure, so the assertion is deterministic rather than a
+        // microtask race: only awaiting the in-flight call keeps its usage.
+        : (async function* () { await new Promise(resolve => setTimeout(resolve, 5)); yield* streamOf(chunks('<score_A> A </score_A>\n<score_B> T </score_B>')) })(),
+    }
+    const engine = new VerifierEngine(clientConfig({ llm } as any), 3)
+    const error = await engine.compare({ problem: 'task', candidateA: 'AA', candidateB: 'BB', criteria: threeCriteria, repeats: 1 }).catch(reason => reason)
+    const partial = partialStats(error)
+    expect(partial?.calls).toBe(2)
+    expect(partial?.inputTokens).toBe(14)
+    expect(partial?.usageIncomplete).toBe(true)
+  })
+
+  it('keeps the usage of a response that returned but failed to parse', async () => {
+    let call = 0
+    const llm = {
+      stream: () => {
+        call += 1
+        const text = call <= 2 ? '<score_A> A </score_A>\n<score_B> T </score_B>' : 'reasoning with no verdict tags'
+        return streamOf(chunks(text))
+      },
+    }
+    const engine = new VerifierEngine(clientConfig({ llm } as any), 1)
+    const error = await engine.compare({ problem: 'task', candidateA: 'AA', candidateB: 'BB', criteria: threeCriteria, repeats: 1 }).catch(reason => reason)
+    const partial = partialStats(error)
+    // Three billable responses; the third produced no score but still cost its tokens.
+    expect(partial?.calls).toBe(3)
+    expect(partial?.inputTokens).toBe(21)
+    expect(partial?.usageIncomplete).toBe(true)
+  })
+
+  it('keeps the ring phase usage when the pivot phase fails', async () => {
+    let call = 0
+    const llm = {
+      stream: () => {
+        call += 1
+        if (call > 4) throw new Error('pivot exploded')
+        return streamOf(chunks('<score_A> A </score_A>\n<score_B> T </score_B>'))
+      },
+    }
+    const engine = new VerifierEngine(clientConfig({ llm } as any), 1)
+    const error = await engine.select({ problem: 'task', candidates: ['AAAA', 'BBBB', 'CCCC', 'DDDD'], repeats: 1 }).catch(reason => reason)
+    const partial = partialStats(error)
+    expect(partial?.calls).toBe(4)
+    expect(partial?.inputTokens).toBe(28)
+    expect(partial?.attempts).toBe(5)
+    expect(partial?.usageIncomplete).toBe(true)
+  })
+
   it('All judges fail: compare rejects with the first error', async () => {
     const client1 = clientConfig({
       provider: 'prov-1',

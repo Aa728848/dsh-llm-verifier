@@ -14,6 +14,16 @@ import { sanitizeVerifierText, sessionEvents } from './session.ts'
  */
 const ROUTER_EPOCH = Date.now().toString(36) + Math.floor(Math.random() * 0x1000000).toString(36)
 let routerInstanceSerial = 0
+let diagnosticCycleSerial = 0
+
+/**
+ * A unique id for a diagnostic route row that never got a reservation (evidence dropped by the
+ * caps, a delivery-phase skip). Cross-reload safe for the same reason a reservation id is:
+ * without it two plugin incarnations both produce `diagnostic-1` and merge in the summary.
+ */
+export function nextDiagnosticCycleId(): string {
+  return 'diagnostic-' + ROUTER_EPOCH + '-' + (++diagnosticCycleSerial)
+}
 
 /** One durable todo entry carried by `todo/write` snapshots (DSH 0.1.5 dropped the exported type). */
 export interface TodoItem {

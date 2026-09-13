@@ -50,6 +50,11 @@ export interface UsageStats {
   cachedInputTokens: number
   outputTokens: number
   reasoningTokens: number
+  /**
+   * At least one attempt's usage is UNKNOWN (an earlier attempt failed and was retried, or a
+   * response came back unusable). The token counts are a floor, never a confident total.
+   */
+  usageIncomplete?: boolean
 }
 
 export type ScoringMode = 'top-logprobs' | 'explicit-tag'
@@ -78,6 +83,38 @@ export function requestAttempts(error: unknown): number {
   if (typeof error !== 'object' || error === null) return 0
   const value = (error as { [REQUEST_ATTEMPTS]?: unknown })[REQUEST_ATTEMPTS]
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : 0
+}
+
+/**
+ * Usage the transport DID return for a response that then turned out unusable.
+ *
+ * A parse failure or a truncated judge answer happened after the request was billed, so the
+ * engine must not fold it into a zero-cost failure. The usage rides on the error next to the
+ * attempt count; one error can carry both (a retried call whose final answer also failed).
+ */
+const PARTIAL_USAGE = Symbol('llm-verifier.partialUsage')
+
+/** Usage a completed-but-unusable response already cost; undefined when the error carries none. */
+export function partialUsage<T = UsageStats>(error: unknown): T | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const value = (error as { [PARTIAL_USAGE]?: unknown })[PARTIAL_USAGE]
+  return typeof value === 'object' && value !== null ? value as T : undefined
+}
+
+/** Attach the usage a completed-but-unusable response already cost to its error. */
+export function attachUsage(error: unknown, usage: UsageStats): void {
+  if (typeof error === 'object' && error !== null) (error as { [PARTIAL_USAGE]?: UsageStats })[PARTIAL_USAGE] = usage
+}
+
+/**
+ * An error for a response that came back and was billed but produced no usable verdict.
+ *
+ * The usage is attached so the failure row reports known requests and tokens instead of zero.
+ */
+function unusable(reason: string, attempt: number, raw: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number } | undefined): Error {
+  const error = new Error('llm-verifier: ' + reason)
+  attachUsage(error, usage(attempt, raw ?? {}))
+  return error
 }
 
 function failureMessage(finish: FinishReason): string | undefined {
@@ -115,6 +152,7 @@ const RETRYABLE_MESSAGE = /rate|quota|timeout|timed out|temporar|network|fetch|s
  */
 async function retrying<T>(config: VerifierClientConfig, signal: AbortSignal | undefined, run: (signal: AbortSignal, attempt: number) => Promise<T>): Promise<T> {
   let attempt = 0
+  let failedAttempts = 0
   while (true) {
     if (signal?.aborted) throw signal.reason
     attempt += 1
@@ -124,9 +162,21 @@ async function retrying<T>(config: VerifierClientConfig, signal: AbortSignal | u
     const abort = () => controller.abort(signal?.reason)
     signal?.addEventListener('abort', abort, { once: true })
     try {
-      return await run(controller.signal, attempt)
+      const value = await run(controller.signal, attempt)
+      // An earlier attempt burned tokens whose usage never came back, so the successful
+      // attempt's usage is a floor: flag the call instead of presenting it as complete.
+      if (failedAttempts > 0 && typeof value === 'object' && value !== null) {
+        const usage = (value as { usage?: UsageStats }).usage
+        if (usage !== undefined) usage.usageIncomplete = true
+      }
+      return value
     } catch (error) {
-      if (signal?.aborted) throw signal.reason
+      if (signal?.aborted) {
+        // A cancelled request still made the attempts it made, and the thrown reason is what
+        // the caller inspects for them.
+        if (typeof signal.reason === 'object' && signal.reason !== null) (signal.reason as { [REQUEST_ATTEMPTS]?: number })[REQUEST_ATTEMPTS] = attempt
+        throw signal.reason
+      }
       // A deadline abort is retryable even when the adapter wraps the reason in
       // its own error type with an unrelated message.
       const retryable = timedOut || (error instanceof Error && RETRYABLE_MESSAGE.test(error.message))
@@ -137,6 +187,7 @@ async function retrying<T>(config: VerifierClientConfig, signal: AbortSignal | u
         if (typeof error === 'object' && error !== null) (error as { [REQUEST_ATTEMPTS]?: number })[REQUEST_ATTEMPTS] = attempt
         throw error
       }
+      failedAttempts += 1
       await delay(Math.min(30000, config.retryBaseDelayMs * 2 ** (attempt - 1) * (0.8 + Math.random() * 0.4)), signal)
     } finally {
       clearTimeout(timeout)
@@ -196,14 +247,14 @@ async function callTextCompletion(config: VerifierClientConfig, prompt: string, 
   for await (const chunk of config.llm.stream(options)) assembler.push(chunk)
   let truncated = false
   if (assembler.finish.kind === 'max-tokens') {
-    if (!tolerateTruncation) throw new Error('llm-verifier: model call failed: ' + failureMessage(assembler.finish))
+    if (!tolerateTruncation) throw unusable('model call failed: ' + failureMessage(assembler.finish), attempt, assembler.usage)
     truncated = true
   } else {
     const failed = failureMessage(assembler.finish)
-    if (failed !== undefined) throw new Error('llm-verifier: model call failed: ' + failed)
+    if (failed !== undefined) throw unusable('model call failed: ' + failed, attempt, assembler.usage)
   }
   const text = assembler.blocks().filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text').map(block => block.text).join('')
-  if (!text.trim()) throw new Error('llm-verifier: selected DSH model produced no text')
+  if (!text.trim()) throw unusable('selected DSH model produced no text', attempt, assembler.usage)
   // DSH adapters expose provider-neutral text/usage but not top-logprob candidates.
   // extractScore() therefore uses the model's explicit final A–T tags.
   return { text, tokens: [], positions: [], scoringMode: 'explicit-tag', usage: usage(attempt, assembler.usage), truncated }

@@ -14,7 +14,7 @@ import { loadVerifierImages } from './images.ts'
 import { extractSession, sanitizeVerifierText, sessionEvents } from './session.ts'
 import { CriteriaResolver, type ResolvedCriteria } from './criteria.ts'
 import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, MAX_ROUTE_FEEDBACK_CHARS, type AcceptanceCriterion, type RoutedCandidateRef } from './auto.ts'
-import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, latestDirectUserSeq, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type CandidateArtifact, type Reservation, type RouteDecision, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
+import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, latestDirectUserSeq, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type CandidateArtifact, type Reservation, type RouteDecision, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
 import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, buildGenerationPrompt, buildPairwisePrompt, extractScore } from './core.ts'
 import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from './plan-gate.ts'
 import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from './team-gate.ts'
@@ -313,8 +313,7 @@ export function apply(ctx: Context, config: Config = {}): void {
    * Deliberately NOT the router's reservation serial: these rows carry no model call and a
    * shared id namespace would let a reader mistake a diagnostic row for a purchased cycle.
    */
-  let routeCycleSerial = 0
-  const nextCycleId = (): string => 'diagnostic-' + (++routeCycleSerial)
+  const nextCycleId = nextDiagnosticCycleId
   /**
    * Evidence-budget numbers of one bounded routing view.
    *
@@ -917,7 +916,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       // not one byte of the classifier prompt, and re-buying an identical classification is
       // exactly what the cycle budget forbids. Rendering makes no model call, so a failure here
       // costs nothing and must NOT steer — no attempt was consumed.
-      let view: SemanticRouteView
+      let view: SemanticRouteView | undefined
+      let viewError: unknown
       try {
         const extracted = await extractTask(agent, evidence.taskStartSeq, admittedLastSeq, selected.autoVerifyMaxChars, signal)
         // Build the prompt and the set of citable references from ONE bounded view: the budget
@@ -925,10 +925,22 @@ export function apply(ctx: Context, config: Config = {}): void {
         // rather than a decision the classifier is allowed to make.
         view = buildSemanticRouteView(extracted.problem, snapshot, selected.autoRouteMaxCandidates, selected.autoRouteMaxItemChars, selected.autoRouteMaxInputChars)
       } catch (error) {
-        ctx.logger.warn('llm-verifier semantic routing could not build its evidence view: ' + (error instanceof Error ? error.message : String(error)))
-        return
+        viewError = error
       }
-      const fingerprint = stableHash({ phase: 'semantic', model: selected.provider + '/' + selected.model, prompt: view.prompt })
+      if (view === undefined) {
+        // Reading the evidence failed (an image fetch, a redaction). This is NOT a budget stop,
+        // so it must not silence the gate: consume one attempt to authorize any strict steering,
+        // record why, and FALL THROUGH to the mandatory final acceptance.
+        const message = viewError instanceof Error ? viewError.message : String(viewError)
+        ctx.logger.warn('llm-verifier semantic routing could not read its evidence: ' + message)
+        const failed = autoRouter.reserve(agent, 'semantic', stableHash({ phase: 'semantic-unreadable', from: evidence.taskStartSeq, to: admittedLastSeq, model: selected.provider + '/' + selected.model }), 1, policy)
+        if (failed) {
+          await recordSkippedRoute(agent, 'none', 'semantic', 'evidence-unreadable', { cycleId: failed.id, trigger: 'turn-stopping', stage: 'skipped', destination: 'none', attempt: failed.attempt, reservedCalls: failed.expectedCalls, skipReason: 'evidence-unreadable', canceled: false })
+          autoRouter.fail(agent, failed, selected.autoVerifyMode === 'strict')
+          if (selected.autoVerifyMode === 'strict' && !signal.aborted) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier routing]\nStrict semantic routing could not read the evidence: ' + message + '\nThe failure is recorded; the mandatory final acceptance still runs.' }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+        }
+      } else {
+        const fingerprint = stableHash({ phase: 'semantic', model: selected.provider + '/' + selected.model, prompt: view.prompt })
       const reservation = autoRouter.reserve(agent, 'semantic', fingerprint, 1, policy)
       if (reservation) {
         try {
@@ -1002,6 +1014,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           if (selected.autoVerifyMode === 'strict' && !signal.aborted) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier routing]\nStrict route classification failed: ' + (error instanceof Error ? error.message : String(error)) + '\nDo not conclude until directly relevant verification succeeds.' }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
           return
         }
+      }
       }
     }
 
@@ -1144,8 +1157,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
     } catch (error) {
       autoRouter.fail(agent, finalReservation, selected.autoVerifyMode === 'strict')
-      ctx.logger.warn('llm-verifier automatic final verification failed: ' + (error instanceof Error ? error.message : String(error)))
-      if (selected.autoVerifyMode === 'strict' && !signal.aborted) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier gate]\nStrict final verification failed: ' + (error instanceof Error ? error.message : String(error)) + '\nDo not conclude until verification succeeds.' }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+      const finalMessage = error instanceof Error ? error.message : String(error)
+      ctx.logger.warn('llm-verifier automatic final verification failed: ' + finalMessage)
+      // A failed gate must leave a row: zero statistics reads as "nothing was ever attempted"
+      // and hides a broken evidence read behind a silent turn close.
+      await recordSkippedRoute(agent, 'final', 'final', 'failed', { cycleId: finalReservation.id, trigger: 'turn-stopping', stage: 'skipped', destination: 'final', attempt: finalReservation.attempt, reservedCalls: finalReservation.expectedCalls, skipReason: 'failed', canceled: false })
+      if (selected.autoVerifyMode === 'strict' && !signal.aborted) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier gate]\nStrict final verification failed: ' + finalMessage + '\nDo not conclude until verification succeeds.' }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
     }
   })
 

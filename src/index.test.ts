@@ -564,6 +564,29 @@ describe('automatic gate lifecycle', () => {
     expect(calls.length).toBeGreaterThan(1)
   })
 
+  it('records an unreadable evidence read and still attempts the final gate', async () => {
+    // Regression: the semantic view-build catch returned, so a failed image read produced no
+    // record, no steering and no final acceptance — indistinguishable from a budget stop.
+    const calls: Array<Record<string, unknown>> = []
+    const steered: unknown[] = []
+    const imageOnly = { type: 'user/message', seq: 0, data: { source: { kind: 'user' }, content: [{ type: 'image', attachment: { attachmentId: 'missing', mediaType: 'image/png' } }] } }
+    const events = [
+      imageOnly,
+      call(1, 's1', 'subagent'), result(2, 's1', 'analysis'),
+      call(3, 'e', 'edit'), result(4, 'e', 'edited the file'),
+      call(5, 'p', 'pwsh'), result(6, 'p', 'Tests 3 passed'),
+    ]
+    const { handlers, rpc } = assemble({ ...JUDGE, autoVerifyMode: 'strict' }, { stream: scriptedStream(1, [], calls), sessions: [{ id: 'agent-hook', createdAt: 1 }] })
+    await handlers.get('agent/turn-stopping')!({ agent: agent(events, steered), signal: new AbortController().signal })
+    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ route?: { skipReason?: string } }> } }
+    const reasons = overview.value.recent.map(row => row.route?.skipReason).filter((reason): reason is string => reason !== undefined)
+    expect(reasons).toContain('evidence-unreadable')
+    // The boundary still reached the mandatory final acceptance, which failed for the same reason.
+    expect(reasons).toContain('failed')
+    expect(steered.length).toBeGreaterThan(0)
+    expect(calls).toHaveLength(0)
+  })
+
   it('does not re-verify when the manual verdict covers the whole current task', async () => {
     const calls: Array<Record<string, unknown>> = []
     const { handlers } = assemble(JUDGE, { stream: scriptedStream(1, [], calls), sessions: [{ id: 'topic-2', createdAt: 1 }] })
