@@ -15,7 +15,7 @@
 - `verifier_track`：评估任务在已有检查点（Checkpoint）的完成度与进展，供 Goal / Workflow 等长任务编排器直接调用；
 - `verifier_best_of_n`：**唯一会自己生成候选的工具**——用当前会话模型并行起草 N 份完整候选，再用独立裁判排序，并额外给出与验收门控同源的**绝对分**（见[关键交付物的 best-of-N](#关键交付物的-best-of-n)）；
 - `verifier_current_session`：显式提取当前 DSH 会话记录，进行脱敏并执行复核；
-- **四类自动路由**：智能或严格策略在 `agent/turn-stopping` 生命周期边界按阶段调度 `select → compare → track → current_session`（`verifier_best_of_n` 永不自动触发）。第一阶段只信任 Workflow 的版本化候选协议与发生真实变化的 Todo 快照；普通 Subagent 输出必须经第二阶段的证据引用分类，避免把不同子任务误当候选；
+- **自动路由与早评审**：智能或严格策略在 `agent/turn-stopping` 生命周期边界按阶段调度 `select → compare → track → current_session`（`verifier_best_of_n` 永不自动触发）。第一阶段只信任 Workflow 的版本化候选协议与发生真实变化的 Todo 快照；普通 Subagent 输出必须经第二阶段的证据引用分类，避免把不同子任务误当候选。此外，**智能模式**还会在 `agent/pre-step`（下一次模型生成之前）对已完成的 Workflow 候选信封做一次受限的 `compare/select` 早评审，让选择结果直接影响接下来的实施；该入口不跑语义分类、`track`、最终验收或候选生成，严格模式不参与；
 - **自动验收门控**：候选选择与进度检查完成后，宿主运行同一会话验收逻辑；未通过时以插件 steering 反馈要求 Agent 修复并重新验证，而不是依赖模型是否主动想起工具。
 
 ## 安装与启用 (Installation & Usage)
@@ -444,6 +444,8 @@ task ─┬─ 生成 N 份候选（会话模型，temperature 1.0，maxTokens 4
 - **PTC 包装调用也按实际派发内容归类**：`run_code` 只派发了记账类工具时，它自身的结果（通常就是 todo 列表原文）同样不作为证据；派发过真实工具的包装仍保留。
 
 显式调用过对应的 `verifier_compare`、`verifier_select` 或 `verifier_track` 后，自动 Router 不会再对同类结构化对象重复执行。每个输入还会计算稳定指纹，同一证据不会重复消费预算；`track` 的指纹覆盖**渲染后的 steps**（检查点证据 + 最新叙述），因此"todo 没变但证据变了"不会被误判成"同一证据已路由"，而完全没变化的日志仍然只消费一次预算。
+
+Workflow 候选在被记录后的**下一步主模型请求之前**就会评审：`agent/pre-step` 只处理已完成、版本正确的 Workflow 候选信封，并把 `compare/select` 的结论作为**当前步骤**的消息注入（不是延迟到下一步的 steering）。它不跑语义分类、`track`、最终验收或候选生成；预算不足或评分失败时保持原有继续工作的行为并记录原因，停止边界仍是兜底。同一份候选在早入口与停止入口之间只评分一次（共享 fingerprint 与 in-flight 预约）。Workflow 脚本没有通用的 verifier 工具调用 API，所以候选应由脚本自己生成，并作为 workflow 的返回值按上面的 `dsh-verifier-candidates` 协议导出——例如脚本收集两套实现后返回该 JSON 信封，插件即可在下一步模型请求前完成比较。
 
 ### 第二阶段：混合语义识别
 

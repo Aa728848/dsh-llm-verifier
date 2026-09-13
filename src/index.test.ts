@@ -785,3 +785,140 @@ describe('delivery-phase scheduling and tie feedback', () => {
     expect(rendered).not.toContain('Winner: ')
   })
 })
+
+/**
+ * S02 through the registered `agent/pre-step` waterfall.
+ *
+ * The entry must be narrow: only a completed trusted workflow candidate envelope, only
+ * compare/select, injected into the CURRENT step. Everything else — track, semantic
+ * classification, the final gate, generation, a fresh user task, a rejected step — either
+ * belongs to the stop boundary or is the host's own decision to keep.
+ */
+describe('early candidate review through agent/pre-step', () => {
+  const user = (seq: number, text: string) => ({ type: 'user/message', seq, data: { source: { kind: 'user' }, content: [{ type: 'text', text }] } })
+  const call = (seq: number, id: string, name: string) => ({ type: 'tool/call', seq, data: { turn: 1, step: 1, callId: id, name, arguments: '{}' } })
+  const result = (seq: number, id: string, text: string) => ({ type: 'tool/result', seq, data: { turn: 1, step: 1, message: { source: { callId: id }, content: [{ type: 'text', text }] } } })
+  const todo = (seq: number, todos: unknown[]) => ({ type: 'todo/write', seq, data: { todos } })
+  function agent(events: unknown[], header: Record<string, unknown> = { id: 'agent-pre' }) {
+    return {
+      id: 'agent-pre',
+      session: { header, snapshotEvents: () => events, requestHeader: () => ({ config: { provider: 'session-provider', model: 'session-model' } }) },
+      steer() {},
+    }
+  }
+  const envelope = (rows: unknown[]) => JSON.stringify({ protocol: 'dsh-verifier-candidates', version: 1, groupId: 'g', candidates: rows })
+  const candidate = (id: string, content: string) => ({ id, label: 'C' + id, status: 'completed', content })
+  const workflowEvents = (rows: unknown[]) => [
+    user(0, 'Pick one implementation and build it'),
+    call(1, 'w', 'workflow'),
+    result(2, 'w', 'workflow "w" completed (' + rows.length + ' agents).\nReturn value:\n' + envelope(rows)),
+  ]
+  const signal = () => new AbortController().signal
+  const nextEnter = (messages: unknown[] = []) => async () => ({ kind: 'enter', messages })
+  const judgeCalls = (calls: Array<Record<string, unknown>>) => calls.filter(entry => String(entry.prompt).includes('TRAJECTORY_A'))
+  /** Records every prompt, unlike scriptedStream (which records route fields for cost assertions). */
+  function reviewStream(calls: Array<Record<string, unknown>>) {
+    return (options: { messages: readonly unknown[] }) => {
+      const prompt = promptText(options)
+      calls.push({ prompt })
+      return textStream('reasoning\n<score_A> ' + verdictLetter(section(prompt, 'TRAJECTORY_A')) + ' </score_A>\n<score_B> ' + verdictLetter(section(prompt, 'TRAJECTORY_B')) + ' </score_B>')
+    }
+  }
+
+  it('scores a finished candidate envelope and injects the result into the current step', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: reviewStream(calls), sessions: [{ id: 'agent-pre', createdAt: 1 }] })
+    const decision = await handlers.get('agent/pre-step')!({ agent: agent(workflowEvents([candidate('1', 'candidate one'), candidate('2', 'candidate two')])), messages: [], turn: 1, step: 2, signal: signal() }, nextEnter())
+    expect(decision.kind).toBe('enter')
+    expect(decision.messages).toHaveLength(1)
+    expect(JSON.stringify(decision.messages)).toContain('Automatic verifier routing: compare')
+    // The judge ran before the next request: 3 criteria x 2 swapped rounds.
+    expect(judgeCalls(calls)).toHaveLength(6)
+  })
+
+  it('does not re-buy the same pair at the following stop boundary', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: reviewStream(calls), sessions: [{ id: 'agent-pre', createdAt: 1 }] })
+    const events = workflowEvents([candidate('1', 'candidate one'), candidate('2', 'candidate two')])
+    const target = agent(events)
+    const payload = { agent: target, messages: [], turn: 1, step: 2, signal: signal() }
+    await handlers.get('agent/pre-step')!(payload, nextEnter())
+    const afterPreStep = judgeCalls(calls).length
+    await handlers.get('agent/turn-stopping')!({ agent: target, signal: signal() })
+    // The router fingerprint is shared, so the stop boundary sees the object as processed.
+    expect(judgeCalls(calls)).toHaveLength(afterPreStep)
+  })
+
+  it('short-circuits byte-identical candidates without a model call and says so', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: reviewStream(calls), sessions: [{ id: 'agent-pre', createdAt: 1 }] })
+    const rows = [candidate('1', 'identical body'), candidate('2', 'identical body')]
+    const decision = await handlers.get('agent/pre-step')!({ agent: agent(workflowEvents(rows)), messages: [], turn: 1, step: 2, signal: signal() }, nextEnter())
+    expect(calls).toHaveLength(0)
+    expect(JSON.stringify(decision.messages)).toContain('byte-identical')
+  })
+
+  it('respects a rejected step and never resurrects it with an injected prompt', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: scriptedStream(1, [], calls), sessions: [{ id: 'agent-pre', createdAt: 1 }] })
+    const decision = await handlers.get('agent/pre-step')!({ agent: agent(workflowEvents([candidate('1', 'a'), candidate('2', 'b')])), messages: [], turn: 1, step: 2, signal: signal() }, async () => ({ kind: 'reject' }))
+    expect(decision).toEqual({ kind: 'reject' })
+    expect(calls).toHaveLength(0)
+  })
+
+  it('leaves an empty FIRST step alone (the host would otherwise end the turn)', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: scriptedStream(1, [], calls), sessions: [{ id: 'agent-pre', createdAt: 1 }] })
+    const base = { kind: 'enter' as const, messages: [] }
+    const decision = await handlers.get('agent/pre-step')!({ agent: agent(workflowEvents([candidate('1', 'a'), candidate('2', 'b')])), messages: [], turn: 1, step: 1, signal: signal() }, async () => base)
+    expect(decision).toBe(base)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('does not rewrite a step carrying a fresh direct or team task', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: scriptedStream(1, [], calls), sessions: [{ id: 'agent-pre', createdAt: 1 }] })
+    const hostMessages = [{ source: { kind: 'user' }, content: [] }]
+    const decision = await handlers.get('agent/pre-step')!({ agent: agent(workflowEvents([candidate('1', 'a'), candidate('2', 'b')])), messages: hostMessages, turn: 1, step: 2, signal: signal() }, nextEnter(hostMessages))
+    expect(decision.messages).toBe(hostMessages)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('skips child sessions unless they are gated and stays out of strict mode', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: scriptedStream(1, [], calls), sessions: [{ id: 'agent-pre', createdAt: 1 }] })
+    const child = agent(workflowEvents([candidate('1', 'a'), candidate('2', 'b')]), { id: 'agent-pre', origin: 'subagent' })
+    const childDecision = await handlers.get('agent/pre-step')!({ agent: child, messages: [], turn: 1, step: 2, signal: signal() }, nextEnter())
+    expect(childDecision.messages).toHaveLength(0)
+    expect(calls).toHaveLength(0)
+
+    const strictCalls: Array<Record<string, unknown>> = []
+    const strict = assemble({ ...JUDGE, autoVerifyMode: 'strict' }, { stream: scriptedStream(1, [], strictCalls), sessions: [{ id: 'agent-pre', createdAt: 1 }] })
+    const strictDecision = await strict.handlers.get('agent/pre-step')!({ agent: agent(workflowEvents([candidate('1', 'a'), candidate('2', 'b')])), messages: [], turn: 1, step: 2, signal: signal() }, nextEnter())
+    expect(strictDecision.messages).toHaveLength(0)
+    expect(strictCalls).toHaveLength(0)
+  })
+
+  it('leaves a progress-only (track) route to the stop boundary', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: scriptedStream(1, [], calls), sessions: [{ id: 'agent-pre', createdAt: 1 }] })
+    const events = [
+      user(0, 'Implement it'),
+      todo(1, [{ content: 'a', status: 'in_progress' }, { content: 'b', status: 'pending' }]),
+      todo(2, [{ content: 'a', status: 'completed' }, { content: 'b', status: 'pending' }]),
+    ]
+    const base = { kind: 'enter' as const, messages: [] }
+    const decision = await handlers.get('agent/pre-step')!({ agent: agent(events), messages: [], turn: 1, step: 2, signal: signal() }, async () => base)
+    expect(decision).toBe(base)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('falls back to the host decision and warns when the early review fails', async () => {
+    const stream = () => (async function* () { throw new Error('judge exploded') })()
+    const { handlers, warnings } = assemble(JUDGE, { stream, sessions: [{ id: 'agent-pre', createdAt: 1 }] })
+    const base = { kind: 'enter' as const, messages: [] }
+    const decision = await handlers.get('agent/pre-step')!({ agent: agent(workflowEvents([candidate('1', 'a'), candidate('2', 'b')])), messages: [], turn: 1, step: 2, signal: signal() }, async () => base)
+    expect(decision).toBe(base)
+    expect(warnings.some(warning => warning.includes('early candidate review failed'))).toBe(true)
+  })
+})
