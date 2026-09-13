@@ -35,6 +35,10 @@
       "types": "./lib/types/caller.d.ts",
       "default": "./lib/caller.js"
     },
+    "./replay": {
+      "types": "./lib/types/replay.d.ts",
+      "default": "./lib/replay.js"
+    },
     "./package.json": "./package.json",
     "./client": {
       "types": "./lib/types/client.d.ts",
@@ -99,6 +103,7 @@
   "files": [
     "lib",
     "src",
+    "scripts",
     "cordis.patch.yml",
     "README.md"
   ],

@@ -28,7 +28,7 @@ const clientExternals = [
 
 const host: UserConfig = {
   name: packageId,
-  entry: ['src/index.ts', 'src/core.ts', 'src/caller.ts'],
+  entry: ['src/index.ts', 'src/core.ts', 'src/caller.ts', 'src/replay.ts'],
   outDir: 'lib',
   format: ['esm'],
   fixedExtension: false,
