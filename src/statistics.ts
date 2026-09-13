@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { RunStats } from './engine.ts'
 
-export const VERIFIER_TOOL_NAMES = ['verifier_route_classify', 'verifier_compare', 'verifier_select', 'verifier_track', 'verifier_current_session'] as const
+export const VERIFIER_TOOL_NAMES = ['verifier_route_classify', 'verifier_compare', 'verifier_select', 'verifier_track', 'verifier_best_of_n', 'verifier_current_session'] as const
 export type VerifierToolName = typeof VERIFIER_TOOL_NAMES[number]
 
 export interface VerdictSummary {
@@ -87,8 +87,28 @@ export function summarizeVerdict(toolName: VerifierToolName, value: unknown, pha
       ...(winner !== undefined ? { winner } : {}),
     }
   }
-  // Session acceptance: `score` is the session's own score and `baselineScore` the
-  // empty-work baseline it has to beat.
+  // The remaining tools are both measured against the fixed empty-work baseline. A best-of-N
+  // verdict is rendered with the GATE's shape, not the select tool's: the tournament shares it
+  // also returns are relative preferences (wins/counts) and mean nothing against
+  // `autoVerifyThreshold`, while its `score`/`baselineScore`/`winner` come from the very same
+  // empty-work comparison the final gate runs. The dashboard reads it exactly like an acceptance.
+  return acceptanceVerdict(row, phase, thresholds)
+}
+
+/**
+ * Verdict of a run that was measured against the fixed empty-work baseline.
+ *
+ * Shared by the automatic session acceptance and by `verifier_best_of_n`: both answer
+ * "is this good enough to conclude", and both are decided by the same three conditions.
+ * @param row - the rendered result.
+ * @param phase - which stage produced it.
+ * @param thresholds - resolved acceptance thresholds.
+ * @returns A gate-shaped verdict summary.
+ */
+function acceptanceVerdict(row: Record<string, unknown>, phase: string, thresholds: VerdictThresholds): VerdictSummary {
+  const numberAt = (key: string): number | undefined => (typeof row[key] === 'number' && Number.isFinite(row[key]) ? row[key] as number : undefined)
+  const winner = row.winner === 'A' || row.winner === 'B' || row.winner === 'tie' ? row.winner : undefined
+  // `score` is the run's own score and `baselineScore` the empty-work baseline it has to beat.
   const score = numberAt('score') ?? numberAt('scoreA')
   const baselineScore = numberAt('baselineScore')
   const threshold = thresholds.autoVerifyThreshold

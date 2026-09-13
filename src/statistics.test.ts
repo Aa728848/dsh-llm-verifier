@@ -222,6 +222,26 @@ describe('StatisticsStore', () => {
       threshold: 0.8,
     })
     expect(summarizeVerdict('verifier_track', { scores: [0.9] }, 'track', thresholds)).toEqual({ phase: 'track', outcome: 'passed', score: 0.9, threshold: 0.8 })
+    // Best-of-N is a GATE-shaped acceptance, not a select ranking: its scores array holds
+    // relative tournament shares and must never be read as the absolute score, while
+    // score/baselineScore/criteria come from the same empty-work comparison the gate runs.
+    expect(summarizeVerdict('verifier_best_of_n', {
+      scores: [0.9, 0.7, 0.4],
+      index: 0,
+      score: 0.66,
+      baselineScore: 0,
+      winner: 'A',
+      criteria: [{ id: 'specification', scoreA: 0.7 }, { id: 'output_match', scoreA: 0.62 }],
+    }, 'explicit', thresholds)).toEqual({
+      phase: 'explicit',
+      outcome: 'below-threshold',
+      score: 0.66,
+      baselineScore: 0,
+      criteria: [{ id: 'specification', score: 0.7 }, { id: 'output_match', score: 0.62 }],
+      winner: 'A',
+      threshold: 0.65,
+    })
+    expect(summarizeVerdict('verifier_best_of_n', { score: 0.9, baselineScore: 0, winner: 'A', criteria: [{ id: 'a', scoreA: 1 }] }, 'explicit', thresholds)).toMatchObject({ outcome: 'passed', score: 0.9, threshold: 0.65 })
   })
 
   it('reports the winning side of a comparison instead of the loser under a threshold', () => {

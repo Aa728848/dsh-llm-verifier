@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { RequestLimiter, callVerifier } from './caller.ts'
+import { RequestLimiter, callVerifier, generateCandidate, generationClient } from './caller.ts'
 import { TopLogprobCapabilityCache } from './top-logprobs.ts'
 
 function chunks(text = '<score_A> A </score_A>') { return [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'text-delta', index: 0, text }, { type: 'block-end', index: 0, block: { type: 'text', text } }, { type: 'usage', usage: { inputTokens: 7, cacheReadTokens: 3, outputTokens: 4, reasoningTokens: 2 } }, { type: 'finish', reason: { kind: 'stop' } }] as any[] }
@@ -241,5 +241,43 @@ describe('imageRefs eviction on rejection (FIX 3)', () => {
     const result3 = await callVerifier(cfg, 'prompt 3', undefined, [image])
     expect(result3.scoringMode).toBe('explicit-tag')
     expect(saveImage).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('best-of-N generation seam', () => {
+  it('re-points a judge client at the session model and forces diversity sampling', () => {
+    const base = config(async function* () { yield* streamOf(chunks()) }, vi.fn(), ctx(), { reasoningEffort: 'high', temperature: 0.2, maxTokens: 100 })
+    const target = generationClient(base, { provider: 'session-p', model: 'session-m' })
+    expect(target.provider).toBe('session-p')
+    expect(target.model).toBe('session-m')
+    expect(target.temperature).toBe(1)
+    expect(target.maxTokens).toBe(4096)
+    // The base is a judge: its reasoning effort must NOT leak into the drafts, because the
+    // session model's own effort is the one the drafts have to be produced with.
+    expect(target.reasoningEffort).toBeUndefined()
+    expect(target.limiter).toBeUndefined()
+    // Transport identity is inherited, so generation uses the same timeout and retry budget.
+    expect(target.timeoutMs).toBe(base.timeoutMs)
+    expect(target.maxRetries).toBe(base.maxRetries)
+    expect(target.retryBaseDelayMs).toBe(base.retryBaseDelayMs)
+    expect(generationClient(base, { provider: 'p', model: 'm', reasoningEffort: 'low' }).reasoningEffort).toBe('low')
+  })
+
+  it('returns plain text without asking for or parsing an A-T verdict', async () => {
+    let seen: any
+    const target = generationClient(config(async function* (options: any) { seen = options; yield* streamOf(chunks('a complete draft, with no score tags at all')) }), { provider: 'p', model: 'm' })
+    const result = await generateCandidate(target, 'draft this')
+    expect(result.text).toBe('a complete draft, with no score tags at all')
+    expect(result.usage.inputTokens).toBe(7)
+    // No probability channel is involved: generation is not a scored call.
+    expect(result.scoringMode).toBe('explicit-tag')
+    expect(result.tokens).toEqual([])
+    expect(seen.temperature).toBe(1)
+    expect(seen.maxTokens).toBe(4096)
+  })
+
+  it('fails closed on an empty draft instead of returning one', async () => {
+    const target = generationClient(config(async function* () { yield* streamOf(chunks('   ')) }, vi.fn(), ctx(), { maxRetries: 0 }), { provider: 'p', model: 'm' })
+    await expect(generateCandidate(target, 'draft this')).rejects.toThrow(/produced no text/u)
   })
 })

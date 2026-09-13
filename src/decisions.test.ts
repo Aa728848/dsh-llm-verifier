@@ -28,15 +28,30 @@ describe('boundDecisionCalls', () => {
   })
 
   it('bounds a record by call count and by the per-record character budget', () => {
-    // 40 calls are capped at MAX_CALLS = 12, and the equal per-call share keeps every one of
+    // 40 calls are capped at MAX_CALLS = 32, and the equal per-call share keeps every one of
     // them inside the character budget rather than dropping the tail.
     const many = Array.from({ length: 40 }, (_, index) => call({ label: 'c' + index, prompt: 'p'.repeat(6000), output: 'o'.repeat(3000) }))
     const bounded = boundDecisionCalls(many)
-    expect(bounded).toHaveLength(12)
+    expect(bounded).toHaveLength(32)
     const total = bounded.reduce((sum, value) => sum + value.prompt.length + value.output.length + value.label.length + value.channel.length, 0)
     expect(total).toBeLessThanOrEqual(30000)
     // The first call is always kept, so a snapshot never comes back empty.
     expect(bounded[0]!.label).toBe('c0')
+  })
+
+  it('keeps the drafts and the tournament of a 27-call best-of-N snapshot', () => {
+    // Regression: with MAX_CALLS = 12 and judge labels sorting BEFORE the draft labels, every
+    // draft was cut and the snapshot could not show what the judges had chosen between.
+    const calls = [
+      ...Array.from({ length: 3 }, (_, index) => call({ label: 'draft ' + (index + 1), prompt: 'draft prompt ' + index, output: 'DRAFT-' + index + ' ' + 'd'.repeat(3000) })),
+      ...Array.from({ length: 18 }, (_, index) => call({ label: 'criterion ' + (index % 3) + ' repeat ' + (index % 2 + 1) + ' #' + index, prompt: 'p'.repeat(6000), output: 'o'.repeat(3000) })),
+      ...Array.from({ length: 6 }, (_, index) => call({ label: 'baseline ' + index, prompt: 'b'.repeat(6000), output: 'o'.repeat(3000) })),
+    ]
+    const bounded = boundDecisionCalls(calls)
+    expect(bounded).toHaveLength(27)
+    for (const index of [0, 1, 2]) expect(bounded.some(value => value.label === 'draft ' + (index + 1))).toBe(true)
+    const total = bounded.reduce((sum, value) => sum + value.prompt.length + value.output.length + value.label.length + value.channel.length, 0)
+    expect(total).toBeLessThanOrEqual(30000)
   })
 
   it('keeps every call of a six-call session acceptance instead of the first three', () => {

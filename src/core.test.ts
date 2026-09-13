@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   CRITERIA_PRESETS,
   DEFAULT_CRITERIA,
+  EMPTY_WORK_BASELINE,
   accumulatePairs,
   bradleyTerry,
+  buildGenerationPrompt,
   buildPairwisePrompt,
   buildProgressPrompt,
   evidenceNonce,
@@ -215,5 +217,26 @@ describe('criteria markdown', () => {
     expect(slugCriterionId('Final Answer Correctness')).toBe('final_answer_correctness')
     expect(slugCriterionId('***')).toBe('criterion')
     expect(slugCriterionId('x'.repeat(80)).length).toBe(40)
+  })
+
+  it('renders a drafting prompt that cannot be mistaken for the judge contract', () => {
+    const prompt = buildGenerationPrompt('Fix the parser\nexactly.', 1, 3)
+    expect(prompt).toContain('Draft 2 of 3.')
+    expect(prompt).toContain('Fix the parser\nexactly.')
+    // Here the request IS the instruction to follow and the answer is free-form work product,
+    // so it is deliberately NOT wrapped in a data-only block nor given an A-T verdict contract.
+    expect(prompt).not.toContain('<<<TASK:')
+    expect(prompt).not.toContain('SECURITY')
+    expect(prompt).not.toContain('<score_A>')
+    // The only text that varies between the N drafts is the final line, so all of them share a
+    // maximal prompt prefix (the request itself) and a prefix cache can serve it.
+    const other = buildGenerationPrompt('Fix the parser\nexactly.', 2, 3)
+    let shared = 0
+    while (shared < prompt.length && prompt[shared] === other[shared]) shared += 1
+    expect(shared).toBeGreaterThan(prompt.length - 20)
+  })
+
+  it('keeps exactly one definition of the gate baseline', () => {
+    expect(EMPTY_WORK_BASELINE).toBe('(No useful work or verification was performed.)')
   })
 })

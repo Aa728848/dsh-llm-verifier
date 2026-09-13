@@ -55,6 +55,7 @@ describe('client i18n dictionaries', () => {
       'verifier_compare',
       'verifier_select',
       'verifier_track',
+      'verifier_best_of_n',
       'verifier_current_session',
     ]
 

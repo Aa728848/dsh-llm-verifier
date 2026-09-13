@@ -26,10 +26,10 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 
 | 文件 | 职责 |
 |---|---|
-| `index.ts` | 插件装配：四个工具注册、两个生命周期钩子、设置/RPC 路由、对外导出 |
+| `index.ts` | 插件装配：五个工具注册、两个生命周期钩子、设置/RPC 路由、对外导出 |
 | `config.ts` | 配置 schema（schemastery）+ `resolveConfig` 校验 + 设置命名空间安装 |
 | `core.ts` | 纯函数：A–T 标尺、`extractScore`/`extractProgressScore`、提示词构造、锦标赛与 Bradley–Terry |
-| `caller.ts` | 模型调用：统一超时/重试包装 `retrying()`、显式标签通道、并发限制器、通道预测 |
+| `caller.ts` | 模型调用：统一超时/重试包装 `retrying()`、显式标签通道、并发限制器、通道预测、best-of-N 生成 seam（`generationClient` / `generateCandidate`，温度 1.0、上限 4096/份） |
 | `top-logprobs.ts` | 直连 OpenAI 兼容 / deepseek-official 的 logprobs 通道 + 能力记忆（含 TTL） |
 | `cache.ts` | 评分持久化缓存、in-flight 合并、`stableHash` |
 | `engine.ts` | compare / select / track 编排、位置交换、统计汇总 |
@@ -42,7 +42,7 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 | `images.ts` | 图片证据加载（data URL / HTTPS，含超时与主机限制） |
 | `client.tsx` / `client-i18n.ts` | Web 设置页与统计看板、中英文字典 |
 | `client-judges.ts` | 设置页“附加裁判”编辑器的纯函数（规范化 / 冲突检测 / 序列化），由 `client.test.ts` 直接测试 |
-| `decisions.ts` | 决策快照（脱敏提示词 + 原始回答）的持久化与限量：一次调用 ≤ 12 次模型调用、单条记录 ≤ 3 万字符，且这 3 万字符**按调用数平均分配**（6 次调用的会话验收必须留下 6 条、各自缩窗，而不是只留最先返回的 3 条）；每话题最近 40 条；看板按需拉取 |
+| `decisions.ts` | 决策快照（脱敏提示词 + 原始回答）的持久化与限量：一次调用 ≤ 32 次模型调用、单条记录 ≤ 3 万字符，且这 3 万字符**按调用数平均分配**（6 次调用的会话验收必须留下 6 条、各自缩窗，而不是只留最先返回的 3 条）；超出调用上限时按**均匀间隔**取样（首尾必留），避免 n=4 的 best-of-N（约 46 次调用）把排在最后的 `draft N` 全部截掉；每话题最近 40 条；看板按需拉取 |
 | `criteria.ts` | 判据解析：预设直取、自定义 Markdown 文件每次重读（内容未变则复用解析结果），文件缺失/解析失败**退回 coding 并记录原因**，绝不让门控失效 |
 | `replay.ts` | 离线回放：从 `statistics-v1.json` 重放阈值（用当前 `sessionAccepted` 规则）、从 `decisions-v1.json` 重放解析器；纯函数，配套 `scripts/eval-replay.mjs` 与 `lib/replay.js` 导出 |
 
@@ -70,13 +70,13 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 
 ## 已知的有意设计（别顺手"修"）
 
-- **最终验收用固定字符串当基线**（`'(No useful work or verification was performed.)'`）且要求 `winner === 'A'`。基线恒为 0 分，所以真正生效的是分数与阈值；在此基础上还要求**每一项标准各自达到阈值**（`auto.ts` 的 `sessionAccepted` / `failedAcceptanceCriteria`），否则均值会把"3 项里 1 项彻底失败"平均掉。放宽这条等于重新定义验收松紧，需要产品决策。
+- **最终验收用固定字符串当基线**（`core.ts` 的 `EMPTY_WORK_BASELINE`，只此一份定义：自动门控与 `verifier_best_of_n` 必须量同一条基线）且要求 `winner === 'A'`。基线恒为 0 分，所以真正生效的是分数与阈值；在此基础上还要求**每一项标准各自达到阈值**（`auto.ts` 的 `sessionAccepted` / `failedAcceptanceCriteria`），否则均值会把"3 项里 1 项彻底失败"平均掉。放宽这条等于重新定义验收松紧，需要产品决策。
 - **概率期望没有质量下限**：只要 A–T 候选概率质量 > 0 就归一化。当前用户判官走显式标签通道，这条不生效。
 - **自动路由配置默认 1 轮、最终验收默认 2 轮**（`autoVerifyFinalRepeats`）：最终验收是唯一决定 turn 能否结束的自动判决，偶数轮会交换 A/B 位置以抵消位置偏好。`compare` 由 `router.ts` 的 `routedRepeats()` 在运行时**向上取整到偶数**（它只判一对，引擎只在奇数轮换位，奇数轮等于让第一个候选固定坐 A 位）；`select` 的 ring 本身对称、pivot 轮由 `engine.ts` 的 `orientRoundPairs()` 逐对平衡 A/B，`track` 没有位置可换——两者都保留配置值，不为不对症的偏差付双倍调用。改这些会同时改变 `client-i18n.ts` 里 `WORST_CASE_*` 的含义与 UI 预算告警阈值。
 - **`core.pivotRoundPairs` 保持上游顺序**（`parity.test.ts` 与 Python 参考实现逐对比对）；A/B 槽位在 `engine.ts` 的 `orientRoundPairs()` 里平衡——它按"谁更少坐 A 位谁坐 A 位"逐对定向，且不增加任何模型调用。**别把这条读成"上游有没修的偏置"**：pivot 轮的配对表确实让 pivot 恒坐 B 位，但上游在 K≥2 时逐次交换槽位（`fine_grained_reward.py` "Odd reps swap the prompt slots"，`swap = rep % 2 == 1`），而他们的 benchmark 默认 K=4（terminal_bench_2.1 为 2）。所以"未修正的偏置"只在 **K=1** 成立——那恰好是我们自动路由的默认值：我们在 K=1 下零额外调用换掉了它，K≥2 时两边等价，不是"我们比上游强"。
 - **任务模型调用预算默认 96**（会话 240）：8 候选锦标赛 54 次（单轮；位置偏差在引擎侧定向解决，不靠翻倍轮次）+ 最终验收 6 次/裁判。
 - **验收期间会阻塞 turn 关闭**、**`engine.track` 不参与评分缓存**、**`resolveCallConfig` 每次调用做一次适配器 I/O**：都是已知取舍。
-- **决策快照只是观测，永远不参与判定**：`engine` 每次**真实**模型调用（缓存命中/in-flight 合并不算，绝不会伪造）把 `{label, channel, prompt, output, score}` 报给 `DecisionTrace`，由 `index.ts` 的 `record()` 限量落盘到本话题的 `verifier/decisions-v1.json`，统计看板按 id 单条拉取（`{kind:'decision', id}` 走同一条 /api 路由）。上限写在 `decisions.ts`（单条 prompt 8k / output 4k / 记录 30k / 12 次调用 / 40 条），超长文本用 `boundCaptureText` **保留首尾两端**并标注省略字符数——会话验收的提示词超过 10 万字符，只留头部等于留下指令、丢掉裁判真正在看的轨迹尾部（这是实测踩到的），**写入前一律过 `sanitizeVerifierText` 脱敏**；改这些上限不需要动判定逻辑，但也别把快照塞进提示词或判定路径——它是给人看的。关闭开关是 `captureDecisions`。
+- **决策快照只是观测，永远不参与判定**：`engine` 每次**真实**模型调用（缓存命中/in-flight 合并不算，绝不会伪造）把 `{label, channel, prompt, output, score}` 报给 `DecisionTrace`，由 `index.ts` 的 `record()` 限量落盘到本话题的 `verifier/decisions-v1.json`，统计看板按 id 单条拉取（`{kind:'decision', id}` 走同一条 /api 路由）。上限写在 `decisions.ts`（单条 prompt 8k / output 4k / 记录 30k / 32 次调用 / 40 条），超长文本用 `boundCaptureText` **保留首尾两端**并标注省略字符数——会话验收的提示词超过 10 万字符，只留头部等于留下指令、丢掉裁判真正在看的轨迹尾部（这是实测踩到的），**写入前一律过 `sanitizeVerifierText` 脱敏**；改这些上限不需要动判定逻辑，但也别把快照塞进提示词或判定路径——它是给人看的。关闭开关是 `captureDecisions`。
 - **`track` 有自己的重复轮次 `autoTrackRepeats`（默认 3，引擎侧取平均）**：没有 logprobs 的判官走显式标签通道，一次调用只采一个字母（A–T 每档 5.3%），单次采样会在档位之间抖动；上游 `n_evaluations` 对进度也是重复取平均。`routedRepeats(decision, configured, trackRepeats)` 里 track 走第三参，compare/select 不受影响（改 `autoVerifyRepeats` 仍然只影响它们俩）。
 - **子 Agent 会话默认不门控**（`autoVerifySubagents=false`）。子会话用真实用户消息播种，门控它们会额外消耗预算并反复 steering 子 Agent。
 - **检查点证据只有一个判据：`router.ts` 的 `isEvidenceOutput(name, text)`**——检查点渲染、语义候选列表、语义引用校验、PTC 包装体归属四处共用它，别再各写一份名单。不算证据的三类：① 记账/协调类工具（`todo_write`/`create_goal`/`get_goal`/`update_goal`/`interrupt_agent`/`list_agents`/`exit_plan_mode`/`skill`/`present`/`job_list`/`job_kill`/`list_subagent_models`/`send_message`），它们都在活儿干完之后才调用；② 插件自己的判决工具（`verifier_*`）——必须留在证据索引里给 `successfulExplicitKinds` 用，但绝不能作为"观测输出"渲染，否则裁判等于拿自己上一次的判决当证据；③ 后台子 Agent 的启动回执（`started subagent <id>` / `started background subagent job <id>`，只能按文本形状判断：前台 `subagent` 的返回是子 Agent 的真实报告，那本身就是交付物）。PTC 里 `run_code` 的派发全部不算证据时，整条包装结果同样排除（按 `tool/ptc-dispatch` 的 `rootCallId` 归属判断）。新增证据来源时先问"它有没有自己的产出"——`ask_user_question`（用户给的信息）、`edit`/`write`/`pwsh`（状态变更本身就是工作）、`job_output`（带着 job 的真实输出）都是有产出的，故意不排除。这类回归见过三次（`router.test.ts`），最贵的是 `present`：它是每轮最后一个调用，于是「最新观测输出」永远只剩声明本身，裁判按提示词自己的规矩把最新检查点封顶在 K(52.6%)，连续四轮验收不过而活儿早就干完并跑过测试了。**最新检查点还多带一块「最近一次验证运行」**（`verificationEvidence`）：一个输出位放不下"任务尾巴"和"被尾巴挡住的测试"，只给最新检查点补这一块（历史检查点描述的是过去的状态，不补），并附一行确定性的"此后发生了多少次工具结果、分别是哪些工具"（`trailingSummary`），让裁判自己判断这次测试还覆不覆盖当前状态。识别靠 `VERIFICATION_SIGNATURES`（vitest/jest/pytest/go/tsc/EXIT=0 这些输出形状）——**是启发式**：漏判只是退回单输出渲染（不会更糟），误判只是多给裁判看一条真实输出，两者都不可能凭空造出证据；它**不放松任何阈值**，只是把会话里真实发生过的证据重新摆到裁判眼前。
@@ -87,6 +87,7 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 - **逐字节相同的候选绝不送给判官**：`compare` 两侧相同 → `identical: true` + `tie` + 0.5/0.5（**不是**高分，否则会话验收会放行一个与空工作基线无法区分的会话）；`select` 全同 → 0 调用、全 0.5；有重复则先去重再跑锦标赛、结果按代表性索引映射回原列表（`rankByScore`）；空白候选直接报错。verdict 分别记 `identical` / `identical-candidates`，看板据此区别于"真的判过且打平"。这是上游「多数投票跳过锦标赛」的成本收益版，**不采纳**其"多数票直接返回未评判候选"的语义。
 - **判官自检是诊断，不是验收**：`{kind:'probe'}` 与统计/决策走同一条 `/api/llm-verifier/statistics` 路由，对每个判官发一次真实调用（超时上限 30s、不重试、**不写入统计**），回报可达性、实际通道、能否解析出 A–T、延迟与当前生效判据。它不得参与任何判定，也不得写进评分缓存。**自检必须先 `topLogprobCapabilities.forget(provider, model)` 再调用**：否则它只是复述最多 24 小时前（甚至重启前）写下的能力标记，而"我现在到底走哪条通道"恰恰是它唯一要回答的问题；`forget` 必须在序列化写入**内部**再删一次键（hydration 会把文件 max-merge 回内存，只在前台删会被自己的写入复活），并持久化，否则重启后旧标记还会回来。副作用是探到支持 logprobs 时后续真实验收也改走概率期望通道——这是期望行为。**看板是全局页面，自检不许要求"当前有会话"**：`ctx.agents.currentInitiator()` 通常为 undefined，必须退回 `sessionHeaders()`（共享 helper，按 createdAt 倒序，兼容 {header} 包装与裸 header 两种持久化形态）里最新的 header，用 `engineForHeader(header)` 构造判官——`engine(agent)` 只是它的一层包装。一个话题都没有时返回明确说明，绝不复用 `requireAgent()` 那句"agent-owned topic / 随话题删除"的报错（那句在诊断语境里是误导）。
 - **统计的 `verdict` 是增量可选字段**：旧记录没有它也必须能加载（`isRecord` 只做宽松校验），看板对缺字段的行按旧样式渲染；`success` 恒为"模型调用是否抛错"，不要把它当验收结果。
+- **`verifier_best_of_n` 是唯一的生成侧工具，且永不参与自动路由**：它用**当前会话模型**（`agent.session.requestHeader()?.config`，零新增配置项）并行起草 `n` 份（默认 3、上限 4），温度固定 **1.0**（判官的 0.2 会让 N 份几乎相同，工具就失去意义）、每份 `maxTokens` 4096，再让配置的判官跑 `engine.select`，最后跑一次**胜者 vs `EMPTY_WORK_BASELINE`** 的 `compare`。**那次基线比较不是可选项**：`select` 的 `scores` 是锦标赛偏好份额（`wins/counts`），与 `autoVerifyThreshold` 不可比；只有基线比较给出的 `score`/`winner`/逐项判据才是与门控同口径的绝对分（`passesThreshold` 直接复用 `sessionAccepted`）。**fail closed**：幸存候选 < 2 直接报错并列出每次生成失败原因，绝不静默退回第 1 份；`requestHeader()` 为空时报错并指向「用 subagent 起草 + `verifier_select`」。它不在 `router.ts` 的 `ROUTED_TOOLS` 里、也不映射进 `successfulExplicitKinds`（它不是「已有候选」的替代品），但**必须同时加进 `router.ts` 的 `VERIFIER_EVIDENCE_TOOLS` 与 `auto.ts` 的 `VERIFIER_TOOLS`**：否则它自己的返回会被当成一次观测输出，或把生成调用计入任务工具调用数。统计判定走 `statistics.ts` 的**验收分支**而不是 select 分支——`scores` 是相对份额，只有 `score`/`criteria`/`passesThreshold` 是绝对口径；`stats` 把生成 token 一并计入（按判官单价表估算，见 README）。成本（默认 3 判据 × 2 轮）：n=2 → 14 次、n=3 → 27 次、n=4 → 40–64 次模型调用，`index.test.ts` 把这三个数字锁成了回归。
 - **显式证据有硬上限**：一次显式调用合计 ≤ 24 万字符（`EXPLICIT_MAX_TOTAL_CHARS`），超出直接报错。放宽它要重新评估判官模型上下文。
 - **显式 `verifier_current_session` 不等于"已验收"**：只有该次复核达到阈值（`winner === 'A'` 且分数 ≥ 阈值）**并且之后没有实质工作**时才解除自动门控。判决失败、低于阈值、结果解析不出、或通过之后又改动过，都照常验收。别简化回"调用过即放行"。
 - **计划预审通过不设置 `finalRequiredFromSeq`**（只有 compare/select/track/team_task 设置）：批准计划不是完成工作，否则下一个停止边界会立刻跑一次空会话验收，strict 下还会吃掉一次预算并把 `strictBlocked` 打开。

@@ -40,13 +40,23 @@ interface DecisionsDocument {
   records: DecisionRecord[]
 }
 
-/** Upper bound on captured calls per invocation; a session acceptance makes six. */
-const MAX_CALLS = 12
+/**
+ * Upper bound on captured calls per invocation.
+ *
+ * A session acceptance makes six; an explicit best-of-N makes about 27 (N drafts, the
+ * tournament, and the winner-vs-baseline comparison). Keeping the old 12 would have dropped
+ * the drafts from the snapshot entirely — judge labels sort before `draft N` — so the one
+ * record that explains "which draft won and why" could not show the drafts at all. The
+ * per-record character budget is unchanged and shared equally, so the extra calls shrink each
+ * window instead of growing the file. 32 is the ceiling the equal-share floor allows:
+ * 32 x (512 prompt + 256 output) still fits in {@link MAX_RECORD_CHARS}.
+ */
+const MAX_CALLS = 32
 const MAX_PROMPT_CHARS = 8000
 const MAX_OUTPUT_CHARS = 4000
 /** Upper bound on one record's captured text, so a wide select cannot fill the file. */
 const MAX_RECORD_CHARS = 30000
-/** Smallest window worth storing; unreachable while MAX_CALLS stays at 12. */
+/** Smallest window worth storing; at MAX_CALLS the equal share stays above this floor. */
 const MIN_PROMPT_CHARS = 512
 const MIN_OUTPUT_CHARS = 256
 
@@ -90,8 +100,14 @@ export function boundCaptureText(text: string, maxChars: number): string {
  * @returns The bounded calls; empty when nothing was captured.
  */
 export function boundDecisionCalls(calls: readonly DecisionCall[]): DecisionCall[] {
-  const selected = calls.slice(0, MAX_CALLS)
-  if (selected.length === 0) return []
+  if (calls.length === 0) return []
+  // Over the count cap, keep an EVEN SPREAD (first and last included) rather than a prefix.
+  // A prefix is the wrong sample whenever the labels cluster: the engine labels its own calls
+  // in sorted order, so an oversized best-of-N (n=4 makes ~46 calls: the baseline, then the
+  // tournament, then `draft N` last) would lose every draft and keep only judge calls.
+  const selected = calls.length <= MAX_CALLS
+    ? [...calls]
+    : Array.from({ length: MAX_CALLS }, (_, index) => calls[Math.round(index * (calls.length - 1) / (MAX_CALLS - 1))]!)
   // Equal share per call, not first-come-first-served. A session acceptance makes six calls on
   // ~8k-char prompts; a fixed 8k + 4k per call let only the FIRST THREE through, and which three
   // survived depended on completion order, i.e. on the network — so the most expensive path in
@@ -103,7 +119,10 @@ export function boundDecisionCalls(calls: readonly DecisionCall[]): DecisionCall
   const bounded: DecisionCall[] = []
   let used = 0
   for (const call of selected) {
-    const promptChars = Math.min(MAX_PROMPT_CHARS, Math.max(MIN_PROMPT_CHARS, Math.floor(perCall * 0.8)))
+    // The two windows must SUM to at most perCall, which the previous 80/20 split did not
+    // guarantee: once perCall fell below ~1000 (a wide invocation), the output floor pushed the
+    // pair over its share and the safety net below silently dropped the tail — the drafts.
+    const promptChars = Math.min(MAX_PROMPT_CHARS, Math.max(MIN_PROMPT_CHARS, Math.min(Math.floor(perCall * 0.8), perCall - MIN_OUTPUT_CHARS)))
     const outputChars = Math.min(MAX_OUTPUT_CHARS, Math.max(MIN_OUTPUT_CHARS, perCall - promptChars))
     const value: DecisionCall = {
       label: call.label.slice(0, 200),
@@ -113,7 +132,8 @@ export function boundDecisionCalls(calls: readonly DecisionCall[]): DecisionCall
       ...(typeof call.score === 'number' && Number.isFinite(call.score) ? { score: call.score } : {}),
     }
     const cost = value.label.length + value.channel.length + value.prompt.length + value.output.length
-    // Safety net only: the equal share already fits at MAX_CALLS = 12.
+    // Safety net only: the equal share already fits at MAX_CALLS, unless perCall is below the
+    // two floors (unreachable for realistic label lengths).
     if (bounded.length > 0 && used + cost > MAX_RECORD_CHARS) break
     bounded.push(value)
     used += cost

@@ -1,5 +1,5 @@
 import type { RunStats } from './engine.ts';
-export declare const VERIFIER_TOOL_NAMES: readonly ["verifier_route_classify", "verifier_compare", "verifier_select", "verifier_track", "verifier_current_session"];
+export declare const VERIFIER_TOOL_NAMES: readonly ["verifier_route_classify", "verifier_compare", "verifier_select", "verifier_track", "verifier_best_of_n", "verifier_current_session"];
 export type VerifierToolName = typeof VERIFIER_TOOL_NAMES[number];
 export interface VerdictSummary {
     phase?: string;
