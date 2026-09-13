@@ -823,6 +823,17 @@ export function apply(ctx: Context, config: Config = {}): void {
         route: report.observation,
       }).catch(() => {})
     },
+    /**
+     * Correct the statistics row of a cycle whose delivery changed after it was written.
+     *
+     * `route.replayed` means what the HOST received: leaving the intention in place would report a
+     * replacement that never happened and inflate the replacement rate. The cycle sidecar is
+     * corrected by the selector, which owns it.
+     */
+    correctDelivery: async correction => {
+      const target = correction.agent as Agent
+      await topic(target.session.header).statistics.amend(correction.cycleId, { outcome: correction.outcome, replayed: correction.replayed })
+    },
     logger: { warn: message => ctx.logger.warn(message) },
     now: () => Date.now(),
     diagnosticCycleId: nextDiagnosticCycleId,

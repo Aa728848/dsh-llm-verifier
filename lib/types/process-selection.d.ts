@@ -110,6 +110,18 @@ export interface ProcessCompareRequest {
     repeats: number;
     signal: AbortSignal;
 }
+/**
+ * One correction of an already-recorded cycle, because its DELIVERY changed after the row was written.
+ *
+ * `replayed` is defined by what the host actually received, so a cycle whose winner was withheld
+ * must not stay recorded as a replacement.
+ */
+export interface ProcessDeliveryCorrection {
+    agent: unknown;
+    cycleId: string;
+    outcome: string;
+    replayed: 'original' | 'candidate';
+}
 /** What the judge is told about the task: the statement plus the evidence behind the failure. */
 export interface ProcessTaskEvidence {
     problem: string;
@@ -139,6 +151,14 @@ export interface ProcessSelectorDeps {
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
     compare(request: ProcessCompareRequest): Promise<CompareResult>;
     record(report: ProcessCycleReport): Promise<void>;
+    /**
+     * Rewrite the STATISTICS row of one already-recorded cycle because its delivery changed.
+     *
+     * The row is written before the winner is handed over (a row must never be lost to a crash), so
+     * this is the only way "which stream did the host actually get" stays true when the switch flips in
+     * that last window. The durable sidecar is corrected by the selector itself, which owns it.
+     */
+    correctDelivery(correction: ProcessDeliveryCorrection): Promise<void>;
     judges(): number;
     logger: {
         warn(message: string): void;

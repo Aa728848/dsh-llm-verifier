@@ -228,6 +228,23 @@ export declare class StatisticsStore {
     private writing;
     constructor(file: string, maxEntries?: number);
     record(input: InvocationInput): Promise<InvocationRecord>;
+    /**
+     * Correct the observation and outcome of one ALREADY RECORDED invocation.
+     *
+     * A record can be written before the last thing that changes its meaning is known: a P06
+     * process-selection cycle records its decision so the spend is never lost, and only then hands the
+     * winner to the host — a switch turned off in that window changes what the host actually received.
+     * `route.replayed` means which stream the host was given, so leaving the intention in place would
+     * report a replacement that never happened. The merged values go back through the same whitelist,
+     * so a correction can never introduce an undeclared field.
+     * @param cycleId - `RouteObservation.cycleId` of the invocation to correct.
+     * @param patch - outcome and/or replayed value to overwrite.
+     * @returns True when a matching record was found and persisted.
+     */
+    amend(cycleId: string, patch: {
+        outcome?: string;
+        replayed?: 'original' | 'candidate' | 'none';
+    }): Promise<boolean>;
     overview(query: StatisticsQuery): Promise<StatisticsOverview>;
     load(): Promise<void>;
     private persist;

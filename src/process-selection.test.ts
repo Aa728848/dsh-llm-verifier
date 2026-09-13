@@ -6,7 +6,8 @@ import { isAgentLoopRequest, markAgentLoopRequest, type GenerateOptions, type St
 import {
   PROCESS_CANDIDATE_CAP_CHARS, PROCESS_INTENT_TTL_MS, ProcessCycleStore, ProcessSelector,
   buildAlternativeRequest, buildProcessView, candidateIdentity, finishKind, measureChunk, renderCandidate,
-  renderCandidateView, renderToolDigest, usageFromChunks, type ProcessCycleReport, type ProcessIntent, type ProcessSelectorDeps,
+  renderCandidateView, renderToolDigest, usageFromChunks, type ProcessCycleReport, type ProcessDeliveryCorrection,
+  type ProcessIntent, type ProcessSelectorDeps,
 } from './process-selection.ts'
 import type { AutoVerifierRouter, Reservation, RouterPolicy } from './router.ts'
 import { attachUsage, emptyUsage } from './caller.ts'
@@ -53,6 +54,7 @@ function compareResult(winner: 'A' | 'B' | 'tie', overrides: Record<string, unkn
 interface Harness {
   selector: ProcessSelector
   reports: ProcessCycleReport[]
+  corrections: ProcessDeliveryCorrection[]
   warnings: string[]
   store: ProcessCycleStore
   reserved: Reservation[]
@@ -63,6 +65,7 @@ interface Harness {
 
 function harness(overrides: Partial<ProcessSelectorDeps> = {}, storeFile = tempPath()): Harness {
   const reports: ProcessCycleReport[] = []
+  const corrections: ProcessDeliveryCorrection[] = []
   const warnings: string[] = []
   const store = new ProcessCycleStore(storeFile)
   const reserved: Reservation[] = []
@@ -89,13 +92,14 @@ function harness(overrides: Partial<ProcessSelectorDeps> = {}, storeFile = tempP
     stream: () => streamOf(textChunks('alternative')),
     compare: async () => compareResult('A'),
     record: async report => { reports.push(report) },
+    correctDelivery: async correction => { corrections.push(correction) },
     judges: () => 1,
     logger: { warn: message => warnings.push(message) },
     now: () => clock,
     diagnosticCycleId: () => 'diag-1',
     ...overrides,
   }
-  return { selector: new ProcessSelector(deps), reports, warnings, store, reserved, get committed() { return committed }, get failed() { return failed }, advance(ms: number) { clock += ms } } as Harness
+  return { selector: new ProcessSelector(deps), reports, corrections, warnings, store, reserved, get committed() { return committed }, get failed() { return failed }, advance(ms: number) { clock += ms } } as Harness
 }
 
 const AGENT = { id: 'agent-1', session: { header: { id: 'agent-1' } } }
@@ -638,21 +642,53 @@ describe('process cycle execution', () => {
 
   it('does not replay the alternative when the switch is turned off during the accounting', async () => {
     // The report awaits the cycle log and the statistics row; nothing has been yielded yet, so a
-    // switch turned off in that window must still leave the host with the original reply.
+    // switch turned off in that window must still leave the host with the original reply — and the
+    // records must be CORRECTED, because `replayed` describes what the host actually received.
+    const flag = { active: true }
+    const finishes: Array<{ cycleId: string; outcome: string; replayed: string }> = []
+    const h = harness({
+      settings: mutableSettings(flag),
+      store: () => ({
+        begin: async () => true,
+        finish: async (cycleId: string, outcome: string, replayed: string) => {
+          finishes.push({ cycleId, outcome, replayed })
+          // The first finish is the row's own record; the delivery is decided after it.
+          if (finishes.length === 1) flag.active = false
+        },
+        lookup: async () => ({ ok: true, purchased: false }),
+      }) as unknown as ProcessCycleStore,
+      compare: async () => compareResult('B'),
+    })
+    const { chunks, report } = await run(h, { original: textChunks('ORIGINAL') })
+    expect(chunks).toEqual(textChunks('ORIGINAL'))
+    // The row documents the decision that was made...
+    expect(report?.outcome).toBe('candidate-selected')
+    expect(finishes[0]).toMatchObject({ outcome: 'candidate-selected', replayed: 'candidate' })
+    expect(h.committed).toBe(1)
+    // ...and the correction documents that it was not delivered, in BOTH records: the durable
+    // sidecar (owned here) and the statistics row (through the dep).
+    expect(finishes).toHaveLength(2)
+    expect(finishes[1]).toMatchObject({ cycleId: finishes[0]!.cycleId, replayed: 'original' })
+    expect(finishes[1]!.outcome).toContain('candidate-not-delivered')
+    expect(finishes[1]!.outcome).toContain('switch-off')
+    expect(h.corrections).toHaveLength(1)
+    expect(h.corrections[0]).toMatchObject({ cycleId: finishes[0]!.cycleId, replayed: 'original' })
+    expect(h.corrections[0]!.outcome).toContain('candidate-not-delivered')
+    expect(h.warnings.some(w => w.includes('replaying the original reply'))).toBe(true)
+  })
+
+  it('reports a failed delivery correction instead of accepting a wrong row', async () => {
     const flag = { active: true }
     let finished = false
     const h = harness({
       settings: mutableSettings(flag),
-      store: () => ({ begin: async () => true, finish: async () => { finished = true; flag.active = false }, lookup: async () => ({ ok: true, purchased: false }) }) as unknown as ProcessCycleStore,
+      store: () => ({ begin: async () => true, finish: async () => { if (!finished) { finished = true; flag.active = false } }, lookup: async () => ({ ok: true, purchased: false }) }) as unknown as ProcessCycleStore,
+      correctDelivery: async () => { throw new Error('statistics file is locked') },
       compare: async () => compareResult('B'),
     })
-    const { chunks, report } = await run(h, { original: textChunks('ORIGINAL') })
-    expect(finished).toBe(true)
+    const { chunks } = await run(h, { original: textChunks('ORIGINAL') })
     expect(chunks).toEqual(textChunks('ORIGINAL'))
-    // The row documents the decision that was made; the warning documents that it was not delivered.
-    expect(report?.outcome).toBe('candidate-selected')
-    expect(h.committed).toBe(1)
-    expect(h.warnings.some(w => w.includes('replaying the original reply'))).toBe(true)
+    expect(h.warnings.some(w => w.includes('could not correct the cycle records') && w.includes('statistics file is locked'))).toBe(true)
   })
 
   it('declines the cycle when a tool action cannot fit the comparison view', async () => {

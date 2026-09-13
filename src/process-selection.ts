@@ -123,6 +123,19 @@ export interface ProcessCompareRequest {
   signal: AbortSignal
 }
 
+/**
+ * One correction of an already-recorded cycle, because its DELIVERY changed after the row was written.
+ *
+ * `replayed` is defined by what the host actually received, so a cycle whose winner was withheld
+ * must not stay recorded as a replacement.
+ */
+export interface ProcessDeliveryCorrection {
+  agent: unknown
+  cycleId: string
+  outcome: string
+  replayed: 'original' | 'candidate'
+}
+
 /** What the judge is told about the task: the statement plus the evidence behind the failure. */
 export interface ProcessTaskEvidence {
   problem: string
@@ -153,6 +166,14 @@ export interface ProcessSelectorDeps {
   stream(options: GenerateOptions): AsyncIterable<StreamChunk>
   compare(request: ProcessCompareRequest): Promise<CompareResult>
   record(report: ProcessCycleReport): Promise<void>
+  /**
+   * Rewrite the STATISTICS row of one already-recorded cycle because its delivery changed.
+   *
+   * The row is written before the winner is handed over (a row must never be lost to a crash), so
+   * this is the only way "which stream did the host actually get" stays true when the switch flips in
+   * that last window. The durable sidecar is corrected by the selector itself, which owns it.
+   */
+  correctDelivery(correction: ProcessDeliveryCorrection): Promise<void>
   judges(): number
   logger: { warn(message: string): void }
   now(): number
@@ -899,7 +920,22 @@ export class ProcessSelector {
       if (replaced) {
         const staleBeforeReplay = this.staleReason(intent, phase)
         if (staleBeforeReplay !== undefined) {
-          this.deps.logger.warn('llm-verifier process selection: the selected alternative was recorded but the cycle became ' + staleBeforeReplay + ' before its first chunk; replaying the original reply')
+          // The row above records the DECISION; it must not keep claiming the delivery. Correct both
+          // records before the host sees anything, so "which stream was replayed" (and therefore the
+          // replacement rate) describes the original reply that is actually handed over.
+          const outcome = 'candidate-not-delivered (' + staleBeforeReplay + ')'
+          observation.replayed = 'original'
+          // The durable sidecar belongs to this selector; the statistics row is corrected through the
+          // dep. Both must state the delivery, and `finish` overwrites the cycle's own record.
+          await this.deps.store(intent.agent).finish(reservation.id, outcome, 'original')
+          try {
+            await this.deps.correctDelivery({ agent: intent.agent, cycleId: reservation.id, outcome, replayed: 'original' })
+          } catch (error) {
+            // A failed correction is reported, never silently accepted: the row is now wrong about
+            // the delivery and the operator has to be able to see why.
+            this.deps.logger.warn('llm-verifier process selection: could not correct the cycle records after the delivery changed (' + (error instanceof Error ? error.message : String(error)) + ')')
+          }
+          this.deps.logger.warn('llm-verifier process selection: the selected alternative was not delivered because the cycle became ' + staleBeforeReplay + ' before its first chunk; replaying the original reply')
           for (const chunk of original) yield chunk
           return
         }

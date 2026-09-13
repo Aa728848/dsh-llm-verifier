@@ -103,3 +103,30 @@ Status: implemented
 - `process-selection.test.ts`：长轨迹保留 `RECENT-FAILURE`、旧开头与约束/工具定义同时可见；约束超份额时回退；`policy` 等待期间关闭开关不生成；`store.begin` 等待期间关闭开关不生成；`report`(`store.finish`) 等待期间关闭开关时回放原回复并告警（该行仍记 `candidate-selected`，因为决策确实做出过）。
 - `engine.test.ts`：`[PLAN-A, PLAN-A, PLAN-B]` 的槽位 B 缺陷编号为 `candidate 3`（去重前的位置），三个不同候选的编号回归不变。
 - `pnpm run verify:release`（typecheck + 测试 + 重建 `lib/`）与 `pnpm run typecheck:local` 通过；重建后 `lib/` 与源码零差异。
+
+## 补充修订（第三轮复核）
+
+第二轮把"统计行与侧车仍写 `candidate-selected`"当作取舍记入文档，复核判定这不成立：`RouteObservation.replayed` 与计划的口径都是**宿主实际回放了哪一份**，留着一个没有交付的替换决策会高估有效替换率；"另记实际交付结果或更正原记录"是必须项，日志告警只能算补充。本轮据此改掉第二轮的取舍。
+
+### 决定
+
+- **更正记录，而不是另加解释。** 在 `report()` 之后、首个 `yield` 之前发现周期已经失效时，写 `candidate-not-delivered (<canceled|switch-off|task-changed>)` + `replayed: original`：
+  - 侧车由 `ProcessSelector` 自己改（它拥有该文件）：`store.finish(cycleId, outcome, 'original')` 覆盖同一 `cycleId` 的记录；
+  - 统计行通过新增的 `ProcessSelectorDeps.correctDelivery` 交给装配层，落到新的 `StatisticsStore.amend(cycleId, { outcome, replayed })`。
+- **`amend` 重新过一遍白名单，并拒绝非法值。** 合并后的观测照样过 `cleanRoute`，因此更正不可能引入未声明字段；而非法 `replayed` 是**拒绝**（返回 false）而不是合并——合并会让清洗把该键删掉，反而抹掉记录里已有的交付结果。
+- **更正失败要告警。** 只用日志说明"没交付"是不够的，但更正本身失败也必须可见：那说明这条行现在是错的，操作者需要知道原因。
+- 决策本身仍留在统计行的 `verdict.outcome` 里（第一次写入的 `candidate-selected`），更正只改 `route`：读者既能看到"选过备选"，也能看到"没交付"。
+
+### 备选方案
+
+1. **`replayed` 保持 `candidate`，另加一个 `delivered: boolean` 字段。** 不采用。计划与本仓库对 `replayed` 的定义就是"实际回放了哪一份"（看板与离线汇总都按它统计替换率），把语义挪到新字段等于让现有口径继续错。
+2. **只把选择决策从行里删掉。** 不采用。那会丢掉"这次周期确实选出了备选"的信息，也无法解释为什么花了 7 次调用。
+3. **在 `report()` 之前做最后一次检查，检查通过就不再改。** 不采用。`report()` 本身就是异步写盘，检查与它之间必然存在窗口；把窗口说成不存在只是换个地方掩盖。
+4. **把统计行改到首个 `yield` 之后再写。** 不采用。宿主中途放弃消费生成器时 `yield` 之后的代码不一定执行，那会把花了钱的周期整条丢掉；"先记决策、必要时更正"能同时保住账与口径。
+5. **写第二条"更正行"而不是改原行。** 不采用。同一个 `cycleId` 两行会让看板与离线汇总都要额外规则才能读，且天然有把同一笔调用重复计入的风险。
+
+### 验证
+
+- `statistics.test.ts`：`amend` 命中目标行、保留其它观测字段、改写 `verdict.outcome`、**落盘**（重开 store 后依旧是更正后的值）、未知 `cycleId` 返回 false、非法 `replayed` 被拒绝且不抹掉原值。
+- `process-selection.test.ts`：记账期间关闭开关时，侧车第二次 `finish` 记 `replayed: 'original'` + `candidate-not-delivered (switch-off)`，统计更正回调收到同样的值，且原决策行仍为 `candidate-selected`；`correctDelivery` 抛错时输出"could not correct the cycle records"告警。
+- `pnpm run verify:release`（typecheck + 测试 + 重建 `lib/`）与 `pnpm run typecheck:local` 通过；重建后 `lib/` 与源码零差异。

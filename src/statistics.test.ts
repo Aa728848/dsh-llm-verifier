@@ -84,6 +84,39 @@ describe('StatisticsStore', () => {
     expect(overview.recent[0]?.route?.sameCandidate).toBeUndefined()
   })
 
+  it('corrects the delivery of an already-recorded cycle and persists the correction', async () => {
+    // P06 records its decision before handing the winner over. When the switch flips in that last
+    // window the host receives the ORIGINAL reply, and `route.replayed` must say so — otherwise the
+    // replacement rate counts a cycle that replaced nothing.
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const file = join(root, 'statistics.json')
+    const store = new StatisticsStore(file, 10)
+    await store.record({
+      toolName: 'verifier_compare', sessionId: 'one', startedAt: 1, success: true, provider: 'p', model: 'm', stats: stats({ calls: 7 }),
+      verdict: { phase: 'process', outcome: 'candidate-selected' },
+      route: { cycleId: 'cycle-1', trigger: 'llm-stream', stage: 'process', destination: 'process', replayed: 'candidate', generatedCalls: 1, judgeCalls: 6 },
+    })
+    await store.record({ toolName: 'verifier_compare', sessionId: 'two', startedAt: 2, success: true, provider: 'p', model: 'm', stats: stats(), route: { cycleId: 'cycle-2', trigger: 'llm-stream', stage: 'process', destination: 'process', replayed: 'candidate' } })
+    expect(await store.amend('cycle-1', { outcome: 'candidate-not-delivered (switch-off)', replayed: 'original' })).toBe(true)
+    // An unrelated row and an unknown cycle are both untouched.
+    expect(await store.amend('cycle-2', { replayed: 'original' })).toBe(true)
+    expect(await store.amend('missing', { replayed: 'original' })).toBe(false)
+    const overview = await store.overview({ fromMs: 0, toMs: 10 })
+    const corrected = overview.recent.find(row => row.sessionId === 'one')!
+    expect(corrected.route?.replayed).toBe('original')
+    expect(corrected.route?.generatedCalls).toBe(1)
+    expect(corrected.route?.judgeCalls).toBe(6)
+    expect(corrected.verdict?.outcome).toBe('candidate-not-delivered (switch-off)')
+    // The correction is really on disk: the reload path is what a restart would read.
+    const reopened = new StatisticsStore(file, 10)
+    const reloaded = await reopened.overview({ fromMs: 0, toMs: 10 })
+    expect(reloaded.recent.find(row => row.sessionId === 'one')?.route?.replayed).toBe('original')
+    // An illegal value is refused rather than merged: re-cleaning would DELETE the key and erase the
+    // delivery the record already stated.
+    expect(await store.amend('cycle-1', { replayed: 'whatever' as never })).toBe(false)
+    expect((await store.overview({ fromMs: 0, toMs: 10 })).recent.find(row => row.sessionId === 'one')?.route?.replayed).toBe('original')
+  })
+
   it('drops an unknown trigger and an unknown replay value instead of inventing one', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
     const store = new StatisticsStore(join(root, 'statistics.json'), 10)
