@@ -12,6 +12,7 @@ import {
   WORST_CASE_ROUTE_CALLS_PER_JUDGE, WORST_CASE_FINAL_CALLS_PER_JUDGE, WORST_CASE_TASK_PER_JUDGE, WORST_CASE_SESSION_PER_JUDGE, WORST_CASE_CRITERIA_PER_COMPARISON,
   computeJudgeCount, computeWorstCaseBudget, type BudgetWarningState,
   evaluateBudgetWarning, isVerdictFailed, formatPercentage, formatVerdictDetails,
+  processActivityText, type ProcessActivityChipView,
 } from './client-i18n.ts'
 import { CRITERIA_PRESETS, DEFAULT_GROUND_TRUTH_NOTE, buildPairwisePrompt } from './core.ts'
 import {
@@ -900,6 +901,81 @@ export function RightSidebarVerifierTitle() {
 }
 
 export const inject = ['slots', 'connection', 'remote', 'remote.session', 'remote.settings']
+/** Poll interval of the process-selection chip while a turn runs (the answer is in-memory). */
+export const PROCESS_ACTIVITY_POLL_MS = 1_000
+
+/**
+ * Read the in-flight process-selection cycle of one session.
+ *
+ * The chip explains a pause the chat cannot explain by itself (P06 buffers the reply, so no text
+ * streams while it runs), so a failed or refused read is SILENCE, never an error banner: the
+ * composer must not grow noise because a dashboard endpoint was unavailable.
+ * @param rpc - the host RPC handle, when the client exposes one.
+ * @param sessionId - the session to ask about.
+ * @param signal - abort signal of the owning effect.
+ * @returns The activity view, or null when there is nothing (or nothing readable).
+ */
+async function readProcessActivity(rpc: any, sessionId: string, signal: AbortSignal): Promise<ProcessActivityChipView | null> {
+  const payload = { kind: 'process', sessionId }
+  try {
+    if (rpc && typeof rpc.call === 'function') {
+      try {
+        const result = await rpc.call('/api', 'llm-verifier/statistics', payload, signal)
+        if (result && result.ok === true) return result.value as ProcessActivityChipView
+        if (result && result.ok === false) return null
+      } catch (rpcError) {
+        if (signal.aborted) return null
+        console.warn('[llm-verifier] process activity rpc.call failed, trying fetch fallback:', rpcError)
+      }
+    }
+    const response = await fetch('/api/llm-verifier/statistics', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal })
+    const body = await response.json().catch(() => undefined)
+    const value = body?.ok === true ? body.value : body?.result?.ok === true ? body.result.value : undefined
+    return value === undefined || value === null ? null : value as ProcessActivityChipView
+  } catch { return null }
+}
+
+/**
+ * The chat-visible half of P06: what the bought cycle is doing while the reply is being buffered.
+ *
+ * Polls only while a read can change the answer — while the turn runs, and while a settled cycle is
+ * still inside its server-side TTL — so an idle conversation makes no requests at all.
+ * @param props - the input-dock owner values (the session snapshot) plus the injected RPC handle.
+ */
+export function ProcessActivityChip({ session, rpc }: { session?: { sessionId?: unknown; running?: unknown } | null; rpc?: any }) {
+  const lang = useLanguage()
+  const t = dictionaries[lang]
+  const raw = session?.sessionId
+  const sessionId = raw === undefined || raw === null || String(raw) === '' ? undefined : String(raw)
+  const running = session?.running === true
+  const [view, setView] = useState<ProcessActivityChipView | null>(null)
+  const rendered = processActivityText(view, t)
+  // Keyed on whether anything is RENDERED rather than on whether a read answered: an empty view has
+  // to stop the polling too, or a conversation that once ran a cycle would poll forever.
+  const showing = rendered !== null
+  useEffect(() => {
+    if (sessionId === undefined) { setView(null); return }
+    if (!running && !showing) { setView(null); return }
+    let cancelled = false
+    const controller = new AbortController()
+    const load = async () => {
+      const value = await readProcessActivity(rpc, sessionId, controller.signal)
+      if (!cancelled) setView(value)
+    }
+    void load()
+    const timer = setInterval(() => { void load() }, PROCESS_ACTIVITY_POLL_MS)
+    return () => { cancelled = true; clearInterval(timer); controller.abort() }
+  }, [sessionId, running, showing, rpc])
+  if (rendered === null) return null
+  const accent = rendered.tone === 'busy' ? '#4f8cff' : rendered.tone === 'ok' ? '#77d492' : 'var(--dsw-danger, #e85858)'
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 4px 6px', ...muted }}>
+      <span aria-hidden style={{ flex: '0 0 auto', width: 7, height: 7, borderRadius: '50%', background: accent, opacity: rendered.tone === 'busy' ? 0.65 : 1 }} />
+      <span>{rendered.text}</span>
+    </div>
+  )
+}
+
 export function apply(ctx: ClientContext): void {
   const connection = ctx.get('connection') as any
   const remote = ctx.remote
@@ -917,6 +993,15 @@ export function apply(ctx: ClientContext): void {
     label: () => (detectLanguage() === 'zh' ? zh['slot.statistics'] : en['slot.statistics']),
     inject: () => ({ rpc: connection.rpc }),
   }, StatisticsPage as never))
+  // P06 buffers the main reply, so while a cycle runs the chat looks frozen. The dock sits directly
+  // above the composer — exactly where the user is looking — and disappears on its own.
+  ctx.slots.inject('conversation.input.dock' as never, () => ctx.slots.register({
+    name: 'conversation.input.dock' as never,
+    id: 'llm-verifier-process',
+    order: 30,
+    inject: () => ({ rpc: connection.rpc }),
+  } as never, ProcessActivityChip as never))
+
   const VERIFIER_TAB_KIND = 'llm-verifier'
   const VERIFIER_TAB_ID = 'dsh-llm-verifier'
 

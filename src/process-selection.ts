@@ -22,6 +22,7 @@ import { addUsage, emptyUsage, GENERATION_TEMPERATURE, type UsageStats } from '.
 import { stableHash } from './cache.ts'
 import { PROCESS_CRITERIA, type Criterion } from './core.ts'
 import { mergeRunStats, partialStats, type CompareResult, type RunStats, type SelectResult } from './engine.ts'
+import { ProcessActivities, type ProcessActivityView } from './process-activity.ts'
 import { estimateRoutedCalls, itemBudget, type AutoVerifierRouter, type Reservation, type RouterPolicy, type RoutedAgent } from './router.ts'
 import type { RouteObservation } from './statistics.ts'
 
@@ -806,8 +807,22 @@ export class ProcessSelector {
    * the replay, and the buffered original reply is handed back instead.
    */
   private readonly cycles = new Map<string, AbortController>()
+  /**
+   * What the in-flight (and just-finished) cycle of each session is doing, for the chat chip.
+   *
+   * Host-only and in memory: a session event would carry the same information, but the persistence
+   * read path refuses unknown event types for an out-of-repo plugin, and `Session.append` cannot
+   * set the `ignorable` marker that would make one loadable (see `process-activity.ts`).
+   */
+  private readonly activities = new ProcessActivities()
 
   constructor(private readonly deps: ProcessSelectorDeps) {}
+
+  /**
+   * The cycle one session has to show right now, for the UI chip (in flight, or just settled).
+   * @param sessionId - the session to read.
+   */
+  activity(sessionId: string): ProcessActivityView { return this.activities.read(sessionId, this.deps.now()) }
 
   /** Register (or replace) the pending intent of one session. */
   register(intent: ProcessIntent): void { this.intents.set(intent.sessionId, intent) }
@@ -815,12 +830,14 @@ export class ProcessSelector {
   /** Drop a session's pending intent and cancel its in-flight cycle (new task, disposal). */
   clear(sessionId: string): void {
     this.intents.delete(sessionId)
+    this.activities.clear(sessionId)
     this.abort(sessionId, 'the session was cleared')
   }
 
   /** Drop every pending intent and cancel every in-flight cycle (settings change, shutdown). */
   clearAll(): void {
     this.intents.clear()
+    this.activities.clearAll()
     for (const sessionId of [...this.cycles.keys()]) this.abort(sessionId, 'the settings changed')
   }
 
@@ -945,6 +962,15 @@ export class ProcessSelector {
     // turn's own signal — including when that signal was ALREADY aborted before the listener could
     // attach, because an already-dispatched event never fires again.
     this.cycles.set(intent.sessionId, phase)
+    // Published before the alternative is dispatched: this is the window in which the chat has no
+    // streaming text of its own, so the chip is the only thing that can explain it.
+    this.activities.begin(intent.sessionId, {
+      cycleId: reservation.id,
+      phase: 'generating',
+      candidates: count,
+      ...(observation.alternativeModel === undefined ? {} : { alternativeModel: observation.alternativeModel }),
+      startedAt: this.deps.now(),
+    })
     const timer = setTimeout(() => phase.abort(new Error('llm-verifier: process-selection phase timed out')), settings.timeoutMs)
     const linkAbort = () => phase.abort(options.signal?.reason)
     if (options.signal?.aborted) linkAbort()
@@ -1202,6 +1228,9 @@ export class ProcessSelector {
         await this.report({ intent, reservation, observation, startedAt, outcome: 'identical-candidate', replayed: 'original', generatedCalls: generatedCount, judgeCalls: 0, sameCandidate: true, usage: generatedUsage })
         return
       }
+      // The generation and the buffering are behind us; everything this cycle still owes the user
+      // is judge latency.
+      this.activities.phase(intent.sessionId, reservation.id, 'comparing')
       let judged: { judgeCalls: number; winner: BufferedCandidate | undefined; tie: boolean; stats: RunStats; compare?: CompareResult; select?: SelectResult }
       try {
         if ('candidateA' in view) {
@@ -1276,6 +1305,8 @@ export class ProcessSelector {
           // The durable sidecar belongs to this selector; the statistics row is corrected through the
           // dep. Both must state the delivery, and `finish` overwrites the cycle's own record.
           await this.deps.store(intent.agent).finish(reservation.id, outcome, 'original')
+          // The chip follows the same correction: it was already settled as a replacement.
+          this.activities.finish(intent.sessionId, reservation.id, outcome, 'original', this.deps.now())
           try {
             await this.deps.correctDelivery({ agent: intent.agent, cycleId: reservation.id, outcome, replayed: 'original' })
           } catch (error) {
@@ -1336,6 +1367,9 @@ export class ProcessSelector {
 
   /** Record a purchased cycle and stamp its durable outcome. */
   private async report(input: { intent: ProcessIntent; reservation: Reservation; observation: RouteObservation; startedAt: number; outcome: string; replayed: 'original' | 'candidate'; generatedCalls: number; judgeCalls: number; sameCandidate: boolean; usage: RunStats; compare?: CompareResult; select?: SelectResult; error?: string }): Promise<void> {
+    // The chip is told first: it is live UI state, and it must not depend on the cycle log or the
+    // statistics row being writable (a read-only topic still gets an honest indicator).
+    this.activities.finish(input.intent.sessionId, input.reservation.id, input.outcome, input.replayed, this.deps.now())
     await this.deps.store(input.intent.agent).finish(input.reservation.id, input.outcome, input.replayed)
     await this.deps.record({
       agent: input.intent.agent,

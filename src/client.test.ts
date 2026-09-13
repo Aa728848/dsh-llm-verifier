@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { zh, en, toolLabels, tFormat, detectLanguage, compact, dateTime } from './client-i18n.ts'
+import { zh, en, toolLabels, tFormat, detectLanguage, compact, dateTime, processActivityText } from './client-i18n.ts'
 import {
   resolveCacheDirOnSave,
   sameSettingValue,
@@ -29,6 +29,29 @@ import {
   removeExtraJudge,
   serializeExtraJudges,
 } from './client-judges.ts'
+
+describe('process activity chip copy', () => {
+  it('says which half of the cycle is running and how many candidates there are', () => {
+    expect(processActivityText({ active: { phase: 'generating', candidates: 3 } }, zh)).toEqual({ tone: 'busy', text: '正在过程选优：生成 3 份候选…' })
+    expect(processActivityText({ active: { phase: 'comparing', candidates: 4 } }, en)).toEqual({ tone: 'busy', text: 'Selecting the best reply: judging 4 candidates…' })
+  })
+
+  it('treats an unknown phase as work in progress and a broken count as the default pair', () => {
+    // A newer host describing a phase this build does not know must still show that something runs.
+    expect(processActivityText({ active: { phase: 'verifying', candidates: Number.NaN } }, en)?.text).toBe('Selecting the best reply: generating 2 candidates…')
+  })
+
+  it('maps the settled outcome onto a tone, and says nothing when there is nothing', () => {
+    expect(processActivityText({ settled: { outcome: 'replaced' } }, zh)).toEqual({ tone: 'ok', text: zh['process.replaced'] })
+    expect(processActivityText({ settled: { outcome: 'same' } }, en)).toEqual({ tone: 'ok', text: en['process.same'] })
+    expect(processActivityText({ settled: { outcome: 'failed' } }, zh)?.tone).toBe('error')
+    expect(processActivityText({ settled: { outcome: 'unknown-to-this-build' } }, zh)).toBeNull()
+    expect(processActivityText(null, zh)).toBeNull()
+    expect(processActivityText(undefined, zh)).toBeNull()
+    // An active cycle outranks a settled record; the server never sends both, but the mapping decides.
+    expect(processActivityText({ active: { phase: 'comparing', candidates: 2 }, settled: { outcome: 'kept' } }, en)?.tone).toBe('busy')
+  })
+})
 
 describe('client i18n dictionaries', () => {
   it('has identical keys for zh and en dictionaries', () => {

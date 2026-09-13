@@ -9,6 +9,7 @@ import {
   renderCandidateView, renderToolDigest, resolveAlternativeTarget, usageFromChunks, type ProcessCycleReport, type ProcessDeliveryCorrection,
   type ProcessIntent, type ProcessSelectorDeps,
 } from './process-selection.ts'
+import type { ProcessActivityView } from './process-activity.ts'
 import type { AutoVerifierRouter, Reservation, RouterPolicy } from './router.ts'
 import { attachUsage, emptyUsage } from './caller.ts'
 import { sanitizeVerifierText } from './session.ts'
@@ -848,6 +849,56 @@ describe('process cycle execution', () => {
     expect(report?.outcome).toBe('view-over-budget')
     expect(report?.error).toContain('candidate B')
     expect(h.failed).toBe(1)
+  })
+})
+
+describe('process activity, the source of the chat chip', () => {
+  it('publishes the cycle while it runs, follows its phase, and settles it', async () => {
+    let duringComparison: ProcessActivityView | undefined
+    const h = harness({
+      stream: () => streamOf(textChunks('ALTERNATIVE-PLAN')),
+      compare: async () => { duringComparison = h.selector.activity('agent-1'); return compareResult('B') },
+    })
+    const chunks = await collect(h.selector.handle(markedRequest(), () => streamOf(textChunks('ORIGINAL')), intent()))
+    expect(chunks).toEqual(textChunks('ALTERNATIVE-PLAN'))
+    // The judge call IS the cycle's tail: by then the chip must report "comparing", not "generating".
+    expect(duringComparison?.active).toMatchObject({ phase: 'comparing', candidates: 2 })
+    expect(h.selector.activity('agent-1').active).toBeUndefined()
+    expect(h.selector.activity('agent-1').settled).toMatchObject({ outcome: 'replaced', candidates: 2 })
+  })
+
+  it('reports a kept cycle, and clear() forgets the session', async () => {
+    const h = harness({ compare: async () => compareResult('A') })
+    await collect(h.selector.handle(markedRequest(), () => streamOf(textChunks('ORIGINAL')), intent()))
+    expect(h.selector.activity('agent-1').settled?.outcome).toBe('kept')
+    h.selector.clear('agent-1')
+    expect(h.selector.activity('agent-1')).toEqual({})
+  })
+
+  it('never claims a cycle whose purchase could not be logged', async () => {
+    // store.begin() false is the one decline that reports BEFORE the cycle starts, so there is
+    // nothing the chip may describe.
+    const h = harness({ store: () => ({ begin: async () => false, finish: async () => {} }) as never })
+    await collect(h.selector.handle(markedRequest(), () => streamOf(textChunks('ORIGINAL')), intent()))
+    expect(h.reports.at(-1)?.outcome).toBe('store-unavailable')
+    expect(h.selector.activity('agent-1')).toEqual({})
+  })
+
+  it('follows the late delivery correction instead of claiming a replacement', async () => {
+    // A new task arrives BETWEEN the accounting row and the first replayed chunk: the row said
+    // "candidate", the host still receives the original, and the chip has to say the same thing.
+    let current = true
+    const h = harness({
+      stream: () => streamOf(textChunks('ALTERNATIVE-PLAN')),
+      compare: async () => compareResult('B'),
+      current: () => current,
+      // report() runs after the pre-commit staleness check and before the pre-replay one.
+      record: async () => { current = false },
+    })
+    const chunks = await collect(h.selector.handle(markedRequest(), () => streamOf(textChunks('ORIGINAL')), intent()))
+    expect(chunks).toEqual(textChunks('ORIGINAL'))
+    expect(h.corrections.map(correction => correction.replayed)).toEqual(['original'])
+    expect(h.selector.activity('agent-1').settled).toMatchObject({ outcome: 'kept' })
   })
 })
 

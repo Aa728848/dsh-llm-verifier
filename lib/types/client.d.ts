@@ -173,5 +173,21 @@ export declare function RightSidebarVerifierPanel({ rpc, sessionId }: {
 }): import("react").JSX.Element;
 export declare function RightSidebarVerifierTitle(): import("react").JSX.Element;
 export declare const inject: string[];
+/** Poll interval of the process-selection chip while a turn runs (the answer is in-memory). */
+export declare const PROCESS_ACTIVITY_POLL_MS = 1000;
+/**
+ * The chat-visible half of P06: what the bought cycle is doing while the reply is being buffered.
+ *
+ * Polls only while a read can change the answer — while the turn runs, and while a settled cycle is
+ * still inside its server-side TTL — so an idle conversation makes no requests at all.
+ * @param props - the input-dock owner values (the session snapshot) plus the injected RPC handle.
+ */
+export declare function ProcessActivityChip({ session, rpc }: {
+    session?: {
+        sessionId?: unknown;
+        running?: unknown;
+    } | null;
+    rpc?: any;
+}): import("react").JSX.Element | null;
 export declare function apply(ctx: ClientContext): void;
 //# sourceMappingURL=client.d.ts.map

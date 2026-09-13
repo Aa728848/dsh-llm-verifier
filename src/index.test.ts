@@ -60,6 +60,17 @@ describe('plugin assembly', () => {
     }
   })
 
+  it('answers the chat chip\'s process query from memory, and only with a session', async () => {
+    // The client dock polls this while a cycle buffers the reply. It must be a pure read: no sidecar,
+    // no model call, and an explicit refusal when the caller forgot which session it means.
+    const { rpc } = assemble()
+    const handler = rpc.get('/llm-verifier')!
+    expect(await handler('process', {})).toMatchObject({ ok: false, error: { message: expect.stringMatching(/sessionId is required/) } })
+    expect(await handler('process', undefined)).toMatchObject({ ok: false })
+    // A session that never bought a cycle answers with nothing to render, not an error.
+    expect(await handler('process', { sessionId: 'session-1' })).toEqual({ ok: true, value: { sessionId: 'session-1' } })
+  })
+
   it('rejects out-of-range explicit evidence before any model call', async () => {
     const { tools } = assemble()
     const session = tools.get('verifier_current_session')!

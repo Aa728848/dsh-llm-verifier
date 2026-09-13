@@ -15,6 +15,7 @@ import { extractSession, sanitizeVerifierText, sessionEvents } from './session.t
 import { CriteriaResolver, type ResolvedCriteria } from './criteria.ts'
 import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, MAX_ROUTE_FEEDBACK_CHARS, type AcceptanceCriterion, type RoutedCandidateRef } from './auto.ts'
 import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, inspectRecoverySignal, latestDirectUserSeq, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type CandidateArtifact, type Reservation, type RouteDecision, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
+import type { ProcessActivityView } from './process-activity.ts'
 import { ProcessCycleStore, ProcessSelector, resolveProcessFile, type ProcessCycleReport } from './process-selection.ts'
 import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, PROPOSAL_CRITERIA, buildGenerationPrompt, buildPairwisePrompt, extractScore, renderDiagnostics, renderReferenceContext, type Diagnostic, type ReviewStage } from './core.ts'
 import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from './plan-gate.ts'
@@ -952,6 +953,26 @@ export function apply(ctx: Context, config: Config = {}): void {
   const isDecisionQuery = (payload: unknown): boolean => typeof payload === 'object' && payload !== null && (payload as { kind?: unknown }).kind === 'decision'
 
   /**
+   * Whether a payload asks what the process-selection (P06) cycle of one session is doing.
+   *
+   * This is what the chat chip polls while a turn runs. The answer is in-memory state only: no
+   * sidecar read, no model call, and nothing durable, so polling it cannot cost anything or change
+   * a verdict. A session that never bought a cycle answers with an empty object.
+   */
+  const isProcessQuery = (payload: unknown): boolean => typeof payload === 'object' && payload !== null && (payload as { kind?: unknown }).kind === 'process'
+
+  /**
+   * Read the in-flight / just-settled process cycle of one session.
+   * @param payload - the RPC payload; `sessionId` is required.
+   * @returns The activity view, or a bad-request failure.
+   */
+  const handleProcessQuery = async (payload: unknown): Promise<{ ok: true; value: { sessionId: string } & ProcessActivityView } | ReturnType<typeof rpcFailure>> => {
+    const sessionId = (payload as { sessionId?: unknown } | null)?.sessionId
+    if (typeof sessionId !== 'string' || sessionId === '') return rpcFailure('a sessionId is required')
+    return rpcSuccess({ sessionId, ...processSelector.activity(sessionId) })
+  }
+
+  /**
    * Judge diagnostics: one real, bounded judge call per configured judge plus the resolved rubric.
    *
    * Answers the two questions a user actually has after configuring the plugin: "which scoring
@@ -1028,7 +1049,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           const rpcId = isRpcEnvelope ? (body as { rpcId: string }).rpcId : 'direct'
           const payload = isRpcEnvelope ? (body as { payload?: unknown }).payload : body
           const isProbe = typeof payload === 'object' && payload !== null && (payload as { kind?: unknown }).kind === 'probe'
-          const outcome = isDecisionQuery(payload) ? await handleDecisionQuery((payload as { id?: unknown }).id) : isProbe ? await handleProbe() : await handleStatisticsQuery(payload)
+          const outcome = isDecisionQuery(payload) ? await handleDecisionQuery((payload as { id?: unknown }).id) : isProbe ? await handleProbe() : isProcessQuery(payload) ? await handleProcessQuery(payload) : await handleStatisticsQuery(payload)
           if (isRpcEnvelope) {
             return Response.json({
               type: 'server-response',
@@ -1053,6 +1074,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       legacyRpc.rpc.handle('/llm-verifier', async (endpoint: string, payload: unknown) => {
         if (endpoint === 'decision') return handleDecisionQuery((payload as { id?: unknown } | undefined)?.id)
         if (endpoint === 'probe') return handleProbe()
+        if (endpoint === 'process') return handleProcessQuery(payload)
         if (endpoint !== 'statistics') return rpcFailure('unknown llm-verifier endpoint')
         return handleStatisticsQuery(payload)
       })

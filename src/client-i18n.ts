@@ -256,6 +256,14 @@ export const zh = {
   'models.tokens': '{tokens} Token',
   'models.empty': '暂无模型调用',
 
+  // Process selection (P06) chat chip: the reply is being buffered, so this is the only sign of life
+  'process.generating': '正在过程选优：生成 {n} 份候选…',
+  'process.comparing': '正在过程选优：裁判比较 {n} 份候选…',
+  'process.replaced': '过程选优完成：已改用更优的回复',
+  'process.kept': '过程选优完成：保留原回复',
+  'process.same': '过程选优：备选与原回复相同，未比较',
+  'process.failed': '过程选优未完成：保留原回复',
+
   // Slot label
   'slot.statistics': '工具统计',
   'slot.globalDashboard': 'Verifier 看板',
@@ -583,6 +591,14 @@ export const en: I18nDict = {
   'models.tokens': '{tokens} Tokens',
   'models.empty': 'No model calls',
 
+  // Process selection (P06) chat chip: the reply is being buffered, so this is the only sign of life
+  'process.generating': 'Selecting the best reply: generating {n} candidates…',
+  'process.comparing': 'Selecting the best reply: judging {n} candidates…',
+  'process.replaced': 'Process selection: a better reply replaced the original',
+  'process.kept': 'Process selection: the original reply was kept',
+  'process.same': 'Process selection: the alternative was identical, so nothing was judged',
+  'process.failed': 'Process selection did not finish: the original reply was kept',
+
   // Slot label
   'slot.statistics': 'Statistics',
   'slot.globalDashboard': 'Verifier Dashboard',
@@ -676,6 +692,48 @@ export const toolLabels: Record<'zh' | 'en', Record<string, string>> = {
 export function tFormat(template: string, params?: Record<string, string | number>): string {
   if (!params) return template
   return template.replace(/\{(\w+)\}/g, (match, key) => (key in params ? String(params[key]) : match))
+}
+
+/** The process-selection chip's wire shape (a subset of the server's `ProcessActivityView`). */
+export interface ProcessActivityChipView {
+  active?: { phase?: unknown; candidates?: unknown; alternativeModel?: unknown }
+  settled?: { outcome?: unknown; candidates?: unknown; at?: unknown }
+}
+
+/** How the chip renders: a busy accent, a settled confirmation, or a failure note. */
+export type ProcessActivityTone = 'busy' | 'ok' | 'error'
+
+/**
+ * Render the process-selection chip, or nothing when there is nothing to say.
+ *
+ * Pure on purpose (no React, no locale detection): both the chip and its regression tests read the
+ * same mapping. An unknown phase counts as generating — a newer host describing a phase this build
+ * does not know must still show that work is happening, not disappear.
+ * @param view - the server's activity view, or nothing.
+ * @param t - the active dictionary.
+ * @returns The tone and copy, or null to render no row at all.
+ */
+export function processActivityText(
+  view: ProcessActivityChipView | null | undefined,
+  t: I18nDict,
+): { tone: ProcessActivityTone; text: string } | null {
+  const active = view?.active
+  if (active !== undefined && active !== null) {
+    const candidates = typeof active.candidates === 'number' && Number.isFinite(active.candidates)
+      ? Math.max(2, Math.floor(active.candidates))
+      : 2
+    return active.phase === 'comparing'
+      ? { tone: 'busy', text: tFormat(t['process.comparing'], { n: candidates }) }
+      : { tone: 'busy', text: tFormat(t['process.generating'], { n: candidates }) }
+  }
+  const outcome = view?.settled?.outcome
+  switch (outcome) {
+    case 'replaced': return { tone: 'ok', text: t['process.replaced'] }
+    case 'kept': return { tone: 'ok', text: t['process.kept'] }
+    case 'same': return { tone: 'ok', text: t['process.same'] }
+    case 'failed': return { tone: 'error', text: t['process.failed'] }
+    default: return null
+  }
 }
 
 export function detectLanguage(): 'zh' | 'en' {

@@ -19,6 +19,7 @@ import { type GenerateOptions, type Message, type StreamChunk } from '@deepseek-
 import { type UsageStats } from './caller.ts';
 import { type Criterion } from './core.ts';
 import { type CompareResult, type RunStats, type SelectResult } from './engine.ts';
+import { type ProcessActivityView } from './process-activity.ts';
 import { type AutoVerifierRouter, type RouterPolicy } from './router.ts';
 import type { RouteObservation } from './statistics.ts';
 /**
@@ -462,7 +463,20 @@ export declare class ProcessSelector {
      * the replay, and the buffered original reply is handed back instead.
      */
     private readonly cycles;
+    /**
+     * What the in-flight (and just-finished) cycle of each session is doing, for the chat chip.
+     *
+     * Host-only and in memory: a session event would carry the same information, but the persistence
+     * read path refuses unknown event types for an out-of-repo plugin, and `Session.append` cannot
+     * set the `ignorable` marker that would make one loadable (see `process-activity.ts`).
+     */
+    private readonly activities;
     constructor(deps: ProcessSelectorDeps);
+    /**
+     * The cycle one session has to show right now, for the UI chip (in flight, or just settled).
+     * @param sessionId - the session to read.
+     */
+    activity(sessionId: string): ProcessActivityView;
     /** Register (or replace) the pending intent of one session. */
     register(intent: ProcessIntent): void;
     /** Drop a session's pending intent and cancel its in-flight cycle (new task, disposal). */

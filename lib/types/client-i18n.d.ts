@@ -228,6 +228,12 @@ export declare const zh: {
     'models.calls': string;
     'models.tokens': string;
     'models.empty': string;
+    'process.generating': string;
+    'process.comparing': string;
+    'process.replaced': string;
+    'process.kept': string;
+    'process.same': string;
+    'process.failed': string;
     'slot.statistics': string;
     'slot.globalDashboard': string;
     'global.panelTitle': string;
@@ -526,6 +532,12 @@ export declare const dictionaries: {
         'models.calls': string;
         'models.tokens': string;
         'models.empty': string;
+        'process.generating': string;
+        'process.comparing': string;
+        'process.replaced': string;
+        'process.kept': string;
+        'process.same': string;
+        'process.failed': string;
         'slot.statistics': string;
         'slot.globalDashboard': string;
         'global.panelTitle': string;
@@ -821,6 +833,12 @@ export declare const dictionaries: {
         'models.calls': string;
         'models.tokens': string;
         'models.empty': string;
+        'process.generating': string;
+        'process.comparing': string;
+        'process.replaced': string;
+        'process.kept': string;
+        'process.same': string;
+        'process.failed': string;
         'slot.statistics': string;
         'slot.globalDashboard': string;
         'global.panelTitle': string;
@@ -889,6 +907,35 @@ export declare const dictionaries: {
 };
 export declare const toolLabels: Record<'zh' | 'en', Record<string, string>>;
 export declare function tFormat(template: string, params?: Record<string, string | number>): string;
+/** The process-selection chip's wire shape (a subset of the server's `ProcessActivityView`). */
+export interface ProcessActivityChipView {
+    active?: {
+        phase?: unknown;
+        candidates?: unknown;
+        alternativeModel?: unknown;
+    };
+    settled?: {
+        outcome?: unknown;
+        candidates?: unknown;
+        at?: unknown;
+    };
+}
+/** How the chip renders: a busy accent, a settled confirmation, or a failure note. */
+export type ProcessActivityTone = 'busy' | 'ok' | 'error';
+/**
+ * Render the process-selection chip, or nothing when there is nothing to say.
+ *
+ * Pure on purpose (no React, no locale detection): both the chip and its regression tests read the
+ * same mapping. An unknown phase counts as generating — a newer host describing a phase this build
+ * does not know must still show that work is happening, not disappear.
+ * @param view - the server's activity view, or nothing.
+ * @param t - the active dictionary.
+ * @returns The tone and copy, or null to render no row at all.
+ */
+export declare function processActivityText(view: ProcessActivityChipView | null | undefined, t: I18nDict): {
+    tone: ProcessActivityTone;
+    text: string;
+} | null;
 export declare function detectLanguage(): 'zh' | 'en';
 export declare function useLanguage(): 'zh' | 'en';
 export declare function compact(value: number, lang?: 'zh' | 'en'): string;
