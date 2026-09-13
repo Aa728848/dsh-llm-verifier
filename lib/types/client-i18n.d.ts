@@ -216,6 +216,12 @@ export declare const zh: {
     'recent.detail.route': string;
     'recent.detail.routeReserved': string;
     'recent.detail.routeSkip': string;
+    'recent.detail.routeProcess': string;
+    'recent.detail.replayOriginal': string;
+    'recent.detail.replayCandidate': string;
+    'recent.detail.replayNone': string;
+    'recent.detail.routeSameCandidate': string;
+    'recent.detail.routeAugmented': string;
     'recent.detail.channelFallback': string;
     'models.title': string;
     'models.calls': string;
@@ -233,6 +239,8 @@ export declare const zh: {
     'field.autoVerifyPlanMode.help': string;
     'field.autoProcessSelection.title': string;
     'field.autoProcessSelection.help': string;
+    'field.autoProcessFailureContext.title': string;
+    'field.autoProcessFailureContext.help': string;
     'field.captureDecisions.title': string;
     'field.captureDecisions.help': string;
     'field.autoVerifySubagents.title': string;
@@ -501,6 +509,12 @@ export declare const dictionaries: {
         'recent.detail.route': string;
         'recent.detail.routeReserved': string;
         'recent.detail.routeSkip': string;
+        'recent.detail.routeProcess': string;
+        'recent.detail.replayOriginal': string;
+        'recent.detail.replayCandidate': string;
+        'recent.detail.replayNone': string;
+        'recent.detail.routeSameCandidate': string;
+        'recent.detail.routeAugmented': string;
         'recent.detail.channelFallback': string;
         'models.title': string;
         'models.calls': string;
@@ -518,6 +532,8 @@ export declare const dictionaries: {
         'field.autoVerifyPlanMode.help': string;
         'field.autoProcessSelection.title': string;
         'field.autoProcessSelection.help': string;
+        'field.autoProcessFailureContext.title': string;
+        'field.autoProcessFailureContext.help': string;
         'field.captureDecisions.title': string;
         'field.captureDecisions.help': string;
         'field.autoVerifySubagents.title': string;
@@ -783,6 +799,12 @@ export declare const dictionaries: {
         'recent.detail.route': string;
         'recent.detail.routeReserved': string;
         'recent.detail.routeSkip': string;
+        'recent.detail.routeProcess': string;
+        'recent.detail.replayOriginal': string;
+        'recent.detail.replayCandidate': string;
+        'recent.detail.replayNone': string;
+        'recent.detail.routeSameCandidate': string;
+        'recent.detail.routeAugmented': string;
         'recent.detail.channelFallback': string;
         'models.title': string;
         'models.calls': string;
@@ -800,6 +822,8 @@ export declare const dictionaries: {
         'field.autoVerifyPlanMode.help': string;
         'field.autoProcessSelection.title': string;
         'field.autoProcessSelection.help': string;
+        'field.autoProcessFailureContext.title': string;
+        'field.autoProcessFailureContext.help': string;
         'field.captureDecisions.title': string;
         'field.captureDecisions.help': string;
         'field.autoVerifySubagents.title': string;

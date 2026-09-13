@@ -60,6 +60,14 @@ export interface Config {
      * cycle is bought per task, and a selection is never an acceptance.
      */
     autoProcessSelection?: boolean;
+    /**
+     * P06: hand the alternative reply the failing-run evidence the cycle was triggered by.
+     *
+     * Default ON: without it the extra candidate is written from exactly the same information as the
+     * reply the session already showed failing, so the comparison mostly measures sampling noise.
+     * OFF is the control arm of the A/B comparison, not a supported end state.
+     */
+    autoProcessFailureContext?: boolean;
     autoRouteMaxItemChars?: number;
     autoRouteMaxInputChars?: number;
     autoMaxModelCallsPerTask?: number;
@@ -117,6 +125,7 @@ export interface ResolvedConfig {
     autoRouteMaxPerSession: number;
     autoTrackCompletionThreshold: number;
     autoProcessSelection: boolean;
+    autoProcessFailureContext: boolean;
     autoRouteMaxItemChars: number;
     autoRouteMaxInputChars: number;
     autoMaxModelCallsPerTask: number;

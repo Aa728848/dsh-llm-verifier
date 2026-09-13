@@ -188,11 +188,47 @@ interface EvidenceIndex {
     };
 }
 export declare function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceIndex | undefined;
+/**
+ * Verdict one rendered verification result actually reported.
+ *
+ * The recovery trigger, the checkpoint FAILED marks and the delivery signature all ask
+ * "did this run fail?", and until this existed they answered it with the tool-level error flag
+ * (`EvidenceCall.ok`). The host reports a non-zero exit as text — `tool-pwsh`'s renderer appends
+ * `[exit code: N]` and explicitly does not error the result — so that flag is TRUE for a failing
+ * test suite: the P06 trigger could not fire for the case it exists for, and a failed run rendered
+ * as a clean one. Failure is therefore read from the output itself, with the tool-level flag still
+ * counting as a failure (an aborted or unresolvable run is not a pass).
+ *
+ * Deliberately NOT used to gate candidate selection: `EvidenceCall.ok` keeps its "the tool call
+ * itself succeeded" meaning there, because a failed dispatch is not a selectable candidate.
+ * @param text - rendered tool result.
+ * @returns 'failed' / 'passed' when the output states a verdict, undefined when it does not.
+ */
+export declare function verificationVerdict(text: string): 'passed' | 'failed' | undefined;
+/**
+ * Whether one settled call reports a FAILED verification run.
+ *
+ * The single definition shared by the recovery trigger, the checkpoint marks and the delivery
+ * signature. A tool-level error counts as a failure (nothing was verified), and so does an output
+ * that states a failure; an unrecognised output is NOT a failure, so a missed trigger degrades to
+ * the ordinary path instead of buying a cycle on a guess.
+ * @param call - the settled call (only its tool status and rendered text are read).
+ * @returns True when the run failed or could not complete.
+ */
+export declare function verificationFailed(call: {
+    ok: boolean;
+    text: string;
+}): boolean;
 /** What the delivery-phase shortcut needs to know about one task. */
 export interface DeliveryPhase {
     /** The task's newest durable todo snapshot is non-empty and every entry is completed. */
     todosComplete: boolean;
-    /** The newest verification-shaped run in the task, with the sequence its result settled at. */
+    /**
+     * The newest verification-shaped run in the task, with the sequence its result settled at.
+     *
+     * `ok` is the run's own VERDICT (see {@link verificationFailed}), not the tool-level status:
+     * a failing test suite is a normal tool result carrying `[exit code: 1]`.
+     */
     verification?: {
         seq: number;
         name: string;
@@ -229,6 +265,11 @@ export declare function inspectDeliveryPhase(events: readonly SessionEvent[]): D
  * failure chain broke. Anything ambiguous — fewer than two runs, unreadable output — does NOT
  * trigger: confirming a trigger with an extra classification call is out of scope, so a missed
  * trigger degrades to the old path.
+ *
+ * A run counts as failed when the tool call itself failed OR the output states a failure
+ * ({@link verificationFailed}). The output side is the one that matters in practice: the host
+ * reports a non-zero exit as text, so requiring the tool-level error made a pair of failing test
+ * runs look like two successes and the whole trigger unreachable.
  */
 export interface RecoverySignal {
     /** Stable identity of the signal; one purchased cycle consumes exactly this signature. */
@@ -243,13 +284,30 @@ export interface RecoverySignal {
         name: string;
         ok: boolean;
     }>;
+    /**
+     * Bounded, REDACTED digest of the two failing runs, or undefined when it could not be built.
+     *
+     * Evidence for the alternative's generation request, not for a judge prompt: it is what makes the
+     * extra candidate a differently informed attempt instead of a resample. Built here because this is
+     * where the two runs are already selected, and already redacted here so no caller can forget it.
+     * Deliberately NOT part of {@link RecoverySignal.signature}: it is the same evidence the signature
+     * is derived from, and folding the text in would invalidate every durable purchase record.
+     */
+    failureContext?: string;
 }
+/**
+ * Total characters of the failure digest handed to the alternative's generation request.
+ *
+ * Small on purpose: it is a reminder of what just failed (the failing assertions), not the whole
+ * transcript, and the alternative request re-sends the entire conversation anyway.
+ */
+export declare const RECOVERY_FAILURE_CONTEXT_CHARS = 4000;
 /**
  * Inspect a session for the two-failure recovery condition.
  * @param events - session event log.
  * @returns The signal, or undefined when the condition does not hold.
  */
-export declare function inspectRecoverySignal(events: readonly SessionEvent[]): RecoverySignal | undefined;
+export declare function inspectRecoverySignal(events: readonly SessionEvent[], maxItemChars?: number): RecoverySignal | undefined;
 /**
  * Per-item character budget for a decision with a known item count.
  *

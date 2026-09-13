@@ -805,7 +805,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
       const verdict: VerdictSummary = report.compare === undefined
         ? { phase: 'process', outcome: report.outcome }
-        : summarizeVerdict('verifier_compare', { ...report.compare, reviewStage: 'proposal', criteriaSource: 'proposal' }, 'process', {
+        : summarizeVerdict('verifier_compare', { ...report.compare, reviewStage: 'proposal', criteriaSource: 'process' }, 'process', {
             autoVerifyThreshold: selected.autoVerifyThreshold,
             autoTrackCompletionThreshold: selected.autoTrackCompletionThreshold,
           })
@@ -866,9 +866,13 @@ export function apply(ctx: Context, config: Config = {}): void {
       return
     }
     if (lookup.purchased) return
-    const recovery = inspectRecoverySignal(events)
+    const recovery = inspectRecoverySignal(events, selected.autoRouteMaxItemChars)
     if (recovery === undefined) return
-    processSelector.register({ sessionId, agent, taskStartSeq, signal: recovery.signature, registeredAt: Date.now(), lastSeq: events.at(-1)?.seq ?? taskStartSeq })
+    // Handing the alternative the failure evidence is what makes it a differently informed attempt
+    // instead of a resample of a reply already shown to fail; the toggle exists so the controlled
+    // comparison can run the other arm.
+    const failureContext = selected.autoProcessFailureContext ? recovery.failureContext : undefined
+    processSelector.register({ sessionId, agent, taskStartSeq, signal: recovery.signature, registeredAt: Date.now(), lastSeq: events.at(-1)?.seq ?? taskStartSeq, ...(failureContext === undefined ? {} : { failureContext }) })
   }
 
   const handleStatisticsQuery = async (payload: unknown): Promise<{ ok: true; value: StatisticsOverview } | { ok: false; error: { code: 'bad-request'; message: string; details: { issues: never[] } } }> => {

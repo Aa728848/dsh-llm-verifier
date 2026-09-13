@@ -322,6 +322,17 @@ describe('config - judges ensemble resolution', () => {
     expect(roundTripped.autoProcessSelection).toBe(true)
   })
 
+  it('defaults the failure-evidence hand-off ON inside P06, and can be turned off', () => {
+    // ON by default: without the evidence the extra candidate is written from exactly the same
+    // information as the reply the session already showed failing, so the cycle mostly measures
+    // sampling noise. OFF is the control arm of the controlled comparison, not an end state.
+    expect(resolveConfig({}).autoProcessFailureContext).toBe(true)
+    expect(Config({}).autoProcessFailureContext).toBe(true)
+    expect(resolveConfig({ autoProcessFailureContext: false }).autoProcessFailureContext).toBe(false)
+    const roundTripped = Config({ ...Config({}), autoProcessFailureContext: false } as never) as { autoProcessFailureContext?: boolean }
+    expect(roundTripped.autoProcessFailureContext).toBe(false)
+  })
+
   it('resolves the criteria preset and defaults to the historical coding rubric', () => {
     const resolved = resolveConfig({})
     // Default MUST stay 'coding': it is the only preset byte-identical to DEFAULT_CRITERIA, so an

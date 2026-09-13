@@ -54,6 +54,20 @@ export type ReviewStage = 'proposal' | 'artifact';
  */
 export declare const PROPOSAL_CRITERIA: Criterion[];
 /**
+ * Rubric for the P06 request-level comparison: choosing the NEXT action after a failure.
+ *
+ * Not the proposal rubric, and not a looser version of it. The proposal rubric asks whether a plan
+ * addresses the stated goal; this comparison has evidence the proposal stage never has — the exact
+ * verification runs that just failed — and the question that decides whether the extra generation
+ * was worth buying is whether the alternative acts on THAT failure instead of restating the work.
+ * The three criteria are deliberately about the failure, distinctness and verifiability, because a
+ * re-worded repeat of a failed attempt scores well on "Goal And Constraints" and would win.
+ *
+ * The stage stays `proposal` (these candidates are unexecuted next steps) while the rubric source
+ * is `process`, so the statistics keep the two rubrics distinguishable without a new stage.
+ */
+export declare const PROCESS_CRITERIA: Criterion[];
+/**
  * Upper bound on the findings one judge call may report.
  *
  * The plan fixes it at three: feedback that lists everything is indistinguishable from feedback that

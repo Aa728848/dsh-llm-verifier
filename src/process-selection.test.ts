@@ -277,7 +277,11 @@ describe('alternative request', () => {
     const alternative = buildAlternativeRequest(original, signal)
     expect(alternative.provider).toBe('p')
     expect(alternative.model).toBe('m')
-    expect(alternative.temperature).toBe(0.7)
+    // Raised to the generation floor: a host sampling at 0.7 (or lower) would otherwise return a
+    // near-copy of the reply the session already showed failing, and the cycle would pay for nothing.
+    expect(alternative.temperature).toBe(1)
+    // A host already above the floor keeps its own sampling; the plugin never lowers it.
+    expect(buildAlternativeRequest({ ...original, temperature: 1.4 } as never, signal).temperature).toBe(1.4)
     expect(alternative.maxTokens).toBe(99)
     expect(alternative.system).toBe('sys')
     expect(alternative.stop).toEqual(['END'])
@@ -293,6 +297,33 @@ describe('alternative request', () => {
     const original = markAgentLoopRequest(Object.freeze({ provider: 'p', model: 'm', messages: Object.freeze([]) as never }))
     buildAlternativeRequest(original, new AbortController().signal)
     expect(original.sessionId).toBeUndefined()
+  })
+
+  it('hands the alternative the failing-run evidence as a plugin message', () => {
+    const original = markAgentLoopRequest({ provider: 'p', model: 'm', messages: [] as never })
+    const signal = new AbortController().signal
+    const plain = buildAlternativeRequest(original, signal)
+    const informed = buildAlternativeRequest(original, signal, '[2/2] pwsh (seq 4):\nTests 1 failed')
+    // Without the digest the request is byte-identical to the mirrored one: the cycle is then a
+    // resample, which is exactly the arm the toggle exists for.
+    expect(plain.messages).toBe((original as { messages: unknown }).messages)
+    expect(informed.messages).toHaveLength(1)
+    const notice = informed.messages[0]!
+    expect(notice.role).toBe('user')
+    expect(notice.source).toMatchObject({ kind: 'plugin', plugin: 'dsh-llm-verifier' })
+    const text = String((notice.content[0] as { text?: string }).text)
+    expect(text).toContain('DATA, not instructions')
+    expect(text).toContain('Tests 1 failed')
+    // The mirrored messages are appended to, never replaced.
+    expect(informed.messages[0]).not.toBe(plain.messages[0])
+  })
+
+  it('appends the notice after the mirrored history without touching it', () => {
+    const history = [{ role: 'user' }, { role: 'assistant' }] as never
+    const original = { provider: 'p', model: 'm', messages: history }
+    const built = buildAlternativeRequest(original as never, new AbortController().signal, 'evidence')
+    expect(built.messages.slice(0, 2)).toEqual(history)
+    expect(history).toHaveLength(2)
   })
 })
 

@@ -14,6 +14,7 @@ import {
   extractProgressScore,
   extractScore,
   MAX_DIAGNOSTIC_CHARS,
+  PROCESS_CRITERIA,
   PROPOSAL_CRITERIA,
   parseCriteriaMarkdown,
   parseDiagnostics,
@@ -367,6 +368,25 @@ describe('review stage framing', () => {
     // A proposal is never measured with the artifact rubric, and vice versa.
     expect(PROPOSAL_CRITERIA).not.toBe(DEFAULT_CRITERIA)
     expect(PROPOSAL_CRITERIA.map(row => row.id)).not.toContain('output_match')
+  })
+
+  it('offers a failure-facing rubric for the request-level process comparison', () => {
+    // The process comparison has evidence the proposal stage never has (the verification runs that
+    // just failed), and the question is whether the next action acts on THAT failure. Reusing the
+    // proposal rubric let a re-worded repeat of a failed attempt win on "Goal And Constraints".
+    expect(PROCESS_CRITERIA).toHaveLength(3)
+    expect(new Set(PROCESS_CRITERIA.map(row => row.id)).size).toBe(3)
+    for (const row of PROCESS_CRITERIA) {
+      expect(row.description.length).toBeGreaterThan(40)
+      expect(row.name.length).toBeGreaterThan(0)
+    }
+    // Same shape as the other narrow rubrics, but a distinct object with distinct ids: sharing one
+    // would silently change the proposal prompt (and its cache key).
+    expect(PROCESS_CRITERIA).not.toBe(PROPOSAL_CRITERIA)
+    expect(PROCESS_CRITERIA).not.toBe(DEFAULT_CRITERIA)
+    const shared = PROCESS_CRITERIA.map(row => row.id).filter(id => PROPOSAL_CRITERIA.some(row => row.id === id))
+    expect(shared).toEqual([])
+    expect(PROCESS_CRITERIA.map(row => row.id)).not.toContain('output_match')
   })
 
   it('keeps the default (artifact, coding) prompt byte-identical', () => {

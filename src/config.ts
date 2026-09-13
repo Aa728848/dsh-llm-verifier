@@ -67,6 +67,14 @@ export interface Config {
    * cycle is bought per task, and a selection is never an acceptance.
    */
   autoProcessSelection?: boolean
+  /**
+   * P06: hand the alternative reply the failing-run evidence the cycle was triggered by.
+   *
+   * Default ON: without it the extra candidate is written from exactly the same information as the
+   * reply the session already showed failing, so the comparison mostly measures sampling noise.
+   * OFF is the control arm of the A/B comparison, not a supported end state.
+   */
+  autoProcessFailureContext?: boolean
   autoRouteMaxItemChars?: number
   autoRouteMaxInputChars?: number
   autoMaxModelCallsPerTask?: number
@@ -125,6 +133,7 @@ export interface ResolvedConfig {
   autoRouteMaxPerSession: number
   autoTrackCompletionThreshold: number
   autoProcessSelection: boolean
+  autoProcessFailureContext: boolean
   autoRouteMaxItemChars: number
   autoRouteMaxInputChars: number
   autoMaxModelCallsPerTask: number
@@ -177,6 +186,7 @@ export const Config: z<Config> = z.object({
   autoRouteMaxPerSession: z.number().step(1).min(1).default(8),
   autoTrackCompletionThreshold: z.number().min(0).max(1).default(0.684),
   autoProcessSelection: z.boolean().default(false),
+  autoProcessFailureContext: z.boolean().default(true),
   autoRouteMaxItemChars: z.number().step(1).min(100).default(20000),
   autoRouteMaxInputChars: z.number().step(1).min(1000).default(60000),
   autoMaxModelCallsPerTask: z.number().step(1).min(1).default(96),
@@ -361,6 +371,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     autoTrackCompletionThreshold,
     captureDecisions: config.captureDecisions ?? true,
     autoProcessSelection: config.autoProcessSelection ?? false,
+    autoProcessFailureContext: config.autoProcessFailureContext ?? true,
     criteriaPreset,
     criteriaFile,
     autoVerifyTeamTasks: config.autoVerifyTeamTasks ?? true,

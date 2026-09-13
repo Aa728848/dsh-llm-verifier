@@ -74,12 +74,16 @@ describe('StatisticsStore', () => {
       provider: 'p',
       model: 'm',
       stats: stats({ calls: 7 }),
-      verdict: { phase: 'process', outcome: 'compared', reviewStage: 'proposal', criteriaSource: 'proposal' },
-      route: { cycleId: 'cycle-1', trigger: 'llm-stream', stage: 'process', destination: 'process', attempt: 1, reservedCalls: 7, replayed: 'candidate', generatedCalls: 1, judgeCalls: 6, sameCandidate: false },
+      verdict: { phase: 'process', outcome: 'compared', reviewStage: 'proposal', criteriaSource: 'process' },
+      route: { cycleId: 'cycle-1', trigger: 'llm-stream', stage: 'process', destination: 'process', attempt: 1, reservedCalls: 7, replayed: 'candidate', generatedCalls: 1, judgeCalls: 6, sameCandidate: false, alternativeAugmented: true },
     })
     const overview = await store.overview({ fromMs: 0, toMs: 10 })
     expect(overview.recent[0]?.route).toMatchObject({ trigger: 'llm-stream', stage: 'process', replayed: 'candidate', generatedCalls: 1, judgeCalls: 6 })
-    expect(overview.recent[0]?.verdict).toMatchObject({ reviewStage: 'proposal', criteriaSource: 'proposal' })
+    // The failure-evidence hand-off is the A/B discriminator of the controlled comparison, so it must
+    // survive the whitelist like every other P06 observation field.
+    expect(overview.recent[0]?.route?.alternativeAugmented).toBe(true)
+    // The stage is still proposal (the candidates are unexecuted); only the RUBRIC source changed.
+    expect(overview.recent[0]?.verdict).toMatchObject({ reviewStage: 'proposal', criteriaSource: 'process' })
     // A boolean that was not set is absent, not false: absence is what the loader tolerates.
     expect(overview.recent[0]?.route?.sameCandidate).toBeUndefined()
   })

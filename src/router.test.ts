@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { analyzeStructuredRoute, AutoVerifierRouter, inspectRecoverySignal, boundDecision, buildSemanticRoutePrompt, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, latestDirectUserSeq, MAX_ROUTED_CHECKPOINTS, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type RouterPolicy } from './router.ts'
+import { analyzeStructuredRoute, AutoVerifierRouter, inspectRecoverySignal, boundDecision, buildSemanticRoutePrompt, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, latestDirectUserSeq, MAX_ROUTED_CHECKPOINTS, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, verificationFailed, verificationVerdict, RECOVERY_FAILURE_CONTEXT_CHARS, type RouterPolicy } from './router.ts'
 import { sanitizeVerifierText } from './session.ts'
 
 function session() {
@@ -749,6 +749,22 @@ describe('failed evidence in progress checkpoints', () => {
     }
   })
 
+  it('marks a failing run the host reported as a successful tool call', () => {
+    const value = session()
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'pending' }, { content: 'Test', status: 'pending' }] })
+    tool(value, 'pwsh', 'pass', 'Tests 12 passed')
+    // The real host shape: the command exits 1 and the tool result is NOT an error, only the text
+    // carries the evidence. The FAILED mark must still appear.
+    tool(value, 'pwsh', 'fail', 'Tests  1 failed | 11 passed (12)\n[exit code: 1]')
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'pending' }] })
+    const failed = analyzeStructuredRoute(value.events, 8, 4000, 8000)
+    expect(failed?.kind).toBe('track')
+    if (failed?.kind === 'track') {
+      const newest = failed.steps[failed.steps.length - 1]!
+      expect(newest).toContain('Tests  1 failed')
+      expect(newest).toContain('FAILED')
+    }
+  })
   it('counts a failed dispatch as a real observation for the wrapper', () => {
     const value = session()
     value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
@@ -1229,6 +1245,77 @@ describe('recovery signal inspection', () => {
     // A third failure moves the window, so the pair — and the signature — change.
     failing(second, 'z')
     expect(inspectRecoverySignal(second.events)?.signature).not.toBe(inspectRecoverySignal(first.events)?.signature)
+  })
+})
+
+/**
+ * The host reports a non-zero exit as TEXT and keeps the tool result successful, so the failure side
+ * of a verification run has to be read from the output. Every consumer of "did this run fail?" (the
+ * P06 recovery trigger, the checkpoint FAILED marks, the delivery signature) goes through
+ * verificationFailed, so both its boundary cases and the end-to-end trigger are pinned here.
+ */
+describe('verification verdicts', () => {
+  it('reads the verdict from the rendered output, not only from the tool status', () => {
+    // The real DSH shape: a failed suite is a SUCCESSFUL tool call whose text ends with the marker.
+    expect(verificationVerdict('Tests  1 failed | 2 passed (3)\n[exit code: 1]')).toBe('failed')
+    expect(verificationVerdict('Test Files  1 failed (1)\n[exit code: 1]')).toBe('failed')
+    expect(verificationVerdict('2 failed, 5 passed in 0.42s')).toBe('failed')
+    expect(verificationVerdict('src/a.ts(3,1): error TS2322: Type mismatch')).toBe('failed')
+    expect(verificationVerdict('test result: FAILED. 3 passed; 1 failed')).toBe('failed')
+    // Zero failures is a PASS, not a failure: "0 failed" must not read as a failure count.
+    expect(verificationVerdict('Tests  0 failed | 5 passed (5)\n[exit code: 0]')).toBe('passed')
+    // An unrecognised output states no verdict, so a missed trigger degrades to the old path.
+    expect(verificationVerdict('wrote the file')).toBeUndefined()
+    // A tool-level failure is a failure even when its output states nothing.
+    expect(verificationFailed({ ok: false, text: 'wrote the file' })).toBe(true)
+    expect(verificationFailed({ ok: true, text: 'Tests 3 passed' })).toBe(false)
+  })
+
+  it('triggers the recovery signal on two failing runs the host reported as successes', () => {
+    const value = session()
+    // tool() builds isError:false results — exactly what DSH produces for a failed suite.
+    tool(value, 'pwsh', 't1', 'Tests  1 failed | 2 passed (3)\n[exit code: 1]')
+    tool(value, 'pwsh', 't2', 'Tests  2 failed | 0 passed (2)\n[exit code: 1]')
+    const signal = inspectRecoverySignal(value.events)
+    expect(signal?.runs.map(run => run.seq)).toEqual([2, 4])
+  })
+
+  it('does not trigger on a passing run that merely mentions zero failures', () => {
+    const value = session()
+    tool(value, 'pwsh', 't1', 'Tests  1 failed | 2 passed (3)\n[exit code: 1]')
+    tool(value, 'pwsh', 't2', 'Tests  0 failed | 5 passed (5)\n[exit code: 0]')
+    expect(inspectRecoverySignal(value.events)).toBeUndefined()
+  })
+
+  it('carries a redacted, bounded digest of the failing runs for the alternative', () => {
+    const value = session()
+    tool(value, 'pwsh', 't1', 'Tests 1 failed\n[exit code: 1]\nAPI_KEY=supersecretvalue\n' + 'x'.repeat(6000))
+    tool(value, 'pwsh', 't2', 'Tests 2 failed\n[exit code: 1]')
+    const signal = inspectRecoverySignal(value.events)!
+    expect(signal.failureContext).toContain('Tests 1 failed')
+    expect(signal.failureContext).toContain('Tests 2 failed')
+    // Redacted BEFORE it is measured: the digest is generation input, so a live credential must not
+    // survive into it any more than it survives into a judge prompt.
+    expect(signal.failureContext).toContain('[REDACTED]')
+    expect(signal.failureContext).not.toContain('supersecretvalue')
+    // Hard total across both runs, and an item cap cannot push it over.
+    expect(signal.failureContext!.length).toBeLessThanOrEqual(RECOVERY_FAILURE_CONTEXT_CHARS)
+    const capped = inspectRecoverySignal(value.events, 300)!
+    expect(capped.failureContext!.length).toBeLessThanOrEqual(RECOVERY_FAILURE_CONTEXT_CHARS)
+    // The digest is NOT part of the durable identity: folding it in would invalidate every stored
+    // purchase record for the same evidence shape.
+    const withoutDigest = inspectRecoverySignal(value.events)!
+    expect(withoutDigest.signature).toBe(capped.signature)
+  })
+
+  it('recognises a failing typecheck as a verification run and reports the verdict', () => {
+    const value = session()
+    // The pass list only accepted `_EXIT = 0`, so a failing typecheck was not a verification run.
+    tool(value, 'pwsh', 'c1', 'src/a.ts(3,1): error TS2322: Type is not assignable.\n[exit code: 2]')
+    tool(value, 'pwsh', 'c2', 'src/b.ts(9,1): error TS2345: Argument mismatch.\n[exit code: 2]')
+    expect(inspectRecoverySignal(value.events)).toBeDefined()
+    // The delivery phase keeps the run present but now reports the verdict it really had.
+    expect(inspectDeliveryPhase(value.events)!.verification?.ok).toBe(false)
   })
 })
 

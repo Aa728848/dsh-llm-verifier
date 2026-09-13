@@ -214,6 +214,14 @@ export interface RouteObservation {
   judgeCalls?: number
   /** The normalized candidate was byte-identical to the original, so no judge was called. */
   sameCandidate?: boolean
+  /**
+   * P06: the alternative was generated WITH the failing-run evidence attached.
+   *
+   * The A/B discriminator for the controlled comparison of the two designs (resample the same
+   * prompt vs. hand the extra candidate the failure): without it the two arms are indistinguishable
+   * in the stored rows.
+   */
+  alternativeAugmented?: boolean
 }
 
 export interface InvocationRecord {
@@ -373,6 +381,7 @@ function cleanRoute(input: RouteObservation | undefined): RouteObservation | und
   // P06: which stream was replayed is the whole point of the observation, so it must survive.
   if (input.replayed === 'original' || input.replayed === 'candidate' || input.replayed === 'none') route.replayed = input.replayed
   if (input.sameCandidate === true) route.sameCandidate = true
+  if (input.alternativeAugmented === true) route.alternativeAugmented = true
   return route
 }
 

@@ -18,6 +18,7 @@ export interface Values {
   enabled: boolean
   captureDecisions: boolean
   autoProcessSelection: boolean
+  autoProcessFailureContext: boolean
   autoVerifyMode: 'manual' | 'smart' | 'strict'
   autoVerifyThreshold: number
   autoVerifyRepeats: number
@@ -71,6 +72,7 @@ export const CONFIG_DEFAULTS: Values = {
   enabled: true,
   captureDecisions: true,
   autoProcessSelection: false,
+  autoProcessFailureContext: true,
   autoVerifyMode: 'smart',
   autoVerifyThreshold: 0.65,
   autoVerifyRepeats: 1,
@@ -206,6 +208,7 @@ export const FIELDS: readonly FieldSpec[] = [
   toggle('autoVerifyPlanMode', 'routing'),
   toggle('autoVerifySubagents', 'routing'),
   toggle('autoProcessSelection', 'routing'),
+  toggle('autoProcessFailureContext', 'routing'),
 
   select('provider', 'model', 'provider', false),
   select('model', 'model', 'model', false),
@@ -287,6 +290,7 @@ export function valuesFromView(view: Record<string, unknown> | undefined): Value
     enabled: v.enabled !== false,
     captureDecisions: v.captureDecisions !== false,
     autoProcessSelection: v.autoProcessSelection === true,
+    autoProcessFailureContext: v.autoProcessFailureContext !== false,
     autoVerifyMode: mode,
     autoVerifyThreshold: numberOr('autoVerifyThreshold'),
     autoVerifyRepeats: numberOr('autoVerifyRepeats'),
@@ -477,6 +481,7 @@ const POLICY_KEYS = [
   'autoVerifyPlanMode',
   'autoVerifySubagents',
   'autoProcessSelection',
+  'autoProcessFailureContext',
 ] as const satisfies readonly (keyof Values)[]
 
 function policyDefaults(values: Values): Values {

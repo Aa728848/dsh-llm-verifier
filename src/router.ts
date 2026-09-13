@@ -554,8 +554,8 @@ function isEvidenceOutput(name: string, text: string): boolean {
   return !(SUBAGENT_TOOLS.has(name) && CHILD_START_ACKNOWLEDGEMENT.test(body))
 }
 
-/** Signatures of an output that reports verification results. */
-const VERIFICATION_SIGNATURES: readonly RegExp[] = [
+/** Signatures of an output that reports a PASSED verification result. */
+const VERIFICATION_PASS_SIGNATURES: readonly RegExp[] = [
   /\bTest Files\s+\d+/u,
   /\bTests?\s*:?\s*\d+\s+(?:passed|failed|skipped|todo)/iu,
   /\bTest Suites?:\s*\d+/u,
@@ -564,6 +564,33 @@ const VERIFICATION_SIGNATURES: readonly RegExp[] = [
   /^\s*(?:ok|FAIL|PASS)\s+\S+/mu,
   /\b(?:TEST|TYPECHECK|BUILD|LINT|CHECK|GATE)_EXIT\s*[:=]\s*0\b/u,
 ]
+
+/**
+ * Signatures of an output that reports a FAILED verification result.
+ *
+ * The host reports a non-zero exit as TEXT, never as a tool error: `tool-pwsh`'s renderer ends a
+ * failed run with `[exit code: N]` and its own header states the rule ("Non-zero exits are
+ * reported, not errored — only infrastructure failures (spawn errors, aborts) surface as isError
+ * results"). Every signature in the pass list is a success shape, so the failure side of a run was
+ * invisible in two ways: a failed `tsc --noEmit` was not even recognised as a verification run
+ * (the `_EXIT` pattern above only accepts 0), and a failed test suite carried no failure marker.
+ * The P06 recovery trigger reads exactly this side, so it could not fire for the case it exists
+ * for. Zero-count failures ("0 failed") are deliberately not failures.
+ */
+const VERIFICATION_FAILURE_SIGNATURES: readonly RegExp[] = [
+  /\[exit code: [1-9]\d*\]/u,
+  /\bTest Files\s+\d+\s+failed\b/u,
+  /\bTests?\s*:?\s*[1-9]\d*\s+failed\b/iu,
+  /\b[1-9]\d*\s+failed\b/u,
+  /^\s*FAIL(?:ED|URES?)?\b/mu,
+  /\btest result: FAILED\b/iu,
+  /--- FAIL:/u,
+  /\berror TS\d+/u,
+  /\b[A-Z][A-Z_]*_EXIT\s*[:=]\s*[1-9]\d*\b/u,
+]
+
+/** Signatures of an output that reports verification results, whatever the verdict. */
+const VERIFICATION_SIGNATURES: readonly RegExp[] = [...VERIFICATION_PASS_SIGNATURES, ...VERIFICATION_FAILURE_SIGNATURES]
 
 /**
  * Whether an output looks like a test/typecheck/build run reporting its result.
@@ -578,11 +605,52 @@ function looksLikeVerificationRun(text: string): boolean {
   return VERIFICATION_SIGNATURES.some(pattern => pattern.test(text))
 }
 
+/**
+ * Verdict one rendered verification result actually reported.
+ *
+ * The recovery trigger, the checkpoint FAILED marks and the delivery signature all ask
+ * "did this run fail?", and until this existed they answered it with the tool-level error flag
+ * (`EvidenceCall.ok`). The host reports a non-zero exit as text — `tool-pwsh`'s renderer appends
+ * `[exit code: N]` and explicitly does not error the result — so that flag is TRUE for a failing
+ * test suite: the P06 trigger could not fire for the case it exists for, and a failed run rendered
+ * as a clean one. Failure is therefore read from the output itself, with the tool-level flag still
+ * counting as a failure (an aborted or unresolvable run is not a pass).
+ *
+ * Deliberately NOT used to gate candidate selection: `EvidenceCall.ok` keeps its "the tool call
+ * itself succeeded" meaning there, because a failed dispatch is not a selectable candidate.
+ * @param text - rendered tool result.
+ * @returns 'failed' / 'passed' when the output states a verdict, undefined when it does not.
+ */
+export function verificationVerdict(text: string): 'passed' | 'failed' | undefined {
+  if (VERIFICATION_FAILURE_SIGNATURES.some(pattern => pattern.test(text))) return 'failed'
+  if (VERIFICATION_PASS_SIGNATURES.some(pattern => pattern.test(text))) return 'passed'
+  return undefined
+}
+
+/**
+ * Whether one settled call reports a FAILED verification run.
+ *
+ * The single definition shared by the recovery trigger, the checkpoint marks and the delivery
+ * signature. A tool-level error counts as a failure (nothing was verified), and so does an output
+ * that states a failure; an unrecognised output is NOT a failure, so a missed trigger degrades to
+ * the ordinary path instead of buying a cycle on a guess.
+ * @param call - the settled call (only its tool status and rendered text are read).
+ * @returns True when the run failed or could not complete.
+ */
+export function verificationFailed(call: { ok: boolean; text: string }): boolean {
+  return call.ok === false || verificationVerdict(call.text) === 'failed'
+}
+
 /** What the delivery-phase shortcut needs to know about one task. */
 export interface DeliveryPhase {
   /** The task's newest durable todo snapshot is non-empty and every entry is completed. */
   todosComplete: boolean
-  /** The newest verification-shaped run in the task, with the sequence its result settled at. */
+  /**
+   * The newest verification-shaped run in the task, with the sequence its result settled at.
+   *
+   * `ok` is the run's own VERDICT (see {@link verificationFailed}), not the tool-level status:
+   * a failing test suite is a normal tool result carrying `[exit code: 1]`.
+   */
   verification?: { seq: number; name: string; ok: boolean }
   /**
    * Deterministic identity of the completion signal.
@@ -615,7 +683,7 @@ export function inspectDeliveryPhase(events: readonly SessionEvent[]): DeliveryP
   let verification: DeliveryPhase['verification']
   for (const pair of index.calls.values()) {
     if (!isEvidenceOutput(pair.name, pair.text) || !looksLikeVerificationRun(pair.text)) continue
-    if (verification === undefined || pair.resultSeq > verification.seq) verification = { seq: pair.resultSeq, name: pair.name, ok: pair.ok }
+    if (verification === undefined || pair.resultSeq > verification.seq) verification = { seq: pair.resultSeq, name: pair.name, ok: !verificationFailed(pair) }
   }
   return {
     todosComplete,
@@ -678,7 +746,7 @@ function verificationEvidence(index: EvidenceIndex, newest: EvidenceCall | undef
   }
   if (run === undefined) return { text: '', call: undefined }
   const trailing = trailingSummary(index, run, 200)
-  const status = run.ok ? '' : ' — FAILED'
+  const status = verificationFailed(run) ? ' — FAILED' : ''
   const prefix = '\n\nLatest observed verification run (' + run.name + status + (trailing === '' ? '' : ' — ' + trailing) + '):\n'
   if (prefix.length >= budget) return { text: '', call: undefined }
   return { text: prefix + sanitizeVerifierText(run.text, budget - prefix.length), call: run }
@@ -693,6 +761,11 @@ function verificationEvidence(index: EvidenceIndex, newest: EvidenceCall | undef
  * failure chain broke. Anything ambiguous — fewer than two runs, unreadable output — does NOT
  * trigger: confirming a trigger with an extra classification call is out of scope, so a missed
  * trigger degrades to the old path.
+ *
+ * A run counts as failed when the tool call itself failed OR the output states a failure
+ * ({@link verificationFailed}). The output side is the one that matters in practice: the host
+ * reports a non-zero exit as text, so requiring the tool-level error made a pair of failing test
+ * runs look like two successes and the whole trigger unreachable.
  */
 export interface RecoverySignal {
   /** Stable identity of the signal; one purchased cycle consumes exactly this signature. */
@@ -703,6 +776,49 @@ export interface RecoverySignal {
   toSeq: number
   /** The two runs, oldest first. */
   runs: Array<{ seq: number; name: string; ok: boolean }>
+  /**
+   * Bounded, REDACTED digest of the two failing runs, or undefined when it could not be built.
+   *
+   * Evidence for the alternative's generation request, not for a judge prompt: it is what makes the
+   * extra candidate a differently informed attempt instead of a resample. Built here because this is
+   * where the two runs are already selected, and already redacted here so no caller can forget it.
+   * Deliberately NOT part of {@link RecoverySignal.signature}: it is the same evidence the signature
+   * is derived from, and folding the text in would invalidate every durable purchase record.
+   */
+  failureContext?: string
+}
+
+/**
+ * Total characters of the failure digest handed to the alternative's generation request.
+ *
+ * Small on purpose: it is a reminder of what just failed (the failing assertions), not the whole
+ * transcript, and the alternative request re-sends the entire conversation anyway.
+ */
+export const RECOVERY_FAILURE_CONTEXT_CHARS = 4000
+
+/**
+ * Bounded, redacted digest of the failing verification runs.
+ *
+ * Split across the runs with the shared per-item/total rule ({@link itemBudget}), so a long first
+ * run cannot crowd the second one out of the budget and the combined text can never exceed the
+ * total. Each body goes through the plugin's sanitizer BEFORE it is measured, so a credential the
+ * patterns mask can never reach the generation request.
+ * @param runs - the failing runs, oldest first.
+ * @param maxItemChars - hard per-item cap, when the caller has one.
+ * @returns The digest, or undefined when no run carried any text.
+ */
+function recoveryFailureContext(runs: readonly EvidenceCall[], maxItemChars?: number): string | undefined {
+  const separators = Math.max(0, runs.length - 1) * 2
+  const cap = maxItemChars ?? RECOVERY_FAILURE_CONTEXT_CHARS
+  const perItem = itemBudget(runs.length, cap, Math.max(1, RECOVERY_FAILURE_CONTEXT_CHARS - separators))
+  const parts: string[] = []
+  runs.forEach((run, index) => {
+    const header = '[' + (index + 1) + '/' + runs.length + '] ' + run.name + ' (seq ' + run.resultSeq + '):\n'
+    const room = Math.max(0, perItem - header.length)
+    const body = room === 0 ? '' : sanitizeVerifierText(run.text, room)
+    if (body !== '') parts.push(header + body)
+  })
+  return parts.length === 0 ? undefined : parts.join('\n\n')
 }
 
 /**
@@ -710,7 +826,7 @@ export interface RecoverySignal {
  * @param events - session event log.
  * @returns The signal, or undefined when the condition does not hold.
  */
-export function inspectRecoverySignal(events: readonly SessionEvent[]): RecoverySignal | undefined {
+export function inspectRecoverySignal(events: readonly SessionEvent[], maxItemChars?: number): RecoverySignal | undefined {
   const index = buildEvidenceIndex(events)
   if (!index) return undefined
   const runs = [...index.calls.values()]
@@ -719,14 +835,19 @@ export function inspectRecoverySignal(events: readonly SessionEvent[]): Recovery
     .slice(-2)
   if (runs.length < 2) return undefined
   // A single failed run is a normal iteration. A success among the two newest means the chain
-  // broke and the task is no longer "stuck recovering".
-  if (runs.some(run => run.ok)) return undefined
+  // broke and the task is no longer "stuck recovering". "Failed" is read from the run's OWN
+  // verdict, not from the tool-level status: a failing test suite exits non-zero and the host
+  // reports that as text, so the status flag alone made every ordinary failure look successful
+  // and the trigger could not fire for the case it exists for.
+  if (runs.some(run => !verificationFailed(run))) return undefined
   const shaped = runs.map(run => ({ seq: run.resultSeq, name: run.name, ok: run.ok }))
+  const failureContext = recoveryFailureContext(runs, maxItemChars)
   return {
     signature: stableHash({ phase: 'process', runs: shaped }),
     fromSeq: index.problemSeq,
     toSeq: shaped[shaped.length - 1]!.seq,
     runs: shaped,
+    ...(failureContext === undefined ? {} : { failureContext }),
   }
 }
 
@@ -761,7 +882,7 @@ function recentEvidenceDigest(index: EvidenceIndex, budget: number, shown: reado
   if (recent.length === 0) return ''
   const rendered = recent.map(call => {
     const first = call.text.split('\n').map(line => line.trim()).find(line => line.length > 0) ?? ''
-    const mark = (call.ok ? '' : ' [FAILED]') + (shown.includes(call) ? ' [shown above]' : '')
+    const mark = (verificationFailed(call) ? ' [FAILED]' : '') + (shown.includes(call) ? ' [shown above]' : '')
     return '  [' + call.resultSeq + '] ' + (call.name + ': ' + first).slice(0, 110) + mark
   })
   const prefix = '\n\nRecent tool results (newest last):\n'
@@ -806,7 +927,7 @@ function checkpointEvidence(index: EvidenceIndex, seq: number, budget: number, c
   // The prefix length depends on the tool name, so measure it instead of assuming a
   // fixed overhead: with a long tool name the old "- 60" let the rendered step exceed
   // maxItemChars, and boundDecision() then dropped the whole track decision silently.
-  const status = latest.ok ? '' : ' — FAILED'
+  const status = verificationFailed(latest) ? ' — FAILED' : ''
   const prefix = current
     ? '\n\nLatest observed tool output at routing time (' + latest.name + status + '):\n'
     : '\n\nLatest observed tool output before this checkpoint (' + latest.name + status + '):\n'

@@ -15,7 +15,7 @@
  * Nothing is exposed to the host before the decision, so a declined cycle costs the added
  * generation (and possibly one comparison) but never half a reply.
  */
-import { type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm';
+import { type GenerateOptions, type Message, type StreamChunk } from '@deepseek-ai/dsh-llm';
 import { type UsageStats } from './caller.ts';
 import { type Criterion } from './core.ts';
 import { type CompareResult, type RunStats } from './engine.ts';
@@ -54,6 +54,14 @@ export interface ProcessIntent {
     taskStartSeq: number;
     /** Recovery signature this intent was registered for; the cycle consumes exactly it. */
     signal: string;
+    /**
+     * Bounded, redacted digest of the two failing runs the intent was registered for.
+     *
+     * Handed to the ALTERNATIVE's generation request so the extra candidate is a differently
+     * informed attempt rather than a resample of a reply already shown to fail. Absent when the
+     * setting is off or the digest could not be built; the cycle then behaves exactly as before.
+     */
+    failureContext?: string;
     registeredAt: number;
     /** Newest session event seq seen at registration; the final gate is armed from here. */
     lastSeq: number;
@@ -198,14 +206,38 @@ export declare function finishKind(chunks: readonly StreamChunk[]): string | und
 /** Usage reported by the LAST \`usage\` chunk of one dispatched stream. */
 export declare function usageFromChunks(chunks: readonly StreamChunk[]): UsageStats;
 /**
+ * The plugin message that hands the alternative the failure its cycle was triggered by.
+ *
+ * The alternative used to be a byte-identical re-dispatch of the original request, so the only thing
+ * that made it different was sampling noise: the judge then chose between two replies written with
+ * the same information, one of which the session had already shown failing twice. This is the
+ * equivalent of the upstream plugin's context refinement, but it uses the deterministic evidence the
+ * trigger is already built from instead of paying another model to rewrite the prompt, and it is
+ * sanitized and bounded by the caller before it is built.
+ *
+ * It is a USER message from this plugin, delivered the way the host delivers a steering notice. The
+ * quoted output stays framed as data: it is output the model itself produced, never an instruction,
+ * and the note says so.
+ * @param context - bounded, redacted digest of the failing runs.
+ * @returns The message appended to the alternative's request.
+ */
+export declare function buildFailureNotice(context: string): Message;
+/**
  * Build the alternative reply's request from the frozen original.
  *
- * Copying only the effective call configuration keeps the same model and sampling while giving
- * the alternative its own lifecycle; the process-local "this is an agent-loop request" marker is
+ * Copying only the effective call configuration keeps the same model while giving the alternative
+ * its own lifecycle, with two deliberate differences added after the P06 review:
+ *
+ * - the temperature is raised to at least GENERATION_TEMPERATURE. A host configured for
+ *   near-deterministic sampling would otherwise return a copy of the original reply and the cycle
+ *   would pay a generation to learn nothing (best-of-N raises it for exactly the same reason);
+ * - failureContext, when present, is appended as a plugin message so the extra candidate is written
+ *   with the failure evidence the cycle exists for.
+ * the process-local "this is an agent-loop request" marker is
  * deliberately NOT copied, and neither is \`sessionId\`, so the alternative can never be mistaken
  * for (or recurse into) a main-loop request.
  */
-export declare function buildAlternativeRequest(options: GenerateOptions, signal: AbortSignal): GenerateOptions;
+export declare function buildAlternativeRequest(options: GenerateOptions, signal: AbortSignal, failureContext?: string): GenerateOptions;
 /**
  * Render one bounded candidate view for the judge, or refuse when its actions cannot fit.
  *

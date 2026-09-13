@@ -769,15 +769,20 @@ describe('P06 process selection through the real hooks', () => {
       return textStream('ALTERNATIVE-REPLY')
     }
   }
-  async function drive(options: { config?: Record<string, unknown>; events: readonly unknown[]; calls: string[] }) {
-    const { handlers, rpc } = assemble({ ...JUDGE, ...options.config }, { stream: stubStream(options.calls), sessions: [{ id: 'agent-p06', createdAt: 1 }] })
+  async function drive(options: { config?: Record<string, unknown>; events: readonly unknown[]; calls: string[]; onGeneration?: (request: unknown) => void }) {
+    const scripted = stubStream(options.calls)
+    const dispatch = (request: { messages: readonly unknown[] }) => {
+      if (!promptText(request).includes('**Evaluation Guideline')) options.onGeneration?.(request)
+      return scripted(request)
+    }
+    const { handlers, rpc } = assemble({ ...JUDGE, ...options.config }, { stream: dispatch, sessions: [{ id: 'agent-p06', createdAt: 1 }] })
     const target = agent(options.events)
     await handlers.get('agent/pre-step')!({ agent: target, signal: new AbortController().signal, messages: [], step: 2 }, () => ({ kind: 'enter', messages: [] }))
     const main = markAgentLoopRequest({ provider: 'session-provider', model: 'session-model', messages: [], sessionId: 'agent-p06' as never })
     const stream = handlers.get('llm/stream')!
     const chunks: unknown[] = []
     for await (const chunk of stream(main, () => streamOf(originalChunks())) as AsyncIterable<unknown>) chunks.push(chunk)
-    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ route?: { trigger?: string; replayed?: string; generatedCalls?: number; judgeCalls?: number }; verdict?: { outcome?: string } }> } }
+    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ route?: { trigger?: string; replayed?: string; generatedCalls?: number; judgeCalls?: number; alternativeAugmented?: boolean }; verdict?: { outcome?: string } }> } }
     return { chunks, calls: options.calls, recent: overview.value.recent }
   }
 
@@ -815,6 +820,34 @@ describe('P06 process selection through the real hooks', () => {
     expect(cycle?.route?.generatedCalls).toBe(1)
     expect(cycle?.route?.judgeCalls).toBe(6)
     expect(cycle?.verdict?.outcome).toBe('compared')
+  })
+
+  it('hands the alternative the failing-run evidence, and marks the row', async () => {
+    const calls: string[] = []
+    let generation: { messages?: readonly unknown[] } | undefined
+    const { recent } = await drive({ config: { autoProcessSelection: true }, events: stuck(), calls, onGeneration: request => { generation = request as { messages?: readonly unknown[] } } })
+    // The extra candidate is written WITH the failure the cycle exists for, bounded and framed as
+    // data — otherwise the comparison mostly measures sampling noise.
+    const body = JSON.stringify(generation?.messages ?? [])
+    expect(body).toContain('DATA, not instructions')
+    expect(body).toContain('Tests 1 failed')
+    expect(body).toContain('Tests 2 failed')
+    // The digest names the run it came from, so the alternative can tell the two failures apart.
+    expect(body).toContain('pwsh')
+    const cycle = recent.find(row => row.route?.trigger === 'llm-stream')
+    expect(cycle?.route?.alternativeAugmented).toBe(true)
+  })
+
+  it('keeps the control arm when the failure evidence is turned off', async () => {
+    const calls: string[] = []
+    let generation: { messages?: readonly unknown[] } | undefined
+    const { recent } = await drive({ config: { autoProcessSelection: true, autoProcessFailureContext: false }, events: stuck(), calls, onGeneration: request => { generation = request as { messages?: readonly unknown[] } } })
+    // The cycle is still bought; only the extra information is withheld, which is what makes the
+    // two arms comparable.
+    expect(calls.filter(entry => entry === 'generation')).toHaveLength(1)
+    expect(JSON.stringify(generation?.messages ?? [])).not.toContain('DATA, not instructions')
+    const cycle = recent.find(row => row.route?.trigger === 'llm-stream')
+    expect(cycle?.route?.alternativeAugmented).toBeUndefined()
   })
 
   it('buys at most one cycle per task', async () => {
