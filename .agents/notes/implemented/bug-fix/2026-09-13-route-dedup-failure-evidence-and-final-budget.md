@@ -42,3 +42,10 @@ F05、F06、F07（均为 P1）都是"各部件单独可用、连接处不成立"
 - 90 + 12 的路线在入场时被限制或拒绝，不会再先承诺强制验收再无钱执行；显式 816 次调用的输入在首个请求前被拒绝。
 - 回归把三个数字锁成断言：任务/会话预算下限、显式 select 的 pivots/裁判倍数上限、失败证据可见性。
 - 已知权衡：被拒绝的路由现在会多写一条 `skipped` 统计记录（见 F09 笔记）；预约仍不按缓存命中返还（保守），报告要求的"预约/实际/重试分离"只在此范围内落地。
+
+## 评审复核补充（同轮后续修复）
+
+首版的显式去重仍会重复购买评分，两处原因都已修复：
+
+1. **PTC 证据没有调用参数。** `buildEvidenceIndex` 对 `tool/ptc-dispatch` / `tool/code-dispatch` 只保存结果文本，不保存 `arguments`，于是经 PTC 发起的显式 verifier 调用没有去重凭据。dispatch 现在把 `arguments`（字符串原样，对象则 `JSON.stringify`）一并存入 `EvidenceCall.args`。回归：`deduplicates an explicit select invoked through a PTC dispatch`。
+2. **长候选的截断指纹不一致。** 路由侧的候选内容是限长后的文本，而显式调用参数是原文，两者的内容指纹不同。`CandidateArtifact` 现在额外携带 `identity`（脱敏但**不截断**的内容），结构化与语义两条路径的去重都用它生成指纹，`content` 仍只负责提示词渲染。回归：`deduplicates a long candidate whose prompt copy was truncated`。

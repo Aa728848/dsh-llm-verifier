@@ -477,6 +477,40 @@ describe('automatic gate lifecycle', () => {
     expect(overview.value.recent.some(row => row.toolName === 'verifier_route_classify' && row.verdict?.outcome === 'low-confidence')).toBe(true)
   })
 
+  it('records a confident "none" classification too', async () => {
+    // A high-confidence none is still a decision; previously only the low-confidence
+    // branch recorded anything, so kind=none/confidence=1 left only "classified".
+    const stream = () => textStream(JSON.stringify({ kind: 'none', confidence: 1, reason: 'final delivery only', candidateCallIds: [], checkpointSeqs: [] }))
+    const { handlers, rpc } = assemble(JUDGE, { stream, sessions: [{ id: 'agent-hook', createdAt: 1 }] })
+    const events = [
+      user(0, 'Implement it'),
+      call(1, 's1', 'subagent'), result(2, 's1', 'frontend analysis'),
+      call(3, 'e', 'edit'), result(4, 'e', 'edited the file'),
+    ]
+    await handlers.get('agent/turn-stopping')!({ agent: agent(events, []), signal: new AbortController().signal })
+    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { ok: boolean; value: { recent: Array<{ toolName: string; verdict?: { outcome?: string } }> } }
+    expect(overview.value.recent.some(row => row.toolName === 'verifier_route_classify' && row.verdict?.outcome === 'none')).toBe(true)
+  })
+
+  it('steers and still runs the final gate when strict routing cites invisible evidence', async () => {
+    // Regression: the strict invalid-reference branch set strictBlocked and returned,
+    // ending the review with no steering and no final acceptance.
+    const calls: Array<Record<string, unknown>> = []
+    const stream = () => { calls.push({}); return textStream(JSON.stringify({ kind: 'compare', confidence: 1, reason: 'r', candidateCallIds: ['missing-a', 'missing-b'], checkpointSeqs: [] })) }
+    const { handlers } = assemble({ ...JUDGE, autoVerifyMode: 'strict' }, { stream, sessions: [{ id: 'agent-hook', createdAt: 1 }] })
+    const steered: unknown[] = []
+    const events = [
+      user(0, 'Implement it'),
+      call(1, 's1', 'subagent'), result(2, 's1', 'frontend analysis'),
+      call(3, 's2', 'subagent'), result(4, 's2', 'backend analysis'),
+      call(5, 'e', 'edit'), result(6, 'e', 'edited the file'),
+    ]
+    await handlers.get('agent/turn-stopping')!({ agent: agent(events, steered), signal: new AbortController().signal })
+    expect(steered.length).toBeGreaterThan(0)
+    // One classification call plus the final acceptance — the gate was not skipped.
+    expect(calls.length).toBeGreaterThan(1)
+  })
+
   it('does not re-verify when the manual verdict covers the whole current task', async () => {
     const calls: Array<Record<string, unknown>> = []
     const { handlers } = assemble(JUDGE, { stream: scriptedStream(1, [], calls), sessions: [{ id: 'topic-2', createdAt: 1 }] })

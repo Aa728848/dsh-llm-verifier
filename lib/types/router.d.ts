@@ -17,6 +17,13 @@ export interface CandidateArtifact {
     groupId: string;
     label: string;
     content: string;
+    /**
+     * Redacted, UNTRUNCATED content used only for explicit-review de-duplication. `content`
+     * is capped for the prompt, so two explicit calls that passed the full text verbatim
+     * would otherwise never match the truncated candidate and the same input would be
+     * bought again.
+     */
+    identity: string;
     callId: string;
     fromSeq: number;
     toSeq: number;
@@ -178,6 +185,8 @@ export interface SemanticRouteView {
     checkpointSeqs: Set<number>;
     /** How many evidence items were dropped for budget reasons. */
     omitted: number;
+    /** Exact character length of the rendered evidence payload (task + kept blocks). */
+    evidenceChars: number;
 }
 /** The subset of a view a reference check needs. */
 export interface SemanticRouteVisibility {

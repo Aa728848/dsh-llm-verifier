@@ -33,3 +33,7 @@ F09（P2）的现状之一是：统计已经记录了一部分跳过原因，但
 - 新增回归：`index.test.ts` 走真实的 `agent/turn-stopping` 钩子与语义分类，断言统计查询里出现 `verifier_route_classify` + `outcome: 'low-confidence'`。
 - 已知取舍：跳过记录与分类记录都计入"调用次数"统计，但不计入预算；预约仍不按缓存命中返还，`record()` 的失败分支仍写 `emptyRunStats()`——"预约逻辑调用数 / 已完成评分调用数 / 网络尝试与重试"的彻底分离尚未实现，已在 F09 的待办中保留。
 - F09 的评测部分（分层样本、误放行/误阻断率、`0.65 / 0.684 / 0.9` 与轮次的再校准）状态为**未实施**，需要真实标签数据，本次不改默认值。
+
+## 评审复核补充（同轮后续修复）
+
+首版只在**低置信**分支记录 `none`，因此 `kind=none, confidence=1` 仍只留下一条 `classified`。现在只要 `kind === 'none'` 就记录 `outcome: 'none'`（无论置信度），低置信且非 `none` 才记 `'low-confidence'`。回归：`records a confident "none" classification too`。

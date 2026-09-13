@@ -39,3 +39,11 @@ Status: implemented
 - 语义路由提示词被硬性限制在 `maxInputChars`（含包装开销）内，脱敏覆盖 Todo，注入的伪终止符不能闭合数据区；分类器只能引用本次渲染出的 ID。
 - 测试基线从 322 项提升到 346 项（`auto.test.ts` 13、`router.test.ts` 59、`session.test.ts` 12、`index.test.ts` 23），`pnpm run typecheck` 与 `pnpm test` 全绿；`lib/` 已重建。
 - 破坏面：`parseSessionVerdict` 不再接受只有 `scoreA` 的判据载荷。这是 fail closed 的预期行为，已在 `AGENTS.md` 与测试中固定。
+
+## 评审复核补充（同轮后续修复）
+
+首版落地后复核查出三处仍未闭合，均已在同一变更集内修复并加回归：
+
+1. **失败的后置操作不会使验收过期。** 新鲜度最初只收集成功结果，于是"通过之后执行了会失败的命令"仍返回 `manualVerificationAccepted=true`。`analyzeAutoTask` 现在单独维护一份 `allResults`（所有已 settle 的 `tool/result`）与全部 dispatch，`completedWork` 用它判断过期：失败的命令同样是改变会话状态的工作。计数与判决解析仍只用成功结果。回归：`treats a FAILED post-pass command as new work that invalidates the pass`。
+2. **语义证据预算不是严格上界。** 固定 96 字符包装开销没有计入真实 ID 等内容：普通 UUID + 两条各 400 字符的证据会渲染出 1076 字符，超过 1000 上限。`buildSemanticRouteView` 改为对**实际渲染文本**计量：以内容派生 token 逐条渲染 `TASK/ARTIFACT/CHECKPOINT` 分隔块，预算变化时重算 token，超预算先丢最旧条目、只剩一条时按超出量缩短内容（每步严格递减，64 次上限后回退到空证据）。任务段本身也使用分隔块。新增 `SemanticRouteView.evidenceChars` 供测试断言 `<= maxInputChars`。回归：`measures the ACTUAL rendered evidence, ids and task block included`。
+3. **strict 非法引用会直接结束复核。** 该分支设置失败状态后 `return`，既没有 steering 也跳过了最终验收。现在它只标记 `strictBlocked`、注入一次提示，然后**继续向下**执行强制的最终验收。回归：`steers and still runs the final gate when strict routing cites invisible evidence`（断言有 steering 且模型调用数 > 1）。

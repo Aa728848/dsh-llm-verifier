@@ -182,6 +182,18 @@ describe('automatic verification policy', () => {
     expect(analyzeAutoTask(during.events, smart)).toMatchObject({ manualVerificationAccepted: false, eligible: true })
   })
 
+  it('treats a FAILED post-pass command as new work that invalidates the pass', () => {
+    const value = taskSession()
+    call(value, 'edit', 'one'); call(value, 'pwsh', 'two'); call(value, 'read', 'three')
+    sessionVerify(value, 'four', verdict(0.9))
+    // The reviewed interval ends at seq 9. This command runs afterwards and FAILS after
+    // editing a file: it is real work, so the earlier pass no longer covers the session.
+    // Collecting only successful results was the hole.
+    value.append('tool/call', { turn: 1, step: 1, callId: 'five' as never, name: 'pwsh', arguments: '{}' })
+    value.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'five' as never, content: [{ type: 'text', text: 'FAIL 1 test failed', isError: true }], isError: true }) }, { surfaceOp: 'append' })
+    expect(analyzeAutoTask(value.events, smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false, eligible: true })
+  })
+
   it('treats a team message as the task boundary for teammate sessions', () => {
     const session = Session.create('session-00000000-0000-4000-8000-000000000010' as never)
     session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Implement the assigned team task' }], source: { kind: 'team-message' } as never }), { surfaceOp: 'append' })

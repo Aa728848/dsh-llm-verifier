@@ -630,6 +630,20 @@ describe('semantic route evidence bound', () => {
     expect(view.prompt.length).toBeLessThan(4000)
   })
 
+  it('measures the ACTUAL rendered evidence, ids and task block included', () => {
+    // Regression: a fixed 96-character overhead did not count a UUID callId or the label
+    // lines, so two 400-character artifacts with UUID ids rendered to 1076 characters
+    // against a 1000-character cap.
+    const value = session()
+    tool(value, 'pwsh', '11111111-1111-4111-8111-111111111111', 'a'.repeat(400))
+    tool(value, 'pwsh', '22222222-2222-4222-8222-222222222222', 'b'.repeat(400))
+    const view = buildSemanticRouteView('classify this task', value.events, 8, 20_000, 1000)
+    expect(view.evidenceChars).toBeLessThanOrEqual(1000)
+    // The task statement is itself a delimited block now.
+    expect(view.prompt).toContain('<<<TASK:')
+    expect([...view.candidateCallIds].length).toBeGreaterThanOrEqual(1)
+  })
+
   it('only allows references to evidence the prompt actually rendered', () => {
     const value = session()
     tool(value, 'pwsh', 'c1', 'a'.repeat(3000))
@@ -755,6 +769,27 @@ describe('structured route dedup and selection', () => {
     tool(value, 'pwsh', 'run', 'all tests passed')
     value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
     expect(analyzeStructuredRoute(value.events)?.kind).toBe('track')
+  })
+
+  it('deduplicates an explicit select invoked through a PTC dispatch', () => {
+    // A dispatch result carried no call arguments, so there was no de-duplication
+    // credential and the same input was bought again through the structured route.
+    const value = session()
+    const contents = ['ptc a', 'ptc b', 'ptc c']
+    tool(value, 'workflow', 'w', group('g', contents))
+    value.append('tool/ptc-dispatch' as never, { subCallId: 'ptc-sel', name: 'verifier_select', arguments: JSON.stringify({ problem: 'p', candidates: contents }), isError: false, content: [{ type: 'text', text: '{"index":0}' }] } as never)
+    expect(analyzeStructuredRoute(value.events)).toBeUndefined()
+  })
+
+  it('deduplicates a long candidate whose prompt copy was truncated', () => {
+    // The routing copy is capped, so hashing the RENDERED content never matched the
+    // untruncated explicit arguments. The identity field keeps the two in sync.
+    const value = session()
+    const contents = ['L'.repeat(25_000), 'M'.repeat(25_000), 'N'.repeat(25_000)]
+    tool(value, 'workflow', 'w', group('g', contents))
+    value.append('tool/call', { turn: 1, step: 1, callId: 'sel' as never, name: 'verifier_select', arguments: JSON.stringify({ problem: 'p', candidates: contents }) })
+    value.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'sel' as never, content: [{ type: 'text', text: '{"index":0}' }], isError: false }) }, { surfaceOp: 'append' })
+    expect(analyzeStructuredRoute(value.events)).toBeUndefined()
   })
 
   it('falls through to the next unprocessed group instead of refusing the pass', () => {
