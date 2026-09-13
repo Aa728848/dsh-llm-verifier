@@ -142,19 +142,21 @@ task(参数, 经脱敏+单项/总量上限)
 
 ## 9. 实施记录（与计划的偏差）
 
-已实现：`core.ts`（`EMPTY_WORK_BASELINE` + `buildGenerationPrompt`）、`caller.ts`（`generationClient` / `generateCandidate` / 两个生成常量）、`index.ts`（`bestOfN` + `verifier_best_of_n` 注册）、`statistics.ts` / `auto.ts` / `router.ts` / `client.tsx` / `client-i18n.ts` / `decisions.ts`，以及 `caller.test.ts` / `core.test.ts` / `index.test.ts` / `statistics.test.ts` / `client.test.ts` / `decisions.test.ts` 的新用例（`pnpm run verify:release` 绿，310 passed / 2 skipped）。
+已实现：`core.ts`（`EMPTY_WORK_BASELINE` + `buildGenerationPrompt`）、`caller.ts`（`generationClient` / `generateCandidate` / `callTextCompletion`）、`index.ts`（`bestOfN` + `verifier_best_of_n` 注册）、`statistics.ts` / `auto.ts` / `router.ts` / `client.tsx` / `client-i18n.ts` / `decisions.ts`，以及 `caller.test.ts` / `core.test.ts` / `index.test.ts` / `statistics.test.ts` / `client.test.ts` / `decisions.test.ts` 的新用例（`pnpm run verify:release` 绿，317 passed / 2 skipped；含 schema 一致性校验与成本包线回归）。
 
-实施时对计划做了四处调整，都是落地后才暴露的真实约束：
+实施时对计划做了六处调整，都是落地后才暴露的真实约束：
 
 1. **统计判定走"验收分支"而不是 select 分支**。计划里写的是复用 select 分支，但那会把相对份额（`scores[index]`）渲染成看板上的"分数"，正好是本工具要消除的歧义。改为让 `verifier_best_of_n` 与 `verifier_current_session` 共用 `acceptanceVerdict()`：看板显示"通过 / 未达标 + 分数 / 基线 / 逐项判据"，与门控完全同形。
 2. **`decisions.ts` 的 `MAX_CALLS` 12 → 32，并把"取前 N 条"改成均匀间隔取样**。n=4 的 best-of-N 约 46 次调用，而判官标签排在 `draft N` 之前——按前缀截断会把**每一份草稿都丢掉**，恰好是这个工具最需要留下的东西。同时修正了 per-call 字符分配：原先 80/20 分配在 `perCall` 变小后会被两个下限顶穿，触发安全网按尾部截断（还是丢草稿）。
 3. **门控基线提成 `core.ts` 的 `EMPTY_WORK_BASELINE`**。计划说"与门控同一条基线"，靠两处字面量相同是不够的；现在只有一份定义，`verifySession` 与 `bestOfN` 都引用它。
 4. **成本表按实测修正**（见 §2.3）。工具描述里的数字同步改了，并有回归测试锁定。
+5. **生成侧「被上限截断」从错误改成结果**。第一次真机端到端验收（长任务、n=3）**三份草稿全部失败**，报的是判官的 `max-tokens` 错误：`callExplicitTag` 把「没写完」当硬错误，这对判官是对的（判决标签可能还没输出），但生成侧照搬就成了「一份都拿不到」。现在 `callTextCompletion(..., tolerateTruncation)` 把两条语义分开：判官仍然 fail closed，草稿保留文本并带 `truncated` 标记、由工具在返回值里列出（判官看得到文本没写完，自会扣分；直接丢弃等于白付一次生成）。
+6. **生成上限 4096 → 16384，且不做「截断后加倍重试」**。真正原因写在返回值的 `stats.reasoningTokens` 里：一次只有两份短草稿的运行，会话模型（`deepseek-official/deepseek-flash`）输出 17254 token，其中 **16363 是推理 token**（约 8k/份）——4096 在答案开始前就被推理吃光。16384 是实测值的约 2 倍，同时是「两份草稿 + 任务」仍留在 24 万字符证据上限内的最大值（再往上，32768/份的草稿对会让单次比较的提示词越过该上限，而这个上限本身就是为不撑爆判官上下文设的）；`maxTokens` 是上限而非预留，加大它对短草稿零成本，所以不需要「失败再重试」那份双倍开销。
+7. **`judges[].calls` 改为覆盖整次调用**（锦标赛 + 基线比较），`ok` 同理。真机输出暴露了不一致：顶层 `calls: 6` 而 `judges[0].calls: 2`——只报锦标赛会低估每个判官的真实工作量。
 
-尚未完成的验收（需要宿主重启 + 真实模型，见 §1 / §5）：
+### 9.1 真机验收结果（已跑）
 
-- Step 0：判官切到能走概率期望通道的配置后重跑难分探针，记录"通道 + 难分 gap"。
-  - **回退分支已提前无条件采用**：§1 里 "gap 仍 ≈ 0.02 → 文档必须写明只在候选差异明显时可靠" 这一条**现在就已写进 README 与 AGENTS.md**（实测 0.544 vs 0.018，来自已完成的 60 次探针，不依赖新探针），因为目前的判官仍是 explicit-tag 通道、这条门槛当下就成立。
-  - 新探针的唯一作用变成**放宽**表述：若换成概率期望通道后 gap ≥ 0.15，再把 README 的门槛改成带通道条件的版本，并据 §5.3 的可 falsify 条件重新评估 B。
-  - 也就是说**剩余验收不会推翻任何已落地的设计**，只会决定那句门槛要不要写得更细。
-- Step 3：对同一个真实任务跑一次 `verifier_best_of_n`，人工确认至少 2 份草稿在关键部分不同（多样性），以及弱候选确实 `passesThreshold=false`（这条已有脚本化回归测试，还差一次端到端）。
+- **Step 0（判官自检，用户触发）**：判官 `antigravity/gemini-3.8-flash`，**强制重新探测后仍是 `explicit-tag`**（不是陈旧标记），与 §5.3 的结构性判断一致；方向正确（A 100% / B 0%），单次 21768 ms。因此难分 gap 维持实测的 **0.018**，README 的「只在候选差异明显时可靠」门槛当下成立（§1 的回退分支已无条件采用，见上文）。
+- **Step 3-a（n=2、单判据的真实短任务）**：**成功**。`generated: 2`、`failed: 0`、`calls: 6`（2 生成 + 2 锦标赛 + 2 基线）——§2.3 的成本表在真机上逐位对上；`generatorProvider/Model = deepseek-official/deepseek-flash` 证明起草模型确实取自会话请求头；判官侧 `explicitTagScores: 4` 与自检结论一致；`passesThreshold: true`、`score: 1.0`（胜者 vs 空基线）。
+- **Step 3-b（n=3、真实长任务）**：先失败、后定位、已修（见上面第 5、6 条）。**修复只有单元测试保护，真机复验还需要再重启一次宿主**：宿主在启动时就把 `lib/` 读进内存，当前进程跑的还是修复前的版本。复验判据：对同一个「函数 + 12 条测试用例 + 一句说明」的任务跑 `verifier_best_of_n(n=3)`，期望 `generated: 3`、`truncated` 为空或至多 1 项、`calls ≈ 27`。
+- **尚未覆盖**：仍在 explicit-tag 通道下的难分 gap 复测（换判官才有意义）、以及 n=4 的真机成本抽样。

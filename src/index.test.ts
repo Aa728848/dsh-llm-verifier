@@ -127,13 +127,13 @@ describe('plugin assembly', () => {
 })
 
 /** Minimal text stream in the shape BlockAssembler consumes. */
-function textStream(text: string) {
+function textStream(text: string, kind: 'stop' | 'max-tokens' = 'stop') {
   return (async function* () {
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text }
     yield { type: 'block-end', index: 0, block: { type: 'text', text } }
     yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } }
-    yield { type: 'finish', reason: { kind: 'stop' } }
+    yield { type: 'finish', reason: { kind } }
   })()
 }
 
@@ -169,8 +169,9 @@ function verdictLetter(block: string): string {
  * @param strongDraft - 1-based draft number that gets the marker; 0 to make every draft weak.
  * @param failing - 1-based draft numbers whose generation throws.
  * @param calls - receives one record per model call (route and sampling, in order).
+ * @param truncating - 1-based draft numbers whose FIRST attempt stops at the output ceiling.
  */
-function scriptedStream(strongDraft: number, failing: readonly number[], calls: Array<Record<string, unknown>>) {
+function scriptedStream(strongDraft: number, failing: readonly number[], calls: Array<Record<string, unknown>>, truncating: readonly number[] = []) {
   return (options: { messages: readonly unknown[]; provider?: string; model?: string; temperature?: number; maxTokens?: number; reasoningEffort?: string }) => {
     const prompt = promptText(options)
     calls.push({ provider: options.provider, model: options.model, temperature: options.temperature, maxTokens: options.maxTokens, reasoningEffort: options.reasoningEffort })
@@ -180,7 +181,7 @@ function scriptedStream(strongDraft: number, failing: readonly number[], calls: 
       if (failing.includes(number)) return (async function* () { throw new Error('draft ' + number + ' exploded') })()
       // Distinct per draft number: byte-identical drafts would (correctly) be collapsed by the
       // engine before the tournament, which changes the cost this suite measures.
-      return textStream((number === strongDraft ? STRONG_DRAFT : WEAK_DRAFT) + ' Draft ' + number + '.')
+      return textStream((number === strongDraft ? STRONG_DRAFT : WEAK_DRAFT) + ' Draft ' + number + '.', truncating.includes(number) ? 'max-tokens' : 'stop')
     }
     return textStream('reasoning\n<score_A> ' + verdictLetter(section(prompt, 'TRAJECTORY_A')) + ' </score_A>\n<score_B> ' + verdictLetter(section(prompt, 'TRAJECTORY_B')) + ' </score_B>')
   }
@@ -269,12 +270,33 @@ describe('verifier_best_of_n', () => {
     for (const call of drafted) {
       expect(call.provider).toBe('session-provider')
       expect(call.temperature).toBe(1)
-      expect(call.maxTokens).toBe(4096)
+      expect(call.maxTokens).toBe(16384)
       expect(call.reasoningEffort).toBe('high')
     }
     expect(calls.filter(call => call.model === 'judge-model').length).toBeGreaterThan(3)
     // The reported cost covers the drafts as well as every judge call.
     expect(result.calls).toBe(calls.length)
+    // judges[].calls covers the WHOLE invocation: the tournament (18) plus the baseline (6).
+    expect(result.judges[0].calls).toBe(24)
+    expect(result.judges[0].calls + result.generated).toBe(result.calls)
+  })
+
+  it('keeps a truncated draft, retries it once, and reports it instead of returning nothing', async () => {
+    // Regression from the first real end-to-end acceptance: every draft of a long task hit the
+    // output ceiling and the tool failed with "0 usable draft(s)" — the judge contract's
+    // max-tokens error had leaked into the generator.
+    const calls: Array<Record<string, unknown>> = []
+    const result = await assemble(JUDGE, { stream: scriptedStream(1, [], calls, [1]) }).tools.get('verifier_best_of_n')!
+      .execute({ task: 'do the thing' }, exec) as Record<string, any>
+    expect(result.generated).toBe(3)
+    expect(result.truncated).toEqual([1])
+    // One capped attempt per draft, no hidden second generation.
+    const ceilings = calls.filter(call => call.model === 'session-model').map(call => call.maxTokens)
+    expect(ceilings).toEqual([16384, 16384, 16384])
+    // A truncated draft is still judged on its text, so the strong one can still win.
+    expect(result.index).toBe(0)
+    expect(result.best).toContain('COMPLETE-AND-VERIFIED')
+    expect(result.passesThreshold).toBe(true)
   })
 
   it('renders a result that satisfies the declared output schema', async () => {

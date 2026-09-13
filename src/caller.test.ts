@@ -3,6 +3,8 @@ import { RequestLimiter, callVerifier, generateCandidate, generationClient } fro
 import { TopLogprobCapabilityCache } from './top-logprobs.ts'
 
 function chunks(text = '<score_A> A </score_A>') { return [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'text-delta', index: 0, text }, { type: 'block-end', index: 0, block: { type: 'text', text } }, { type: 'usage', usage: { inputTokens: 7, cacheReadTokens: 3, outputTokens: 4, reasoningTokens: 2 } }, { type: 'finish', reason: { kind: 'stop' } }] as any[] }
+/** The same stream, but the model stopped because it ran into the output ceiling. */
+function truncatedChunks(text = 'a draft that ran out of room') { const value = chunks(text); value[value.length - 1] = { type: 'finish', reason: { kind: 'max-tokens' } }; return value }
 function ctx(settingsValue?: unknown) { return { get(name: string) { if (name === 'settings' && settingsValue !== undefined) return { get: () => settingsValue }; if (name === 'credentials') return { resolve: async () => ({ value: 'secret' }) }; return undefined } } as any }
 function config(stream: (options: any) => AsyncIterable<any>, saveImage = vi.fn(), context = ctx(), overrides: Record<string, any> = {}) { return { ctx: context, llm: { stream } as any, attachments: { saveImage } as any, topLogprobCapabilities: new TopLogprobCapabilityCache(), provider: 'openai', model: 'gpt-5', reasoningEffort: 'high', maxTokens: 100, temperature: 0.2, timeoutMs: 1000, maxRetries: 2, retryBaseDelayMs: 1, ...overrides } }
 async function* streamOf(items: any[]) { for (const item of items) yield item }
@@ -251,7 +253,7 @@ describe('best-of-N generation seam', () => {
     expect(target.provider).toBe('session-p')
     expect(target.model).toBe('session-m')
     expect(target.temperature).toBe(1)
-    expect(target.maxTokens).toBe(4096)
+    expect(target.maxTokens).toBe(16384)
     // The base is a judge: its reasoning effort must NOT leak into the drafts, because the
     // session model's own effort is the one the drafts have to be produced with.
     expect(target.reasoningEffort).toBeUndefined()
@@ -261,23 +263,44 @@ describe('best-of-N generation seam', () => {
     expect(target.maxRetries).toBe(base.maxRetries)
     expect(target.retryBaseDelayMs).toBe(base.retryBaseDelayMs)
     expect(generationClient(base, { provider: 'p', model: 'm', reasoningEffort: 'low' }).reasoningEffort).toBe('low')
+    // A caller can override the ceiling for one attempt, which is what makes it testable.
+    expect(generationClient(base, { provider: 'p', model: 'm' }, 4096).maxTokens).toBe(4096)
   })
 
-  it('returns plain text without asking for or parsing an A-T verdict', async () => {
+  it('returns plain text, complete, without asking for or parsing an A-T verdict', async () => {
     let seen: any
-    const target = generationClient(config(async function* (options: any) { seen = options; yield* streamOf(chunks('a complete draft, with no score tags at all')) }), { provider: 'p', model: 'm' })
-    const result = await generateCandidate(target, 'draft this')
+    const base = config(async function* (options: any) { seen = options; yield* streamOf(chunks('a complete draft, with no score tags at all')) })
+    const result = await generateCandidate(base, { provider: 'p', model: 'm' }, 'draft this')
     expect(result.text).toBe('a complete draft, with no score tags at all')
+    expect(result.truncated).toBe(false)
     expect(result.usage.inputTokens).toBe(7)
     // No probability channel is involved: generation is not a scored call.
     expect(result.scoringMode).toBe('explicit-tag')
     expect(result.tokens).toEqual([])
     expect(seen.temperature).toBe(1)
-    expect(seen.maxTokens).toBe(4096)
+    expect(seen.maxTokens).toBe(16384)
+  })
+
+  it('keeps a truncated draft instead of discarding a paid generation', async () => {
+    // Regression from the first real end-to-end acceptance: all three drafts of a
+    // "function + 12 test cases + a note" task hit the ceiling, callExplicitTag's max-tokens error
+    // (correct for a judge) propagated through the generator, and the tool returned zero candidates.
+    const ceilings: Array<number | undefined> = []
+    const base = config(async function* (options: any) { ceilings.push(options.maxTokens); yield* streamOf(truncatedChunks('a draft that ran out of room')) })
+    const result = await generateCandidate(base, { provider: 'p', model: 'm' }, 'draft this')
+    expect(result.truncated).toBe(true)
+    expect(result.text).toBe('a draft that ran out of room')
+    expect(ceilings).toEqual([16384])
+  })
+
+  it('keeps the judge path fail-closed on a truncated answer', async () => {
+    // The tolerance above must not leak into scoring: a truncated verdict has no usable tags.
+    const judge = config(async function* () { yield* streamOf(truncatedChunks('<score_A> A </score_A>')) }, vi.fn(), ctx(), { maxRetries: 0 })
+    await expect(callVerifier(judge, 'prompt')).rejects.toThrow(/max tokens/u)
   })
 
   it('fails closed on an empty draft instead of returning one', async () => {
-    const target = generationClient(config(async function* () { yield* streamOf(chunks('   ')) }, vi.fn(), ctx(), { maxRetries: 0 }), { provider: 'p', model: 'm' })
-    await expect(generateCandidate(target, 'draft this')).rejects.toThrow(/produced no text/u)
+    const base = config(async function* () { yield* streamOf(chunks('   ')) }, vi.fn(), ctx(), { maxRetries: 0 })
+    await expect(generateCandidate(base, { provider: 'p', model: 'm' }, 'draft this')).rejects.toThrow(/produced no text/u)
   })
 })

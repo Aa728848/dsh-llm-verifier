@@ -6,7 +6,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import { Config, installVerifierSettings, resolveConfig } from './config.ts'
-import { RequestLimiter, addUsage, callVerifier, callVerifierText, generateCandidate, generationClient, type UsageStats, type VerifierClientConfig } from './caller.ts'
+import { RequestLimiter, addUsage, callVerifier, callVerifierText, generateCandidate, type UsageStats, type VerifierClientConfig } from './caller.ts'
 import { TopLogprobCapabilityCache, resolveCapabilityFile } from './top-logprobs.ts'
 import { ScoreCache, SingleFlight, resolveCacheFile, stableHash, type CachedPairScore } from './cache.ts'
 import { VerifierEngine, normalizeCriteria, type JudgeScore, type RunStats } from './engine.ts'
@@ -323,24 +323,23 @@ export function apply(ctx: Context, config: Config = {}): void {
     const call = agent.session.requestHeader()?.config
     if (call === undefined) throw new Error('llm-verifier: this session has no logged request header yet, so best-of-n cannot tell which model should write the drafts — generate candidates with parallel subagents and rank them with verifier_select instead')
     const target = { provider: call.provider, model: call.model, ...(call.reasoningEffort === undefined ? {} : { reasoningEffort: String(call.reasoningEffort) }) }
-    const drafting = generationClient(verifier.client, target)
     const problem = explicitEvidence([task], explicitItemChars(selected), explicitBudget(selected), 'task')[0]!
     // N independent drafts, in parallel. A failure is captured per draft so the error below can
     // name it; a draft that fails is never substituted with another one.
     const attempts = await Promise.all(Array.from({ length: count }, async (_unused, index) => {
       const prompt = buildGenerationPrompt(problem, index, count)
       try {
-        const completion = await generateCandidate(drafting, prompt, signal)
+        const completion = await generateCandidate(verifier.client, target, prompt, signal)
         trace?.({ label: 'draft ' + (index + 1), channel: completion.scoringMode, prompt, output: completion.text })
-        return { ok: true as const, text: completion.text, usage: completion.usage }
+        return { ok: true as const, text: completion.text, usage: completion.usage, truncated: completion.truncated }
       } catch (error) {
         return { ok: false as const, error: error instanceof Error ? error.message : String(error) }
       }
     }))
-    const survivors: Array<{ attempt: number; text: string; usage: UsageStats }> = []
+    const survivors: Array<{ attempt: number; text: string; usage: UsageStats; truncated: boolean }> = []
     const failures: string[] = []
     attempts.forEach((attempt, index) => {
-      if (attempt.ok) survivors.push({ attempt: index + 1, text: attempt.text, usage: attempt.usage })
+      if (attempt.ok) survivors.push({ attempt: index + 1, text: attempt.text, usage: attempt.usage, truncated: attempt.truncated })
       else failures.push('draft ' + (index + 1) + ': ' + attempt.error)
     })
     if (survivors.length < MIN_BEST_OF_N) throw new Error('llm-verifier: best-of-n produced ' + survivors.length + ' usable draft(s) out of ' + count + '; at least ' + MIN_BEST_OF_N + ' are required to choose between them' + (failures.length === 0 ? '' : ' — ' + failures.join('; ')))
@@ -374,6 +373,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       generated: survivors.length,
       failed: failures.length,
       failures,
+      /** 1-based draft numbers still truncated after their escalated retry; empty is the normal case. */
+      truncated: survivors.filter(survivor => survivor.truncated).map(survivor => survivor.attempt),
       score: compared.scoreA,
       baselineScore: compared.scoreB,
       winner: compared.winner,
@@ -385,7 +386,19 @@ export function apply(ctx: Context, config: Config = {}): void {
       stats,
       generatorProvider: target.provider,
       generatorModel: target.model,
-      judges: ranked.judges,
+      // Every judge call of this invocation, not just the tournament's: the winner-vs-baseline
+      // comparison runs on the same clients, and the top-level call count already includes it.
+      // `ok` therefore covers both comparisons while `scores`/`ranking` stay tournament-shaped.
+      judges: ranked.judges.map((judge, index) => {
+        const baseline = compared.judges[index]
+        if (baseline === undefined) return judge
+        return {
+          ...judge,
+          ok: judge.ok && baseline.ok,
+          calls: judge.calls + baseline.calls,
+          ...(judge.error === undefined && baseline.error !== undefined ? { error: baseline.error } : {}),
+        }
+      }),
     }
     return { result, selected }
   })
@@ -823,7 +836,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'verifier_best_of_n',
-    description: 'Use ONLY when a final deliverable is expensive to get wrong and no candidate exists yet: this drafts n independent candidates with the current session model, has the independent verifier rank them, and then re-scores the winner against the same fixed empty-work baseline the automatic acceptance gate uses. It is by far the most expensive verifier tool: on the default 3-criterion rubric it costs 2 generations + 12 judge calls at n=2, 3 + 24 at n=3, and 4 + 36..60 at n=4 — never call it per turn, for trivial questions, or to compare candidates you already have (rank those with verifier_select or verifier_compare). scores are RELATIVE tournament shares; only score, criteria, threshold and passesThreshold are absolute and comparable with the acceptance gate. Requires a session whose model is already known; if the session has no logged request header, write the candidates with parallel subagents and call verifier_select instead.',
+    description: 'Use ONLY when a final deliverable is expensive to get wrong and no candidate exists yet: this drafts n independent candidates with the current session model, has the independent verifier rank them, and then re-scores the winner against the same fixed empty-work baseline the automatic acceptance gate uses. A draft that hits its output ceiling is kept and listed in truncated — the judge sees the incomplete text and scores it as such, and discarding it would waste a generation already paid for. It is by far the most expensive verifier tool: on the default 3-criterion rubric it costs 2 generations + 12 judge calls at n=2, 3 + 24 at n=3, and 4 + 36..60 at n=4 — never call it per turn, for trivial questions, or to compare candidates you already have (rank those with verifier_select or verifier_compare). scores are RELATIVE tournament shares; only score, criteria, threshold and passesThreshold are absolute and comparable with the acceptance gate. Requires a session whose model is already known; if the session has no logged request header, write the candidates with parallel subagents and call verifier_select instead.',
     parameters: {
       task: { type: 'string', required: true, description: 'The request every draft must answer. Bound to the explicit per-item evidence cap after redaction.' },
       n: { type: 'integer', description: 'How many independent drafts to generate; between 2 and 4, default 3. Cost grows with n.' },
@@ -845,6 +858,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           generated: { type: 'integer', required: true },
           failed: { type: 'integer', required: true },
           failures: { type: 'array', items: { type: 'string' }, required: true },
+          truncated: { type: 'array', items: { type: 'integer' }, required: true },
           score: { type: 'number', required: true },
           baselineScore: { type: 'number', required: true },
           winner: { type: 'string', enum: ['A', 'B', 'tie'], required: true },

@@ -367,7 +367,9 @@ task ─┬─ 生成 N 份候选（会话模型，temperature 1.0，maxTokens 4
 
 完整探针设置与数据见 [`docs/upstream-turboagent-review.md`](docs/upstream-turboagent-review.md) §5.1、§5.3。
 
-- **不新增配置项**：起草模型取自 `agent.session.requestHeader().config`（就是当前会话模型），温度固定 1.0——判官的默认 0.2 会让 N 份几乎相同，工具就失去意义；每份输出上限 4096 token，保证 N 份候选远低于显式证据预算（24 万字符）。
+- **不新增配置项**：起草模型取自 `agent.session.requestHeader().config`（就是当前会话模型），温度固定 1.0——判官的默认 0.2 会让 N 份几乎相同，工具就失去意义。
+- **每份输出上限 16384 token，且「被上限截断」不算失败**：这个数字是实测的，不是拍的——第一次真机端到端验收里，4096 让**三份草稿全部截断**、工具一份都没返回；原因写在返回值的 `stats.reasoningTokens` 里：一次只有两份短草稿的运行，会话模型（`deepseek-official/deepseek-flash`）输出了 17254 token，其中 **16363 是推理 token**（约 8k/份），4096 在答案开始前就被吃光。16384 既是该实测值的约 2 倍，也是「两份草稿 + 任务」仍留在插件 24 万字符显式证据上限内的最大取值；`maxTokens` 是上限而非预留，短草稿的代价没有变化。**仍被截断的草稿会被保留并列入 `truncated`**：判官自己看得到文本没写完、会相应扣分，而直接丢弃等于白付一次生成。真正的长答案超出本工具适用范围。
+- **`judges[].calls` 覆盖整次调用**：既含锦标赛也含基线比较（`ok` 同理），因为顶层 `calls` 已经把两者都算进去了，只报锦标赛会低估每个判官的真实工作量。
 - **只有 `score` / `criteria` / `passesThreshold` 是绝对口径**：`scores` 是锦标赛偏好份额（`wins/counts`），**不能**和 `autoVerifyThreshold` 相比；`threshold` 回显当前生效阈值，判定规则与最终验收完全一致（胜者、均分、逐项判据）。
 - **成本**（默认 3 判据、2 轮；判官数会整体放大）：
 
