@@ -1,0 +1,285 @@
+/**
+ * P06: default-off request-level selection over the host's \`llm/stream\` waterfall.
+ *
+ * The one place in the plugin that can shape the NEXT assistant reply instead of reviewing
+ * something already produced. It is deliberately narrow:
+ *
+ * - off unless \`autoProcessSelection\` is on AND the mode is smart;
+ * - N=2 (the original reply and exactly one generated alternative), one cycle per task;
+ * - it fires only when the two most recent completed verification runs BOTH failed
+ *   ({@link inspectRecoverySignal}), and only for the next real main-loop request;
+ * - the winning stream is replayed chunk by chunk, so tool-call identity, \`finish\` metadata and
+ *   provider replay state reach the host untouched;
+ * - a selection is never an acceptance: the cycle arms the ordinary final gate.
+ *
+ * Nothing is exposed to the host before the decision, so a declined cycle costs the added
+ * generation (and possibly one comparison) but never half a reply.
+ */
+import { type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm';
+import { type UsageStats } from './caller.ts';
+import { type Criterion } from './core.ts';
+import { type CompareResult, type RunStats } from './engine.ts';
+import type { AutoVerifierRouter, RouterPolicy } from './router.ts';
+import type { RouteObservation } from './statistics.ts';
+/**
+ * Buffered characters allowed per candidate stream.
+ *
+ * The plan fixes the first version at 1 MiB. It is a hard boundary in BOTH directions: the
+ * original stream overrunning it abandons selection and continues streaming untouched, and the
+ * alternative overrunning it is discarded in favour of the complete original reply.
+ */
+export declare const PROCESS_CANDIDATE_CAP_CHARS = 1048576;
+/** How long a registered intent may wait for its request before it is considered stale. */
+export declare const PROCESS_INTENT_TTL_MS = 120000;
+/**
+ * Comparison rounds for the process cycle.
+ *
+ * Even on purpose: \`VerifierEngine.compare\` only swaps the A/B slots on odd repeats, and the
+ * whole point of this cycle is deciding which of two replies the host should execute.
+ */
+export declare const PROCESS_REPEATS = 2;
+/** Records kept in the durable per-topic cycle log. */
+export declare const PROCESS_MAX_RECORDS = 200;
+/** One registered intent: a request that MAY still be selected, identified by session and task. */
+export interface ProcessIntent {
+    sessionId: string;
+    /**
+     * The live host agent the intent was registered for.
+     *
+     * In-memory only (never persisted): it is the plugin's handle for the topic, the router state
+     * and the statistics row. Typed \`unknown\` so this module does not depend on the host's Agent
+     * shape; the caller narrows it.
+     */
+    agent: unknown;
+    taskStartSeq: number;
+    /** Recovery signature this intent was registered for; the cycle consumes exactly it. */
+    signal: string;
+    registeredAt: number;
+    /** Newest session event seq seen at registration; the final gate is armed from here. */
+    lastSeq: number;
+}
+/** A fully buffered candidate reply. */
+export interface BufferedCandidate {
+    chunks: StreamChunk[];
+    /** Prose of the reply (reasoning deltas excluded: they are not the deliverable). */
+    text: string;
+    /** Tool calls in block order, rendered as \`name(arguments)\`. */
+    actions: string[];
+    chars: number;
+    /** The stream reached a finish the host can consume (\`stop\` or \`tool-calls\`). */
+    complete: boolean;
+    usage: UsageStats;
+}
+/** Settings snapshot the selector acts on; read fresh on every decision point. */
+export interface ProcessSelectionSettings {
+    /** Master switch AND \`enabled\`. */
+    active: boolean;
+    /** Only smart mode enters this path in the first version. */
+    smart: boolean;
+    timeoutMs: number;
+    maxItemChars: number;
+    maxInputChars: number;
+}
+/** Everything the selector reports back for the statistics sidecar. */
+export interface ProcessCycleReport {
+    agent: unknown;
+    cycleId: string;
+    /** False when the cycle never reached a reservation (intent only, budget refusal, ...). */
+    purchased: boolean;
+    /** Wall clock the cycle began at, for the statistics row's duration. */
+    startedAt: number;
+    outcome: string;
+    replayed: 'original' | 'candidate' | 'none';
+    generatedCalls: number;
+    judgeCalls: number;
+    sameCandidate: boolean;
+    usage: RunStats;
+    observation: RouteObservation;
+    compare?: CompareResult;
+    error?: string;
+}
+export interface ProcessCompareRequest {
+    /** Agent owning the topic the comparison runs under. */
+    agent: unknown;
+    problem: string;
+    candidateA: string;
+    candidateB: string;
+    criteria: readonly Criterion[];
+    repeats: number;
+    signal: AbortSignal;
+}
+export interface ProcessSelectorDeps {
+    settings(): ProcessSelectionSettings;
+    /** The routing policy in force, including the final-acceptance floor and the process allowance. */
+    policy(): Promise<RouterPolicy>;
+    router(): AutoVerifierRouter;
+    /** Durable cycle log of one topic. */
+    store(agent: unknown): ProcessCycleStore;
+    /** Newest session state, used for staleness and for the comparison's task statement. */
+    taskStatement(agent: unknown, fromSeq: number, signal: AbortSignal): Promise<string>;
+    /** Whether the intent's task is still the session's current task. */
+    current(intent: ProcessIntent): boolean;
+    /** Independent dispatch for the alternative reply (a fresh request object). */
+    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
+    compare(request: ProcessCompareRequest): Promise<CompareResult>;
+    record(report: ProcessCycleReport): Promise<void>;
+    judges(): number;
+    logger: {
+        warn(message: string): void;
+    };
+    now(): number;
+    diagnosticCycleId(): string;
+}
+/**
+ * Durable cycle log beside the score cache of one topic.
+ *
+ * Shares the topic directory on purpose: deleting the conversation removes the record of its
+ * purchases with it, exactly like the score cache and the statistics log.
+ * @param cacheFile - resolved \`scores-v1.json\` of the topic.
+ * @returns Path of the process-selection log.
+ */
+export declare function resolveProcessFile(cacheFile: string): string;
+/** Characters one chunk contributes to the buffer cap. */
+export declare function measureChunk(chunk: StreamChunk): number;
+/**
+ * Prose and actions of one buffered reply.
+ *
+ * Transport-level fields (call ids, usage, indices, replay state) are deliberately dropped: two
+ * replies that differ only in a fresh \`callId\` are the same plan, and treating them as different
+ * candidates would buy a comparison that cannot distinguish anything.
+ */
+export declare function renderCandidate(chunks: readonly StreamChunk[]): {
+    text: string;
+    actions: string[];
+};
+/** Stage-and-content identity of one candidate, ignoring every transport-level field. */
+export declare function candidateIdentity(candidate: {
+    text: string;
+    actions: readonly string[];
+}): string;
+/** Whether a buffered stream ended in a finish the host can act on. */
+export declare function finishKind(chunks: readonly StreamChunk[]): string | undefined;
+/** Usage reported by the LAST \`usage\` chunk of one dispatched stream. */
+export declare function usageFromChunks(chunks: readonly StreamChunk[]): UsageStats;
+/**
+ * Build the alternative reply's request from the frozen original.
+ *
+ * Copying only the effective call configuration keeps the same model and sampling while giving
+ * the alternative its own lifecycle; the process-local "this is an agent-loop request" marker is
+ * deliberately NOT copied, and neither is \`sessionId\`, so the alternative can never be mistaken
+ * for (or recurse into) a main-loop request.
+ */
+export declare function buildAlternativeRequest(options: GenerateOptions, signal: AbortSignal): GenerateOptions;
+/**
+ * Render one bounded candidate view for the judge.
+ *
+ * The whole evidence budget is split across the two candidates, so the combined request can never
+ * exceed it and \`boundDecision\`-style dropping cannot silently disable the comparison.
+ * @param candidate - prose and actions of one reply.
+ * @param budget - characters this candidate may occupy.
+ * @returns The rendered block body.
+ */
+export declare function renderCandidateView(candidate: {
+    text: string;
+    actions: readonly string[];
+}, budget: number): string;
+/** One durable purchase record; the sidecar exists so a plugin reload cannot buy the cycle twice. */
+export interface ProcessCycleRecord {
+    cycleId: string;
+    sessionId: string;
+    taskStartSeq: number;
+    signal: string;
+    startedAt: number;
+    outcome?: string;
+    replayed?: string;
+}
+/**
+ * Durable per-topic log of purchased process cycles.
+ *
+ * A purchase must survive a plugin reload: the in-memory router counter cannot, and without the
+ * sidecar a reload would let the same stuck task buy a second cycle. A failed read is treated as
+ * "do not buy" rather than "probably fine" — see {@link lookup}.
+ */
+export declare class ProcessCycleStore {
+    private readonly file;
+    private readonly max;
+    private loaded;
+    private records;
+    private writing;
+    constructor(file: string, max?: number);
+    private load;
+    /**
+     * Whether this task already bought a process cycle.
+     *
+     * \`ok: false\` means the log could not be read, and the caller must NOT buy: an unreadable log
+     * is indistinguishable from "already purchased", and the safe side of that ambiguity is to
+     * keep the original path.
+     * @param sessionId - session owning the cycle.
+     * @param taskStartSeq - task boundary sequence of the cycle.
+     * @returns Read status plus whether a record already exists.
+     */
+    lookup(sessionId: string, taskStartSeq: number): Promise<{
+        ok: boolean;
+        purchased: boolean;
+        reason?: string;
+    }>;
+    /**
+     * Write the start record BEFORE any added model call.
+     * @param record - the purchase to remember.
+     * @returns False when the record could not be persisted; the caller must not buy.
+     */
+    begin(record: ProcessCycleRecord): Promise<boolean>;
+    /** Attach the outcome of a purchased cycle to its record (best effort). */
+    finish(cycleId: string, outcome: string, replayed: string): Promise<void>;
+    private persist;
+}
+/**
+ * The selector itself: intent bookkeeping plus the \`llm/stream\` body.
+ *
+ * Kept as one class rather than free functions because the intent map and the request-local
+ * re-entrancy guard are per-plugin-instance state; every decision point reads settings and budget
+ * fresh, so a settings change or a spent budget is honoured without restarting anything.
+ */
+export declare class ProcessSelector {
+    private readonly deps;
+    private readonly intents;
+    /** Requests this plugin dispatched itself (the alternative reply): never a selection subject. */
+    private readonly internal;
+    constructor(deps: ProcessSelectorDeps);
+    /** Register (or replace) the pending intent of one session. */
+    register(intent: ProcessIntent): void;
+    /** Drop a session's pending intent (new task, settings change, disposal). */
+    clear(sessionId: string): void;
+    /** Drop every pending intent (settings change, host shutdown). */
+    clearAll(): void;
+    /** Whether a session already has an intent waiting for its next request. */
+    pending(sessionId: string): boolean;
+    /**
+     * Match and consume the intent for one real main request.
+     *
+     * The request must be a host-stamped agent-loop request with the registered session id; our own
+     * auxiliary dispatches and every other plugin's calls therefore pass straight through. The
+     * intent is consumed on a match — even when the cycle is then declined — so it can never leak
+     * into a later request, and a mismatched session leaves it untouched.
+     * @param options - the request entering the waterfall.
+     * @returns The consumed intent, or undefined to delegate untouched.
+     */
+    take(options: GenerateOptions): ProcessIntent | undefined;
+    /**
+     * The waterfall body.
+     *
+     * \`next()\` is called exactly once. The original reply is buffered first; only after it is
+     * complete and inside the cap is the alternative generated, and only a judge-selected winner is
+     * replayed. Every decline replays the buffered original verbatim.
+     * @param options - the matched main request.
+     * @param next - the downstream dispatch (called once).
+     * @param intent - the consumed intent.
+     * @returns The chunks the host will consume.
+     */
+    handle(options: GenerateOptions, next: () => AsyncIterable<StreamChunk>, intent: ProcessIntent): AsyncGenerator<StreamChunk>;
+    /** Record a cycle that never reached (or consumed) a reservation. */
+    private skip;
+    /** Record a purchased cycle and stamp its durable outcome. */
+    private report;
+}
+//# sourceMappingURL=process-selection.d.ts.map

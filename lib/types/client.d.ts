@@ -6,6 +6,7 @@ export { zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage,
 export interface Values {
     enabled: boolean;
     captureDecisions: boolean;
+    autoProcessSelection: boolean;
     autoVerifyMode: 'manual' | 'smart' | 'strict';
     autoVerifyThreshold: number;
     autoVerifyRepeats: number;
@@ -82,6 +83,10 @@ export interface RouteObservationView {
     evidenceKept?: number;
     evidenceOmitted?: number;
     evidenceChars?: number;
+    replayed?: string;
+    generatedCalls?: number;
+    judgeCalls?: number;
+    sameCandidate?: boolean;
 }
 export interface InvocationRecord {
     id: string;

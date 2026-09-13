@@ -47,9 +47,9 @@ export interface VerdictThresholds {
  */
 export declare function summarizeVerdict(toolName: VerifierToolName, value: unknown, phase: string, thresholds: VerdictThresholds): VerdictSummary;
 /** Host boundary that started an automatic routing cycle. */
-export type RouteTrigger = 'turn-stopping' | 'plan' | 'team' | 'pre-step';
+export type RouteTrigger = 'turn-stopping' | 'plan' | 'team' | 'pre-step' | 'llm-stream';
 /** Stage of the cycle a statistics row describes. */
-export type RouteStage = 'classification' | 'execution' | 'final' | 'skipped';
+export type RouteStage = 'classification' | 'execution' | 'final' | 'skipped' | 'process';
 /**
  * One automatic routing cycle, stored beside the invocation it produced.
  *
@@ -84,6 +84,20 @@ export interface RouteObservation {
     usageIncomplete?: boolean;
     /** True when the task, snapshot or signal stopped being current mid-cycle. */
     canceled?: boolean;
+    /**
+     * P06 process selection: which stream was actually replayed to the host.
+     *
+     * `original` is the fallback for every decline (candidate failed, tie, identical, stale,
+     * budget); `none` means not even a replay decision was reached (the intent never matched a
+     * request, or the cycle was never purchased). Only `candidate` means the generated reply ran.
+     */
+    replayed?: 'original' | 'candidate' | 'none';
+    /** Extra generation calls this cycle bought (0 or 1 on the shipped N=2 design). */
+    generatedCalls?: number;
+    /** Judge calls this cycle bought. */
+    judgeCalls?: number;
+    /** The normalized candidate was byte-identical to the original, so no judge was called. */
+    sameCandidate?: boolean;
 }
 export interface InvocationRecord {
     id: string;

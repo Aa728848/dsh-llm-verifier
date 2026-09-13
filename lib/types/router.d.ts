@@ -13,12 +13,19 @@ export interface TodoItem {
     status: string;
 }
 /** The agent surface this router needs: an id and whatever the host exposes as its session. */
-interface RoutedAgent {
+export interface RoutedAgent {
     id: unknown;
     session: unknown;
 }
 export type RoutedVerifierKind = 'compare' | 'select' | 'track';
-export type RoutePhase = 'semantic' | RoutedVerifierKind | 'final' | 'plan_review' | 'team_task';
+/**
+ * Phases a reservation can be granted for.
+ *
+ * `process` is the internal P06 request-level selection cycle: it is never one of the four
+ * publicly advertised routing tools and never produces a verdict by itself, but it draws on the
+ * same budget and final-acceptance floor as every other cycle.
+ */
+export type RoutePhase = 'semantic' | RoutedVerifierKind | 'final' | 'plan_review' | 'team_task' | 'process';
 export interface CandidateArtifact {
     id: string;
     groupId: string;
@@ -89,6 +96,15 @@ export interface RouterPolicy {
     /** Attempts reserved for the final acceptance; routing can never spend these. */
     maxFinalPerTask: number;
     maxFinalPerSession: number;
+    /**
+     * Process-selection cycles (P06) allowed within one task / one session.
+     *
+     * A separate counter for the same reason routing and the final gate are separate: one process
+     * cycle is the whole P06 budget, and it must not be able to starve the route attempts the rest
+     * of the plugin needs. Optional; treated as 0 when absent.
+     */
+    maxProcessPerTask?: number;
+    maxProcessPerSession?: number;
     maxModelCallsPerTask: number;
     maxModelCallsPerSession: number;
     maxInputChars: number;
@@ -201,6 +217,36 @@ export interface DeliveryPhase {
  * @returns The delivery-phase facts, or undefined when the task has no evidence index.
  */
 export declare function inspectDeliveryPhase(events: readonly SessionEvent[]): DeliveryPhase | undefined;
+/**
+ * Two consecutive completed verification runs whose results BOTH failed.
+ *
+ * The P06 trigger. Deliberately narrow and heuristic-free at the edges: only real tool results
+ * count (the same {@link isEvidenceOutput} gate every other evidence site uses), only
+ * verification-shaped output counts, and any success among the two most recent runs means the
+ * failure chain broke. Anything ambiguous — fewer than two runs, unreadable output — does NOT
+ * trigger: confirming a trigger with an extra classification call is out of scope, so a missed
+ * trigger degrades to the old path.
+ */
+export interface RecoverySignal {
+    /** Stable identity of the signal; one purchased cycle consumes exactly this signature. */
+    signature: string;
+    /** Task start the signal belongs to. */
+    fromSeq: number;
+    /** Sequence of the newest failing run. */
+    toSeq: number;
+    /** The two runs, oldest first. */
+    runs: Array<{
+        seq: number;
+        name: string;
+        ok: boolean;
+    }>;
+}
+/**
+ * Inspect a session for the two-failure recovery condition.
+ * @param events - session event log.
+ * @returns The signal, or undefined when the condition does not hold.
+ */
+export declare function inspectRecoverySignal(events: readonly SessionEvent[]): RecoverySignal | undefined;
 /**
  * Upper bound on the checkpoints rendered into one routed track decision.
  *
@@ -371,6 +417,13 @@ export declare class AutoVerifierRouter {
     budgetExhausted(agent: RoutedAgent, expectedCalls: number, policy: RouterPolicy): boolean;
     /** Whether this exact fingerprint already passed within the current task. */
     completedFingerprint(agent: RoutedAgent, fingerprint: string): boolean;
+    /**
+     * Whether this task already bought its process-selection cycle.
+     *
+     * The in-memory counter is authoritative while the plugin is loaded; the durable sidecar
+     * covers a reload, which is why {@link hasProcessAttempt} exists next to it.
+     */
+    hasProcessAttempt(agent: RoutedAgent): boolean;
     finalRequired(agent: RoutedAgent): number | undefined;
     /**
      * Arm "run the final gate next": a track route already cleared the completion threshold,

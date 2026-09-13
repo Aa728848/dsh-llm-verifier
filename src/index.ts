@@ -14,11 +14,12 @@ import { loadVerifierImages } from './images.ts'
 import { extractSession, sanitizeVerifierText, sessionEvents } from './session.ts'
 import { CriteriaResolver, type ResolvedCriteria } from './criteria.ts'
 import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, MAX_ROUTE_FEEDBACK_CHARS, type AcceptanceCriterion, type RoutedCandidateRef } from './auto.ts'
-import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, latestDirectUserSeq, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type CandidateArtifact, type Reservation, type RouteDecision, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
+import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, inspectRecoverySignal, latestDirectUserSeq, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type CandidateArtifact, type Reservation, type RouteDecision, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
+import { ProcessCycleStore, ProcessSelector, resolveProcessFile, type ProcessCycleReport } from './process-selection.ts'
 import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, PROPOSAL_CRITERIA, buildGenerationPrompt, buildPairwisePrompt, extractScore, type ReviewStage } from './core.ts'
 import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from './plan-gate.ts'
 import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from './team-gate.ts'
-import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, parseStatisticsQuery, resolveStatisticsFile, summarizeVerdict, type RouteObservation, type StatisticsOverview, type VerifierToolName } from './statistics.ts'
+import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, parseStatisticsQuery, resolveStatisticsFile, summarizeVerdict, type RouteObservation, type StatisticsOverview, type VerdictSummary, type VerifierToolName } from './statistics.ts'
 import { resolveTopicDataDir, type SessionArtifactLocator } from './topic-storage.ts'
 import { DecisionStore, boundDecisionCalls, resolveDecisionsFile, type DecisionCall, type DecisionRecord, type DecisionTrace } from './decisions.ts'
 
@@ -103,6 +104,14 @@ const MAX_EXPLICIT_PLANNED_CALLS = 500
  * value of the 5th draft does not, and the tool is meant for a final deliverable rather than
  * routine work. The floor is 2 because "choose the best of one" is not a choice.
  */
+/**
+ * P06: one process-selection cycle per task, and one per session.
+ *
+ * The shipped allowance is a single cycle by design; the counters live in `router.ts` so they
+ * cannot be confused with the route-attempt or final-attempt budgets.
+ */
+const MAX_PROCESS_PER_TASK = 1
+const MAX_PROCESS_PER_SESSION = 1
 const MIN_BEST_OF_N = 2
 const MAX_BEST_OF_N = 4
 const DEFAULT_BEST_OF_N = 3
@@ -176,9 +185,12 @@ export function apply(ctx: Context, config: Config = {}): void {
   const services = ctx as Context & { attachments: AttachmentStore; connection: HostConnectionHandle; sessionPersistence: SessionArtifactLocator & { list(signal?: AbortSignal): Promise<readonly unknown[]> } }
   const entry = resolveConfig(config)
   let limiter = new RequestLimiter(entry.maxConcurrency)
-  const current = installVerifierSettings(ctx, entry, () => { limiter = new RequestLimiter(current().maxConcurrency) })
+  // A settings change invalidates every unconsumed P06 intent; the selector is created later in
+  // this closure, so the callback goes through a holder instead of capturing a TDZ binding.
+  let clearProcessIntents: () => void = () => {}
+  const current = installVerifierSettings(ctx, entry, () => { limiter = new RequestLimiter(current().maxConcurrency); clearProcessIntents() })
   const autoRouter = new AutoVerifierRouter()
-  const topics = new Map<string, { dataDir: string; cache: ScoreCache; capabilities: TopLogprobCapabilityCache; flights: SingleFlight<{ value: CachedPairScore; hit: boolean }>; statistics: StatisticsStore; decisions: DecisionStore }>()
+  const topics = new Map<string, { dataDir: string; cache: ScoreCache; capabilities: TopLogprobCapabilityCache; flights: SingleFlight<{ value: CachedPairScore; hit: boolean }>; statistics: StatisticsStore; decisions: DecisionStore; process: ProcessCycleStore }>()
   const topic = (header: SessionHeader) => {
     const selected = current()
     const dataDir = resolveTopicDataDir(services.sessionPersistence, header, selected.cacheDir)
@@ -186,7 +198,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const existing = topics.get(id)
     if (existing?.dataDir === dataDir) return existing
     const cacheFile = resolveCacheFile(dataDir)
-    const created = { dataDir, cache: new ScoreCache(cacheFile, selected.cacheMaxEntries), capabilities: new TopLogprobCapabilityCache(resolveCapabilityFile(dataDir)), flights: new SingleFlight<{ value: CachedPairScore; hit: boolean }>(), statistics: new StatisticsStore(resolveStatisticsFile(cacheFile)), decisions: new DecisionStore(resolveDecisionsFile(cacheFile)) }
+    const created = { dataDir, cache: new ScoreCache(cacheFile, selected.cacheMaxEntries), capabilities: new TopLogprobCapabilityCache(resolveCapabilityFile(dataDir)), flights: new SingleFlight<{ value: CachedPairScore; hit: boolean }>(), statistics: new StatisticsStore(resolveStatisticsFile(cacheFile)), decisions: new DecisionStore(resolveDecisionsFile(cacheFile)), process: new ProcessCycleStore(resolveProcessFile(cacheFile)) }
     topics.set(id, created)
     return created
   }
@@ -586,7 +598,14 @@ export function apply(ctx: Context, config: Config = {}): void {
     return { result: { text: completion.text, stats }, selected }
   }, phase, observation)
   const extractTask = async (agent: Agent, fromSeq: number, toSeq: number, maxChars: number, signal: AbortSignal) => extractSession(agent, async (ref: ImageAttachmentRef) => { const stored = await services.attachments.readImage(ref, signal); return { data: stored.data, mediaType: stored.ref.mediaType } }, { fromSeq, toSeq, includeAssistantText: true, maxChars })
-  const routePolicy = (selected: ReturnType<typeof current>, minFinalModelCalls: number) => ({ mode: selected.autoVerifyMode, minConfidence: selected.autoRouteMinConfidence, maxCandidates: selected.autoRouteMaxCandidates, maxRoutePerTask: selected.autoRouteMaxPerTask, maxRoutePerSession: selected.autoRouteMaxPerSession, maxFinalPerTask: selected.autoVerifyMaxPerTask, maxFinalPerSession: selected.autoVerifyMaxPerSession, maxModelCallsPerTask: selected.autoMaxModelCallsPerTask, maxModelCallsPerSession: selected.autoMaxModelCallsPerSession, maxInputChars: selected.autoRouteMaxInputChars, maxItemChars: selected.autoRouteMaxItemChars, minFinalModelCalls })
+  const routePolicy = (selected: ReturnType<typeof current>, minFinalModelCalls: number) => ({ mode: selected.autoVerifyMode, minConfidence: selected.autoRouteMinConfidence, maxCandidates: selected.autoRouteMaxCandidates, maxRoutePerTask: selected.autoRouteMaxPerTask, maxRoutePerSession: selected.autoRouteMaxPerSession, maxFinalPerTask: selected.autoVerifyMaxPerTask, maxFinalPerSession: selected.autoVerifyMaxPerSession, maxModelCallsPerTask: selected.autoMaxModelCallsPerTask, maxModelCallsPerSession: selected.autoMaxModelCallsPerSession, maxInputChars: selected.autoRouteMaxInputChars, maxItemChars: selected.autoRouteMaxItemChars, minFinalModelCalls, maxProcessPerTask: MAX_PROCESS_PER_TASK, maxProcessPerSession: MAX_PROCESS_PER_SESSION })
+  /**
+   * The policy one process-selection cycle is admitted under.
+   *
+   * Deliberately built from the SAME resolver as every other route, so the mandatory final
+   * acceptance keeps its floor and the process cycle can never spend it.
+   */
+  const processPolicy = async () => routePolicy(current(), (await configuredCriteria()).criteria.length * current().autoVerifyFinalRepeats * current().judges.length)
   /** One candidate's locator for automatic feedback: label plus identity/event position, never its text. */
   const candidateRef = (candidate: CandidateArtifact): RoutedCandidateRef => ({ label: candidate.label, id: candidate.id, fromSeq: candidate.fromSeq, toSeq: candidate.toSeq })
   /**
@@ -663,6 +682,132 @@ export function apply(ctx: Context, config: Config = {}): void {
       ctx.logger.warn('llm-verifier early candidate review failed; leaving the step to the stop-boundary fallback: ' + (error instanceof Error ? error.message : String(error)))
       return undefined
     }
+  }
+
+  /**
+   * P06: the request-level selector.
+   *
+   * Every decision point reads live settings, live budget and the live session, so a settings
+   * change, a new task or a spent budget invalidates an unconsumed intent without extra
+   * bookkeeping. The judge calls go through the ordinary engine (proposal stage, so the default
+   * rubric is the unexecuted one), and the whole cycle is reported as ONE statistics row whose
+   * usage covers the extra generation plus every judge call.
+   */
+  const processSelector = new ProcessSelector({
+    settings: () => {
+      const selected = current()
+      return {
+        active: selected.enabled && selected.autoProcessSelection,
+        smart: selected.autoVerifyMode === 'smart',
+        timeoutMs: selected.timeoutMs,
+        maxItemChars: selected.autoRouteMaxItemChars,
+        maxInputChars: selected.autoRouteMaxInputChars,
+      }
+    },
+    policy: processPolicy,
+    router: () => autoRouter,
+    store: agent => topic((agent as Agent).session.header).process,
+    taskStatement: async (agent, fromSeq, signal) => {
+      const target = agent as Agent
+      const toSeq = sessionEvents(target.session).at(-1)?.seq ?? fromSeq
+      return (await extractTask(target, fromSeq, toSeq, current().autoVerifyMaxChars, signal)).problem
+    },
+    current: intent => latestDirectUserSeq(sessionEvents((intent.agent as Agent).session)) === intent.taskStartSeq,
+    stream: options => ctx.llm.stream(options),
+    judges: () => current().judges.length,
+    compare: async request => {
+      const agent = request.agent as Agent
+      const { verifier, selected } = await engine(agent)
+      const calls: DecisionCall[] = []
+      const trace: DecisionTrace | undefined = current().captureDecisions ? call => { calls.push(call) } : undefined
+      const startedAt = Date.now()
+      const result = await verifier.compare({
+        problem: request.problem,
+        candidateA: request.candidateA,
+        candidateB: request.candidateB,
+        criteria: request.criteria,
+        repeats: request.repeats,
+        reviewStage: 'proposal',
+        ...(trace ? { trace } : {}),
+      }, request.signal)
+      // The decision snapshot is written here, but the STATISTICS row is written once for the whole
+      // cycle (see record below): a second row would count the same judge calls twice.
+      if (calls.length > 0) {
+        await topic(agent.session.header).decisions.record({
+          toolName: 'verifier_compare',
+          phase: 'process',
+          startedAt,
+          provider: selected.provider,
+          model: selected.model,
+          calls: boundDecisionCalls([...calls].sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))),
+        }).catch(() => {})
+      }
+      return result
+    },
+    record: async (report: ProcessCycleReport) => {
+      const agent = report.agent as Agent
+      const selected = current()
+      // One price line for the cycle: the generation tokens are real cost, and the plugin only has
+      // the verifier table (the same estimate best-of-n documents). Tokens are reported too.
+      const stats: RunStats = {
+        ...report.usage,
+        estimatedCostUsd: ((report.usage.inputTokens + report.usage.cachedInputTokens) * selected.estimatedInputUsdPerMillion + report.usage.outputTokens * selected.estimatedOutputUsdPerMillion) / 1_000_000,
+      }
+      const verdict: VerdictSummary = report.compare === undefined
+        ? { phase: 'process', outcome: report.outcome }
+        : summarizeVerdict('verifier_compare', { ...report.compare, reviewStage: 'proposal', criteriaSource: 'proposal' }, 'process', {
+            autoVerifyThreshold: selected.autoVerifyThreshold,
+            autoTrackCompletionThreshold: selected.autoTrackCompletionThreshold,
+          })
+      const failedCall = report.outcome === 'generation-failed' || report.outcome === 'comparison-failed'
+      await topic(agent.session.header).statistics.record({
+        toolName: 'verifier_compare',
+        sessionId: String(agent.id),
+        startedAt: report.startedAt,
+        success: !failedCall,
+        ...(report.error === undefined ? {} : { errorName: 'ProcessSelection', errorMessage: report.error }),
+        provider: selected.provider,
+        model: selected.model,
+        stats,
+        verdict,
+        route: report.observation,
+      }).catch(() => {})
+    },
+    logger: { warn: message => ctx.logger.warn(message) },
+    now: () => Date.now(),
+    diagnosticCycleId: nextDiagnosticCycleId,
+  })
+  clearProcessIntents = () => processSelector.clearAll()
+
+  /**
+   * Arm one process-selection intent when the task is stuck in the two-failure recovery.
+   *
+   * Registration buys nothing by itself: it records that the NEXT real main request of this task
+   * may be worth an alternative reply. Every precondition is re-checked when a request actually
+   * arrives, so a stale intent can only ever be ignored. A log that cannot be read does NOT buy —
+   * the safe side of "already purchased or unknown" is to keep the original path.
+   * @param agent - the agent proposing the step.
+   * @param signal - the turn's cancellation signal.
+   */
+  const registerProcessIntent = async (agent: Agent, signal: AbortSignal): Promise<void> => {
+    const selected = current()
+    if (!selected.enabled || !selected.autoProcessSelection || selected.autoVerifyMode !== 'smart') return
+    if (signal.aborted) return
+    const sessionId = String(agent.id)
+    if (processSelector.pending(sessionId)) return
+    const events = sessionEvents(agent.session)
+    const taskStartSeq = latestDirectUserSeq(events)
+    if (taskStartSeq === undefined) return
+    if (autoRouter.hasProcessAttempt(agent)) return
+    const lookup = await topic(agent.session.header).process.lookup(sessionId, taskStartSeq)
+    if (!lookup.ok) {
+      ctx.logger.warn('llm-verifier process selection: the cycle log could not be read (' + String(lookup.reason) + '); no cycle will be bought for this task')
+      return
+    }
+    if (lookup.purchased) return
+    const recovery = inspectRecoverySignal(events)
+    if (recovery === undefined) return
+    processSelector.register({ sessionId, agent, taskStartSeq, signal: recovery.signature, registeredAt: Date.now(), lastSeq: events.at(-1)?.seq ?? taskStartSeq })
   }
 
   const handleStatisticsQuery = async (payload: unknown): Promise<{ ok: true; value: StatisticsOverview } | { ok: false; error: { code: 'bad-request'; message: string; details: { issues: never[] } } }> => {
@@ -814,7 +959,17 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   }
 
-  ctx.on('agent/disposed', ({ agent }) => { autoRouter.release(agent); topics.delete(String(agent.id)) })
+  ctx.on('agent/disposed', ({ agent }) => { autoRouter.release(agent); topics.delete(String(agent.id)); processSelector.clear(String(agent.id)) })
+
+  // P06: the host's ONE request-level interception point. The handler binds a registered intent to
+  // a real main-loop request (host marker + session id) and otherwise delegates untouched; the
+  // alternative reply is dispatched as a fresh request that is not an agent-loop request, so this
+  // listener can never recurse into itself.
+  ctx.on('llm/stream', (options, next) => {
+    const intent = processSelector.take(options)
+    if (intent === undefined) return next()
+    return processSelector.handle(options, next, intent)
+  })
 
   // Plan pre-review: judge exit_plan_mode BEFORE the tool asks the human, so a
   // weak plan is sent back to the model instead of reaching the review dialog.
@@ -896,6 +1051,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     const clearedContinuation = payload.messages.length > 0 && decision.messages.length === 0
     if (decision.messages.length === 0 && (payload.step <= 1 || clearedContinuation)) return decision
     const injected = await earlyCandidateReview(payload.agent, payload.signal)
+    // P06 comes AFTER the existing-candidate review: a trusted pair that was just scored takes
+    // priority over generating a new reply, and so does an in-flight review (the router refuses
+    // the later reservation anyway). Registration itself calls no model.
+    if (injected === undefined) await registerProcessIntent(payload.agent, payload.signal)
     if (injected === undefined) return decision
     return { kind: 'enter', messages: [...decision.messages, injected] }
   })

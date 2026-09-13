@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { apply } from './index.ts'
+import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { partialStats } from './engine.ts'
 import { PROPOSAL_CRITERIA } from './core.ts'
 
@@ -657,6 +658,124 @@ describe('usage diagnostics in tool outputs', () => {
  * when it reviewed only an older slice of the task. These drive the REAL registered hook
  * through the assembly seam instead of asserting the pure rule twice.
  */
+
+/**
+ * P06 through the REAL hooks.
+ *
+ * The switch is off by default, so the closed path must be indistinguishable from not having the
+ * feature: one downstream dispatch, no extra model call, nothing buffered. When it is on, a task
+ * stuck in two consecutive verification failures gets ONE alternative reply for its next main
+ * request, and only a judge-selected alternative replaces the original.
+ */
+describe('P06 process selection through the real hooks', () => {
+  const user = (seq: number, text: string) => ({ type: 'user/message', seq, data: { source: { kind: 'user' }, content: [{ type: 'text', text }] } })
+  const call = (seq: number, id: string, name: string) => ({ type: 'tool/call', seq, data: { turn: 1, step: 1, callId: id, name, arguments: '{}' } })
+  const failed = (seq: number, id: string, text: string) => ({ type: 'tool/result', seq, data: { turn: 1, step: 1, message: { source: { callId: id }, content: [{ type: 'text', text, isError: true }] } } })
+  /** Two consecutive FAILED verification runs: the only P06 trigger. */
+  const stuck = () => [user(0, 'Fix the failing parser test.'), call(1, 't1', 'pwsh'), failed(2, 't1', 'Tests 1 failed'), call(3, 't2', 'pwsh'), failed(4, 't2', 'Tests 2 failed')]
+  const recovered = () => [user(0, 'Fix the failing parser test.'), call(1, 't1', 'pwsh'), failed(2, 't1', 'Tests 1 failed'), call(3, 't2', 'pwsh'), { type: 'tool/result', seq: 4, data: { turn: 1, step: 1, message: { source: { callId: 't2' }, content: [{ type: 'text', text: 'Tests 3 passed' }] } } }]
+
+  function agent(events: readonly unknown[]) {
+    return {
+      id: 'agent-p06',
+      session: {
+        header: { id: 'agent-p06' },
+        snapshotEvents: () => events,
+        requestHeader: () => ({ config: { provider: 'session-provider', model: 'session-model' } }),
+      },
+      steer() {},
+    }
+  }
+  const originalChunks = () => [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'text-delta', index: 0, text: 'ORIGINAL-REPLY' },
+    { type: 'block-end', index: 0, block: { type: 'text', text: 'ORIGINAL-REPLY' } },
+    { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+  async function* streamOf(chunks: readonly unknown[]) { for (const chunk of chunks) yield chunk }
+
+  /** A model stub that answers judge prompts with an A/B verdict and everything else with prose. */
+  function stubStream(calls: string[]) {
+    return (options: { messages: readonly unknown[] }) => {
+      const prompt = promptText(options)
+      if (prompt.includes('**Evaluation Guideline')) {
+        calls.push('judge')
+        // Content-addressed, exactly like the other scripted judges: the round swaps A/B slots, so
+        // a positional answer would average the two candidates into a tie.
+        const letter = (block: string) => block.includes('ALTERNATIVE-REPLY') ? 'A' : 'T'
+        return textStream('reasoning\n<score_A> ' + letter(section(prompt, 'PROPOSAL_A')) + ' </score_A>\n<score_B> ' + letter(section(prompt, 'PROPOSAL_B')) + ' </score_B>')
+      }
+      calls.push('generation')
+      return textStream('ALTERNATIVE-REPLY')
+    }
+  }
+  async function drive(options: { config?: Record<string, unknown>; events: readonly unknown[]; calls: string[] }) {
+    const { handlers, rpc } = assemble({ ...JUDGE, ...options.config }, { stream: stubStream(options.calls), sessions: [{ id: 'agent-p06', createdAt: 1 }] })
+    const target = agent(options.events)
+    await handlers.get('agent/pre-step')!({ agent: target, signal: new AbortController().signal, messages: [], step: 2 }, () => ({ kind: 'enter', messages: [] }))
+    const main = markAgentLoopRequest({ provider: 'session-provider', model: 'session-model', messages: [], sessionId: 'agent-p06' as never })
+    const stream = handlers.get('llm/stream')!
+    const chunks: unknown[] = []
+    for await (const chunk of stream(main, () => streamOf(originalChunks())) as AsyncIterable<unknown>) chunks.push(chunk)
+    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ route?: { trigger?: string; replayed?: string; generatedCalls?: number; judgeCalls?: number }; verdict?: { outcome?: string } }> } }
+    return { chunks, calls: options.calls, recent: overview.value.recent }
+  }
+
+  it('is a closed path by default: one dispatch, no added call, original chunks untouched', async () => {
+    const calls: string[] = []
+    const { chunks } = await drive({ events: stuck(), calls })
+    expect(calls).toEqual([])
+    expect(chunks).toEqual(originalChunks())
+  })
+
+  it('does not trigger while the mode is not smart, even with the switch on', async () => {
+    const calls: string[] = []
+    const { chunks } = await drive({ config: { autoProcessSelection: true, autoVerifyMode: 'strict' }, events: stuck(), calls })
+    expect(calls).toEqual([])
+    expect(chunks).toEqual(originalChunks())
+  })
+
+  it('does not trigger when one of the two newest verification runs succeeded', async () => {
+    const calls: string[] = []
+    const { chunks } = await drive({ config: { autoProcessSelection: true }, events: recovered(), calls })
+    expect(calls).toEqual([])
+    expect(chunks).toEqual(originalChunks())
+  })
+
+  it('generates one alternative for a stuck task and replays the winner', async () => {
+    const calls: string[] = []
+    const { chunks, recent } = await drive({ config: { autoProcessSelection: true }, events: stuck(), calls })
+    // Exactly one extra generation plus the proposal comparison's judge calls.
+    expect(calls.filter(entry => entry === 'generation')).toHaveLength(1)
+    expect(calls.filter(entry => entry === 'judge')).toHaveLength(6)
+    // The judge preferred B, which is the generated alternative.
+    expect(chunks.some(chunk => JSON.stringify(chunk).includes('ALTERNATIVE-REPLY'))).toBe(true)
+    const cycle = recent.find(row => row.route?.trigger === 'llm-stream')
+    expect(cycle?.route?.replayed).toBe('candidate')
+    expect(cycle?.route?.generatedCalls).toBe(1)
+    expect(cycle?.route?.judgeCalls).toBe(6)
+    expect(cycle?.verdict?.outcome).toBe('compared')
+  })
+
+  it('buys at most one cycle per task', async () => {
+    const { handlers } = assemble({ ...JUDGE, autoProcessSelection: true }, { stream: stubStream([]), sessions: [{ id: 'agent-p06', createdAt: 1 }] })
+    const target = agent(stuck())
+    const preStep = handlers.get('agent/pre-step')!
+    const stream = handlers.get('llm/stream')!
+    const runOnce = async () => {
+      await preStep({ agent: target, signal: new AbortController().signal, messages: [], step: 2 }, () => ({ kind: 'enter', messages: [] }))
+      const chunks: unknown[] = []
+      for await (const chunk of stream(markAgentLoopRequest({ provider: 'p', model: 'm', messages: [], sessionId: 'agent-p06' as never }), async function* () { yield* originalChunks() }) as AsyncIterable<unknown>) chunks.push(chunk)
+      return chunks
+    }
+    expect((await runOnce()).some(chunk => JSON.stringify(chunk).includes('ALTERNATIVE-REPLY'))).toBe(true)
+    // The second stop boundary must NOT register another intent: the task already bought its cycle.
+    const second = await runOnce()
+    expect(second).toEqual(originalChunks())
+  })
+})
+
 describe('automatic gate lifecycle', () => {
   const user = (seq: number, text: string) => ({ type: 'user/message', seq, data: { source: { kind: 'user' }, content: [{ type: 'text', text }] } })
   const call = (seq: number, id: string, name: string) => ({ type: 'tool/call', seq, data: { turn: 1, step: 1, callId: id, name, arguments: '{}' } })

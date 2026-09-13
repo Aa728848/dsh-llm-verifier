@@ -162,9 +162,9 @@ function acceptanceVerdict(row: Record<string, unknown>, phase: string, threshol
 }
 
 /** Host boundary that started an automatic routing cycle. */
-export type RouteTrigger = 'turn-stopping' | 'plan' | 'team' | 'pre-step'
+export type RouteTrigger = 'turn-stopping' | 'plan' | 'team' | 'pre-step' | 'llm-stream'
 /** Stage of the cycle a statistics row describes. */
-export type RouteStage = 'classification' | 'execution' | 'final' | 'skipped'
+export type RouteStage = 'classification' | 'execution' | 'final' | 'skipped' | 'process'
 
 /**
  * One automatic routing cycle, stored beside the invocation it produced.
@@ -200,6 +200,20 @@ export interface RouteObservation {
   usageIncomplete?: boolean
   /** True when the task, snapshot or signal stopped being current mid-cycle. */
   canceled?: boolean
+  /**
+   * P06 process selection: which stream was actually replayed to the host.
+   *
+   * `original` is the fallback for every decline (candidate failed, tie, identical, stale,
+   * budget); `none` means not even a replay decision was reached (the intent never matched a
+   * request, or the cycle was never purchased). Only `candidate` means the generated reply ran.
+   */
+  replayed?: 'original' | 'candidate' | 'none'
+  /** Extra generation calls this cycle bought (0 or 1 on the shipped N=2 design). */
+  generatedCalls?: number
+  /** Judge calls this cycle bought. */
+  judgeCalls?: number
+  /** The normalized candidate was byte-identical to the original, so no judge was called. */
+  sameCandidate?: boolean
 }
 
 export interface InvocationRecord {
@@ -325,8 +339,8 @@ export interface InvocationInput {
   route?: RouteObservation
 }
 
-const ROUTE_TRIGGERS = new Set<RouteTrigger>(['turn-stopping', 'plan', 'team', 'pre-step'])
-const ROUTE_STAGES = new Set<RouteStage>(['classification', 'execution', 'final', 'skipped'])
+const ROUTE_TRIGGERS = new Set<RouteTrigger>(['turn-stopping', 'plan', 'team', 'pre-step', 'llm-stream'])
+const ROUTE_STAGES = new Set<RouteStage>(['classification', 'execution', 'final', 'skipped', 'process'])
 
 /**
  * Bound and validate an observation before it is persisted.
@@ -348,7 +362,7 @@ function cleanRoute(input: RouteObservation | undefined): RouteObservation | und
     stage: input.stage,
     destination: input.destination.slice(0, 60),
   }
-  const counts = ['attempt', 'reservedCalls', 'evidenceKept', 'evidenceOmitted', 'evidenceChars'] as const
+  const counts = ['attempt', 'reservedCalls', 'evidenceKept', 'evidenceOmitted', 'evidenceChars', 'generatedCalls', 'judgeCalls'] as const
   for (const key of counts) {
     const value = input[key]
     if (typeof value === 'number' && Number.isFinite(value) && value >= 0) route[key] = Math.trunc(value)
@@ -356,6 +370,9 @@ function cleanRoute(input: RouteObservation | undefined): RouteObservation | und
   if (typeof input.skipReason === 'string' && input.skipReason) route.skipReason = input.skipReason.slice(0, 120)
   if (input.usageIncomplete === true) route.usageIncomplete = true
   if (input.canceled === true) route.canceled = true
+  // P06: which stream was replayed is the whole point of the observation, so it must survive.
+  if (input.replayed === 'original' || input.replayed === 'candidate' || input.replayed === 'none') route.replayed = input.replayed
+  if (input.sameCandidate === true) route.sameCandidate = true
   return route
 }
 
@@ -364,6 +381,8 @@ function cleanVerdict(input: VerdictSummary | undefined): VerdictSummary | undef
   const verdict: VerdictSummary = {}
   if (typeof input.phase === 'string') verdict.phase = input.phase
   if (typeof input.outcome === 'string') verdict.outcome = input.outcome
+  if (typeof input.reviewStage === 'string' && input.reviewStage) verdict.reviewStage = input.reviewStage.slice(0, 40)
+  if (typeof input.criteriaSource === 'string' && input.criteriaSource) verdict.criteriaSource = input.criteriaSource.slice(0, 60)
   if (typeof input.score === 'number' && Number.isFinite(input.score)) verdict.score = input.score
   if (Array.isArray(input.scores)) {
     const scores = input.scores.filter((entry): entry is number => typeof entry === 'number' && Number.isFinite(entry)).slice(0, MAX_VERDICT_SCORES)

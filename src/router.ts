@@ -32,10 +32,17 @@ export interface TodoItem {
 }
 
 /** The agent surface this router needs: an id and whatever the host exposes as its session. */
-interface RoutedAgent { id: unknown; session: unknown }
+export interface RoutedAgent { id: unknown; session: unknown }
 
 export type RoutedVerifierKind = 'compare' | 'select' | 'track'
-export type RoutePhase = 'semantic' | RoutedVerifierKind | 'final' | 'plan_review' | 'team_task'
+/**
+ * Phases a reservation can be granted for.
+ *
+ * `process` is the internal P06 request-level selection cycle: it is never one of the four
+ * publicly advertised routing tools and never produces a verdict by itself, but it draws on the
+ * same budget and final-acceptance floor as every other cycle.
+ */
+export type RoutePhase = 'semantic' | RoutedVerifierKind | 'final' | 'plan_review' | 'team_task' | 'process'
 
 export interface CandidateArtifact {
   id: string
@@ -94,6 +101,15 @@ export interface RouterPolicy {
   /** Attempts reserved for the final acceptance; routing can never spend these. */
   maxFinalPerTask: number
   maxFinalPerSession: number
+  /**
+   * Process-selection cycles (P06) allowed within one task / one session.
+   *
+   * A separate counter for the same reason routing and the final gate are separate: one process
+   * cycle is the whole P06 budget, and it must not be able to starve the route attempts the rest
+   * of the plugin needs. Optional; treated as 0 when absent.
+   */
+  maxProcessPerTask?: number
+  maxProcessPerSession?: number
   maxModelCallsPerTask: number
   maxModelCallsPerSession: number
   maxInputChars: number
@@ -134,8 +150,11 @@ interface RouterState {
   taskStartSeq: number
   routeAttempts: number
   finalAttempts: number
+  /** P06 process-selection cycles bought in this task; at most one by default. */
+  processAttempts: number
   sessionRouteAttempts: number
   sessionFinalAttempts: number
+  sessionProcessAttempts: number
   taskModelCalls: number
   sessionModelCalls: number
   completed: Set<string>
@@ -640,6 +659,52 @@ function verificationEvidence(index: EvidenceIndex, newest: EvidenceCall | undef
   const prefix = '\n\nLatest observed verification run (' + run.name + status + (trailing === '' ? '' : ' — ' + trailing) + '):\n'
   if (prefix.length >= budget) return { text: '', call: undefined }
   return { text: prefix + sanitizeVerifierText(run.text, budget - prefix.length), call: run }
+}
+
+/**
+ * Two consecutive completed verification runs whose results BOTH failed.
+ *
+ * The P06 trigger. Deliberately narrow and heuristic-free at the edges: only real tool results
+ * count (the same {@link isEvidenceOutput} gate every other evidence site uses), only
+ * verification-shaped output counts, and any success among the two most recent runs means the
+ * failure chain broke. Anything ambiguous — fewer than two runs, unreadable output — does NOT
+ * trigger: confirming a trigger with an extra classification call is out of scope, so a missed
+ * trigger degrades to the old path.
+ */
+export interface RecoverySignal {
+  /** Stable identity of the signal; one purchased cycle consumes exactly this signature. */
+  signature: string
+  /** Task start the signal belongs to. */
+  fromSeq: number
+  /** Sequence of the newest failing run. */
+  toSeq: number
+  /** The two runs, oldest first. */
+  runs: Array<{ seq: number; name: string; ok: boolean }>
+}
+
+/**
+ * Inspect a session for the two-failure recovery condition.
+ * @param events - session event log.
+ * @returns The signal, or undefined when the condition does not hold.
+ */
+export function inspectRecoverySignal(events: readonly SessionEvent[]): RecoverySignal | undefined {
+  const index = buildEvidenceIndex(events)
+  if (!index) return undefined
+  const runs = [...index.calls.values()]
+    .filter(call => isEvidenceOutput(call.name, call.text) && looksLikeVerificationRun(call.text))
+    .sort((a, b) => a.resultSeq - b.resultSeq)
+    .slice(-2)
+  if (runs.length < 2) return undefined
+  // A single failed run is a normal iteration. A success among the two newest means the chain
+  // broke and the task is no longer "stuck recovering".
+  if (runs.some(run => run.ok)) return undefined
+  const shaped = runs.map(run => ({ seq: run.resultSeq, name: run.name, ok: run.ok }))
+  return {
+    signature: stableHash({ phase: 'process', runs: shaped }),
+    fromSeq: index.problemSeq,
+    toSeq: shaped[shaped.length - 1]!.seq,
+    runs: shaped,
+  }
 }
 
 /** Upper bound on the one-line-per-call digest attached to the newest checkpoint. */
@@ -1213,9 +1278,9 @@ export class AutoVerifierRouter {
     const taskStartSeq = latestDirectUserSeq(sessionEvents(agent.session))
     if (taskStartSeq === undefined) return undefined
     const id = String(agent.id)
-    const state = this.states.get(id) ?? { taskStartSeq, routeAttempts: 0, finalAttempts: 0, sessionRouteAttempts: 0, sessionFinalAttempts: 0, taskModelCalls: 0, sessionModelCalls: 0, completed: new Set(), failed: new Set(), finalPreferred: false, strictBlocked: false }
+    const state = this.states.get(id) ?? { taskStartSeq, routeAttempts: 0, finalAttempts: 0, processAttempts: 0, sessionRouteAttempts: 0, sessionFinalAttempts: 0, sessionProcessAttempts: 0, taskModelCalls: 0, sessionModelCalls: 0, completed: new Set(), failed: new Set(), finalPreferred: false, strictBlocked: false }
     // A new task resets its own attempt and model-call counters, but never the session counters.
-    if (state.taskStartSeq !== taskStartSeq) { state.taskStartSeq = taskStartSeq; state.routeAttempts = 0; state.finalAttempts = 0; state.taskModelCalls = 0; state.completed.clear(); state.failed.clear(); state.inFlight = undefined; state.finalRequiredFromSeq = undefined; state.finalPreferred = false; state.strictBlocked = false; state.deliveryConsumed = undefined; this.exhaustedNotices.delete(id) }
+    if (state.taskStartSeq !== taskStartSeq) { state.taskStartSeq = taskStartSeq; state.routeAttempts = 0; state.finalAttempts = 0; state.processAttempts = 0; state.taskModelCalls = 0; state.completed.clear(); state.failed.clear(); state.inFlight = undefined; state.finalRequiredFromSeq = undefined; state.finalPreferred = false; state.strictBlocked = false; state.deliveryConsumed = undefined; this.exhaustedNotices.delete(id) }
     this.states.set(id, state)
     return state
   }
@@ -1224,13 +1289,14 @@ export class AutoVerifierRouter {
     if (policy.mode === 'manual') return undefined
     const state = this.state(agent)
     if (!state || state.inFlight || state.completed.has(fingerprint)) return undefined
-    // Routing and the final gate draw on separate attempt counters, so no amount of
-    // routing can leave the mandatory acceptance without an attempt of its own.
+    // Routing, the final gate and the P06 process cycle draw on SEPARATE attempt counters, so no
+    // amount of one can leave another without an attempt of its own.
     const final = phase === 'final'
-    const attempts = final ? state.finalAttempts : state.routeAttempts
-    const sessionAttempts = final ? state.sessionFinalAttempts : state.sessionRouteAttempts
-    const maxTask = final ? policy.maxFinalPerTask : policy.maxRoutePerTask
-    const maxSession = final ? policy.maxFinalPerSession : policy.maxRoutePerSession
+    const process = phase === 'process'
+    const attempts = final ? state.finalAttempts : process ? state.processAttempts : state.routeAttempts
+    const sessionAttempts = final ? state.sessionFinalAttempts : process ? state.sessionProcessAttempts : state.sessionRouteAttempts
+    const maxTask = final ? policy.maxFinalPerTask : process ? policy.maxProcessPerTask ?? 0 : policy.maxRoutePerTask
+    const maxSession = final ? policy.maxFinalPerSession : process ? policy.maxProcessPerSession ?? 0 : policy.maxRoutePerSession
     if (attempts >= maxTask || sessionAttempts >= maxSession) return undefined
     // Routing must leave the final acceptance affordable. Reserving the floor here is
     // what stops a legitimate-looking route (e.g. 90 calls under a 96-call task cap)
@@ -1245,6 +1311,8 @@ export class AutoVerifierRouter {
       // The reservation honors the preference; a later failure must not keep routing
       // disabled for the rest of the task.
       state.finalPreferred = false
+    } else if (process) {
+      state.processAttempts += 1; state.sessionProcessAttempts += 1
     } else {
       state.routeAttempts += 1; state.sessionRouteAttempts += 1
     }
@@ -1351,6 +1419,14 @@ export class AutoVerifierRouter {
 
   /** Whether this exact fingerprint already passed within the current task. */
   completedFingerprint(agent: RoutedAgent, fingerprint: string): boolean { return this.state(agent)?.completed.has(fingerprint) ?? false }
+
+  /**
+   * Whether this task already bought its process-selection cycle.
+   *
+   * The in-memory counter is authoritative while the plugin is loaded; the durable sidecar
+   * covers a reload, which is why {@link hasProcessAttempt} exists next to it.
+   */
+  hasProcessAttempt(agent: RoutedAgent): boolean { return (this.state(agent)?.processAttempts ?? 0) > 0 }
 
   finalRequired(agent: RoutedAgent): number | undefined { return this.state(agent)?.finalRequiredFromSeq }
 

@@ -231,6 +231,8 @@ export declare const zh: {
     'field.autoVerifyTeamTasks.help': string;
     'field.autoVerifyPlanMode.title': string;
     'field.autoVerifyPlanMode.help': string;
+    'field.autoProcessSelection.title': string;
+    'field.autoProcessSelection.help': string;
     'field.captureDecisions.title': string;
     'field.captureDecisions.help': string;
     'field.autoVerifySubagents.title': string;
@@ -472,6 +474,8 @@ export declare const dictionaries: {
         'field.autoVerifyTeamTasks.help': string;
         'field.autoVerifyPlanMode.title': string;
         'field.autoVerifyPlanMode.help': string;
+        'field.autoProcessSelection.title': string;
+        'field.autoProcessSelection.help': string;
         'field.captureDecisions.title': string;
         'field.captureDecisions.help': string;
         'field.autoVerifySubagents.title': string;
@@ -710,6 +714,8 @@ export declare const dictionaries: {
         'field.autoVerifyTeamTasks.help': string;
         'field.autoVerifyPlanMode.title': string;
         'field.autoVerifyPlanMode.help': string;
+        'field.autoProcessSelection.title': string;
+        'field.autoProcessSelection.help': string;
         'field.captureDecisions.title': string;
         'field.captureDecisions.help': string;
         'field.autoVerifySubagents.title': string;

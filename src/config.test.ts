@@ -311,6 +311,17 @@ describe('config - judges ensemble resolution', () => {
     ).toThrow('llm-verifier: extraJudges[0] must be an object')
   })
 
+  it('keeps P06 process selection off unless it was explicitly enabled and saved', () => {
+    // Default off is a product decision, not an accident: a new install or an old config without
+    // the field must never enter the request-level path.
+    expect(resolveConfig({}).autoProcessSelection).toBe(false)
+    expect(Config({}).autoProcessSelection).toBe(false)
+    // A user-saved true survives resolution and re-serialization through the schema.
+    expect(resolveConfig({ autoProcessSelection: true }).autoProcessSelection).toBe(true)
+    const roundTripped = Config({ ...Config({}), autoProcessSelection: true } as never) as { autoProcessSelection?: boolean }
+    expect(roundTripped.autoProcessSelection).toBe(true)
+  })
+
   it('resolves the criteria preset and defaults to the historical coding rubric', () => {
     const resolved = resolveConfig({})
     // Default MUST stay 'coding': it is the only preset byte-identical to DEFAULT_CRITERIA, so an

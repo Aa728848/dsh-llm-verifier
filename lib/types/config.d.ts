@@ -53,6 +53,13 @@ export interface Config {
     autoRouteMaxPerTask?: number;
     autoRouteMaxPerSession?: number;
     autoTrackCompletionThreshold?: number;
+    /**
+     * P06 request-level selection over \`llm/stream\`: give a struck task one alternative next reply.
+     *
+     * Default OFF and never turned on automatically. Only smart mode enters the path, at most one
+     * cycle is bought per task, and a selection is never an acceptance.
+     */
+    autoProcessSelection?: boolean;
     autoRouteMaxItemChars?: number;
     autoRouteMaxInputChars?: number;
     autoMaxModelCallsPerTask?: number;
@@ -109,6 +116,7 @@ export interface ResolvedConfig {
     autoRouteMaxPerTask: number;
     autoRouteMaxPerSession: number;
     autoTrackCompletionThreshold: number;
+    autoProcessSelection: boolean;
     autoRouteMaxItemChars: number;
     autoRouteMaxInputChars: number;
     autoMaxModelCallsPerTask: number;

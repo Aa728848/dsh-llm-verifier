@@ -60,6 +60,13 @@ export interface Config {
   autoRouteMaxPerTask?: number
   autoRouteMaxPerSession?: number
   autoTrackCompletionThreshold?: number
+  /**
+   * P06 request-level selection over \`llm/stream\`: give a struck task one alternative next reply.
+   *
+   * Default OFF and never turned on automatically. Only smart mode enters the path, at most one
+   * cycle is bought per task, and a selection is never an acceptance.
+   */
+  autoProcessSelection?: boolean
   autoRouteMaxItemChars?: number
   autoRouteMaxInputChars?: number
   autoMaxModelCallsPerTask?: number
@@ -117,6 +124,7 @@ export interface ResolvedConfig {
   autoRouteMaxPerTask: number
   autoRouteMaxPerSession: number
   autoTrackCompletionThreshold: number
+  autoProcessSelection: boolean
   autoRouteMaxItemChars: number
   autoRouteMaxInputChars: number
   autoMaxModelCallsPerTask: number
@@ -168,6 +176,7 @@ export const Config: z<Config> = z.object({
   autoRouteMaxPerTask: z.number().step(1).min(1).default(2),
   autoRouteMaxPerSession: z.number().step(1).min(1).default(8),
   autoTrackCompletionThreshold: z.number().min(0).max(1).default(0.684),
+  autoProcessSelection: z.boolean().default(false),
   autoRouteMaxItemChars: z.number().step(1).min(100).default(20000),
   autoRouteMaxInputChars: z.number().step(1).min(1000).default(60000),
   autoMaxModelCallsPerTask: z.number().step(1).min(1).default(96),
@@ -351,6 +360,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     autoRouteMinConfidence,
     autoTrackCompletionThreshold,
     captureDecisions: config.captureDecisions ?? true,
+    autoProcessSelection: config.autoProcessSelection ?? false,
     criteriaPreset,
     criteriaFile,
     autoVerifyTeamTasks: config.autoVerifyTeamTasks ?? true,

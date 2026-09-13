@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { analyzeStructuredRoute, AutoVerifierRouter, boundDecision, buildSemanticRoutePrompt, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, latestDirectUserSeq, MAX_ROUTED_CHECKPOINTS, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type RouterPolicy } from './router.ts'
+import { analyzeStructuredRoute, AutoVerifierRouter, inspectRecoverySignal, boundDecision, buildSemanticRoutePrompt, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, latestDirectUserSeq, MAX_ROUTED_CHECKPOINTS, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type RouterPolicy } from './router.ts'
 import { sanitizeVerifierText } from './session.ts'
 
 function session() {
@@ -1128,6 +1128,105 @@ describe('one cycle per classification and execution', () => {
  * It must require both a fully completed todo list and a real verification run, and its
  * signature must not reactivate on unrelated tool traffic.
  */
+
+/**
+ * P06 trigger: the two most recent completed verification runs must BOTH have failed.
+ *
+ * The rule is deliberately about the two NEWEST runs — one success anywhere in them means the
+ * failure chain broke — and it never guesses: fewer than two runs, or an output that does not
+ * look like a verification run, does not trigger.
+ */
+describe('recovery signal inspection', () => {
+  const failing = (value: ReturnType<typeof session>, id: string, text = 'Tests 1 failed') => {
+    value.append('tool/call', { turn: 1, step: 1, callId: id as never, name: 'pwsh', arguments: '{}' })
+    value.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: id as never, content: [{ type: 'text', text }], isError: true }) }, { surfaceOp: 'append' })
+  }
+  const passing = (value: ReturnType<typeof session>, id: string) => tool(value, 'pwsh', id, 'Tests 3 passed')
+
+  it('triggers only on two consecutive failures of verification-shaped output', () => {
+    const value = session()
+    failing(value, 'f1')
+    expect(inspectRecoverySignal(value.events)).toBeUndefined()
+    failing(value, 'f2')
+    const signal = inspectRecoverySignal(value.events)
+    expect(signal?.runs.map(run => run.ok)).toEqual([false, false])
+    expect(signal?.signature).toBe(inspectRecoverySignal(value.events)?.signature)
+  })
+
+  it('breaks the chain as soon as one of the two newest runs succeeded', () => {
+    const value = session()
+    failing(value, 'f1')
+    failing(value, 'f2')
+    passing(value, 'p1')
+    expect(inspectRecoverySignal(value.events)).toBeUndefined()
+    // Only the two NEWEST runs count: an old failure does not keep the task "stuck".
+    failing(value, 'f3')
+    expect(inspectRecoverySignal(value.events)).toBeUndefined()
+    failing(value, 'f4')
+    expect(inspectRecoverySignal(value.events)?.runs.map(run => run.ok)).toEqual([false, false])
+  })
+
+  it('ignores output that is not a verification run at all', () => {
+    const value = session()
+    const edit = (id: string) => tool(value, 'edit', id, 'wrote the file')
+    edit('e1')
+    edit('e2')
+    expect(inspectRecoverySignal(value.events)).toBeUndefined()
+  })
+
+  it('keys the signal by the evidence, not by the call id', () => {
+    // Same evidence shape at the same positions is the same signal: the signature must be stable
+    // across a reload (or the durable purchase record would stop matching what it consumed), and a
+    // fresh transport call id is not new evidence.
+    const first = session(); failing(first, 'a'); failing(first, 'b')
+    const second = session(); failing(second, 'x'); failing(second, 'y')
+    expect(inspectRecoverySignal(first.events)?.signature).toBe(inspectRecoverySignal(second.events)?.signature)
+    // A third failure moves the window, so the pair — and the signature — change.
+    failing(second, 'z')
+    expect(inspectRecoverySignal(second.events)?.signature).not.toBe(inspectRecoverySignal(first.events)?.signature)
+  })
+})
+
+/**
+ * The process cycle draws on its own attempt counter (one per task), while still consuming the
+ * shared model-call budget and preserving the final-acceptance floor.
+ */
+describe('process cycle reservations', () => {
+  const processPolicy: RouterPolicy = { ...policy, maxProcessPerTask: 1, maxProcessPerSession: 1, minFinalModelCalls: 6, maxModelCallsPerTask: 40 }
+  it('grants exactly one cycle per task and leaves routing untouched', () => {
+    const value = session()
+    const agent = { id: value.id, session: value }
+    const router = new AutoVerifierRouter()
+    const cycle = router.reserve(agent, 'process', 'p1', 7, processPolicy)!
+    expect(cycle).toBeDefined()
+    // The allowance is its own counter: a second cycle is refused even though route attempts remain.
+    expect(router.reserve(agent, 'process', 'p2', 7, processPolicy)).toBeUndefined()
+    expect(router.hasProcessAttempt(agent)).toBe(true)
+    // One reservation at a time, exactly like every other phase.
+    expect(router.reserve(agent, 'process', 'p2', 7, processPolicy)).toBeUndefined()
+    expect(router.commit(agent, cycle, 9)).toBe(true)
+    // Routing and the final gate still have their own attempts.
+    expect(router.reserve(agent, 'compare', 'c1', 6, processPolicy)).toBeDefined()
+  })
+
+  it('keeps the final-acceptance floor when the cycle would spend into it', () => {
+    const value = session()
+    const agent = { id: value.id, session: value }
+    const router = new AutoVerifierRouter()
+    const tight: RouterPolicy = { ...processPolicy, maxModelCallsPerTask: 10, minFinalModelCalls: 6 }
+    // 5 + 6 floor exceeds 10, so the cycle is refused before any model call.
+    expect(router.reserve(agent, 'process', 'p1', 5, tight)).toBeUndefined()
+    expect(router.reserve(agent, 'process', 'p1', 4, tight)).toBeDefined()
+  })
+
+  it('reserves no process cycle at all when the policy has no allowance', () => {
+    const value = session()
+    const agent = { id: value.id, session: value }
+    const router = new AutoVerifierRouter()
+    expect(router.reserve(agent, 'process', 'p1', 1, policy)).toBeUndefined()
+  })
+})
+
 describe('delivery-phase inspection', () => {
   it('requires a non-empty completed todo list and a real verification run', () => {
     const value = session()

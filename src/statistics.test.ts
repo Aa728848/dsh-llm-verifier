@@ -61,6 +61,40 @@ describe('StatisticsStore', () => {
     expect(JSON.parse(await readFile(file, 'utf8')).version).toBe(1)
   })
 
+  it('persists the P06 process-cycle observation and its stage-qualified verdict', async () => {
+    // Regression guard for the diagnostics whitelist: cleanRoute()/cleanVerdict() drop any field
+    // they do not know, so a new observation field silently disappears on the way to disk.
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const store = new StatisticsStore(join(root, 'statistics.json'), 10)
+    await store.record({
+      toolName: 'verifier_compare',
+      sessionId: 'one',
+      startedAt: 1,
+      success: true,
+      provider: 'p',
+      model: 'm',
+      stats: stats({ calls: 7 }),
+      verdict: { phase: 'process', outcome: 'compared', reviewStage: 'proposal', criteriaSource: 'proposal' },
+      route: { cycleId: 'cycle-1', trigger: 'llm-stream', stage: 'process', destination: 'process', attempt: 1, reservedCalls: 7, replayed: 'candidate', generatedCalls: 1, judgeCalls: 6, sameCandidate: false },
+    })
+    const overview = await store.overview({ fromMs: 0, toMs: 10 })
+    expect(overview.recent[0]?.route).toMatchObject({ trigger: 'llm-stream', stage: 'process', replayed: 'candidate', generatedCalls: 1, judgeCalls: 6 })
+    expect(overview.recent[0]?.verdict).toMatchObject({ reviewStage: 'proposal', criteriaSource: 'proposal' })
+    // A boolean that was not set is absent, not false: absence is what the loader tolerates.
+    expect(overview.recent[0]?.route?.sameCandidate).toBeUndefined()
+  })
+
+  it('drops an unknown trigger and an unknown replay value instead of inventing one', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const store = new StatisticsStore(join(root, 'statistics.json'), 10)
+    await store.record({ toolName: 'verifier_compare', sessionId: 'one', startedAt: 1, success: true, provider: 'p', model: 'm', stats: stats(), route: { cycleId: 'c', trigger: 'nope' as never, stage: 'process', destination: 'process' } })
+    await store.record({ toolName: 'verifier_compare', sessionId: 'two', startedAt: 2, success: true, provider: 'p', model: 'm', stats: stats(), route: { cycleId: 'c2', trigger: 'llm-stream', stage: 'process', destination: 'process', replayed: 'whatever' as never } })
+    const overview = await store.overview({ fromMs: 0, toMs: 10 })
+    // The malformed observation is dropped; the usable one keeps its record but not the bad value.
+    expect(overview.recent.find(row => row.sessionId === 'one')?.route).toBeUndefined()
+    expect(overview.recent.find(row => row.sessionId === 'two')?.route?.replayed).toBeUndefined()
+  })
+
   it('reports a zero prefix cache rate for an empty range instead of NaN', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
     const store = new StatisticsStore(join(root, 'statistics.json'), 100)
