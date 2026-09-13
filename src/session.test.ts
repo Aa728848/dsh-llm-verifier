@@ -22,6 +22,40 @@ describe('current session extraction', () => {
     expect(result.trace).not.toContain('hunter2')
   })
 
+  it('takes the task statement from a team message when no user message is present', async () => {
+    // Agent Teams hands a teammate its work over a team-message. `latestDirectUserSeq`
+    // accepts that as the task boundary, so extraction must too: otherwise the window
+    // produced a trace but an empty problem and verification failed outright.
+    const session = Session.create('session-00000000-0000-4000-8000-000000000007' as never)
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Implement the assigned team task' }], source: { kind: 'team-message' as never } as never }), { surfaceOp: 'append' })
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'c-1' as never, content: [{ type: 'text', text: 'done' }], isError: false }) }, { surfaceOp: 'append' })
+    const agent = { id: session.id, session } as never
+    const result = await extractSession(agent, async () => { throw new Error('no image expected') })
+    expect(result.problem).toBe('Implement the assigned team task')
+  })
+
+  it('prefers the user task when a later team message hands it over', async () => {
+    // A normal user task followed by a hand-off keeps the ORIGINAL task as the problem;
+    // the team message is trace evidence, not a replacement statement.
+    const session = Session.create('session-00000000-0000-4000-8000-000000000008' as never)
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Original user task' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Team hand-off for the same work' }], source: { kind: 'team-message' as never } as never }), { surfaceOp: 'append' })
+    const agent = { id: session.id, session } as never
+    const result = await extractSession(agent, async () => { throw new Error('no image expected') })
+    expect(result.problem).toBe('Original user task')
+    expect(result.trace).toContain('Team hand-off for the same work')
+  })
+
+  it('resets the problem to a team task that opens a new window', async () => {
+    const session = Session.create('session-00000000-0000-4000-8000-00000000000a' as never)
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Old task' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+    const teamSeq = session.events.at(-1)!.seq + 1
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'New assigned task' }], source: { kind: 'team-message' as never } as never }), { surfaceOp: 'append' })
+    const agent = { id: session.id, session } as never
+    const result = await extractSession(agent, async () => { throw new Error('no image expected') }, { fromSeq: teamSeq })
+    expect(result.problem).toBe('New assigned task')
+  })
+
   it('extracts PTC mode tool/code-dispatch events and redacts content', async () => {
     const session = Session.create('session-00000000-0000-4000-8000-000000000002' as never)
     session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Run PTC task' }], source: { kind: 'user' } }), { surfaceOp: 'append' })

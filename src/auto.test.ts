@@ -21,7 +21,16 @@ function sessionVerify(session: ReturnType<typeof taskSession>, id: string, payl
   session.append('tool/call', { turn: 1, step: 1, callId: id as never, name: 'verifier_current_session', arguments: '{}' })
   session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: id as never, content: [{ type: 'text', text: payload }], isError: false }) }, { surfaceOp: 'append' })
 }
-const verdict = (score: number, winner = 'A') => JSON.stringify({ sessionId: 's', problem: 'p', score, baselineScore: 0.2, winner, fromSeq: 0, toSeq: 9, omittedCharacters: 0, calls: 3, stats: {} })
+/** The acceptance-facing criteria shape `verifySession` actually returns: `{id, name, score}`. */
+const passingCriteria = [
+  { id: 'specification', name: 'Specification Adherence', score: 1 },
+  { id: 'output_match', name: 'Output Match', score: 1 },
+  { id: 'error_signals', name: 'Error Signal Detection', score: 1 },
+]
+const verdict = (score: number, winner = 'A', overrides: Record<string, unknown> = {}) => JSON.stringify({
+  sessionId: 's', problem: 'p', score, baselineScore: 0.2, winner,
+  criteria: passingCriteria, fromSeq: 0, toSeq: 9, omittedCharacters: 0, calls: 3, stats: {}, ...overrides,
+})
 
 describe('session acceptance', () => {
   const criteria = [
@@ -93,12 +102,12 @@ describe('automatic verification policy', () => {
     // explicit path must not be a loophole around it.
     const failedCriterion = taskSession()
     call(failedCriterion, 'edit', 'one'); call(failedCriterion, 'pwsh', 'two'); call(failedCriterion, 'read', 'three')
-    sessionVerify(failedCriterion, 'four', JSON.stringify({ score: 0.7, baselineScore: 0, winner: 'A', criteria: [{ id: 'specification', scoreA: 1 }, { id: 'error_signals', scoreA: 0 }] }))
+    sessionVerify(failedCriterion, 'four', JSON.stringify({ sessionId: 's', score: 0.7, baselineScore: 0, winner: 'A', fromSeq: 0, toSeq: 9, criteria: [{ id: 'specification', score: 1 }, { id: 'error_signals', score: 0 }] }))
     expect(analyzeAutoTask(failedCriterion.events, smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false, eligible: true })
     // A breakdown that clears every criterion still counts.
     const cleanCriteria = taskSession()
     call(cleanCriteria, 'edit', 'one'); call(cleanCriteria, 'pwsh', 'two'); call(cleanCriteria, 'read', 'three')
-    sessionVerify(cleanCriteria, 'four', JSON.stringify({ score: 0.7, baselineScore: 0, winner: 'A', criteria: [{ id: 'specification', scoreA: 0.65 }, { id: 'error_signals', scoreA: 0.9 }] }))
+    sessionVerify(cleanCriteria, 'four', JSON.stringify({ sessionId: 's', score: 0.7, baselineScore: 0, winner: 'A', fromSeq: 0, toSeq: 9, criteria: [{ id: 'specification', score: 0.65 }, { id: 'error_signals', score: 0.9 }] }))
     expect(analyzeAutoTask(cleanCriteria.events, smart)).toMatchObject({ manualVerificationAccepted: true, eligible: false, reason: 'already-verified' })
 
     // A pass below the configured threshold does not count either.
@@ -119,6 +128,58 @@ describe('automatic verification policy', () => {
     call(unreadable, 'edit', 'one'); call(unreadable, 'pwsh', 'two'); call(unreadable, 'read', 'three')
     call(unreadable, 'verifier_current_session', 'four')
     expect(analyzeAutoTask(unreadable.events, smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false })
+  })
+
+  it('fails closed on a manual verdict that does not cover the current task', () => {
+    // The read-back regression: the tool returns `score` on each criterion, but the parser
+    // only read compare's `scoreA`, so every row was filtered out and the empty breakdown
+    // passed the per-criterion floor. A malformed payload must not be treated as "all clear".
+    const legacyShape = taskSession()
+    call(legacyShape, 'edit', 'one'); call(legacyShape, 'pwsh', 'two'); call(legacyShape, 'read', 'three')
+    sessionVerify(legacyShape, 'four', JSON.stringify({ sessionId: 's', score: 0.9, winner: 'A', fromSeq: 0, toSeq: 9, criteria: [{ id: 'a', scoreA: 1 }, { id: 'b', scoreA: 1 }] }))
+    expect(analyzeAutoTask(legacyShape.events, smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false })
+
+    // Same for a verdict that reports no criteria at all.
+    const noCriteria = taskSession()
+    call(noCriteria, 'edit', 'one'); call(noCriteria, 'pwsh', 'two'); call(noCriteria, 'read', 'three')
+    sessionVerify(noCriteria, 'four', verdict(0.9, 'A', { criteria: [] }))
+    expect(analyzeAutoTask(noCriteria.events, smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false })
+
+    // A verdict from a different session never discharges this one's gate.
+    const otherSession = taskSession()
+    call(otherSession, 'edit', 'one'); call(otherSession, 'pwsh', 'two'); call(otherSession, 'read', 'three')
+    sessionVerify(otherSession, 'four', verdict(0.9))
+    expect(analyzeAutoTask(otherSession.events, smart, 'a-different-session')).toMatchObject({ manualVerificationAccepted: false })
+  })
+
+  it('accepts a verdict exactly at the threshold but rejects one whose reviewed interval is stale', () => {
+    const boundary = taskSession()
+    call(boundary, 'edit', 'one'); call(boundary, 'pwsh', 'two'); call(boundary, 'read', 'three')
+    sessionVerify(boundary, 'four', verdict(0.65, 'A', { criteria: [{ id: 'specification', score: 0.65 }] }))
+    expect(analyzeAutoTask(boundary.events, smart)).toMatchObject({ manualVerificationAccepted: true, eligible: false, reason: 'already-verified' })
+
+    // The verdict reviewed only up to seq 2, but the pwsh result at seq 4 is consequential
+    // work that happened after it: judging staleness by the verdict's OWN receipt expected
+    // this to count, and that is exactly the hole F01 closes.
+    const staleInterval = taskSession()
+    call(staleInterval, 'edit', 'one'); call(staleInterval, 'pwsh', 'two'); call(staleInterval, 'read', 'three')
+    sessionVerify(staleInterval, 'four', verdict(0.9, 'A', { toSeq: 2 }))
+    expect(analyzeAutoTask(staleInterval.events, smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false, eligible: true })
+
+    // Covering that same work (toSeq 4) is accepted: the read result that follows is
+    // passive, so it does not make the verdict stale.
+    const covered = taskSession()
+    call(covered, 'edit', 'one'); call(covered, 'pwsh', 'two'); call(covered, 'read', 'three')
+    sessionVerify(covered, 'four', verdict(0.9, 'A', { toSeq: 4 }))
+    expect(analyzeAutoTask(covered.events, smart)).toMatchObject({ manualVerificationAccepted: true })
+
+    // An operation that completes WHILE the verification runs also invalidates it.
+    const during = taskSession()
+    call(during, 'edit', 'one'); call(during, 'read', 'two')
+    during.append('tool/call', { turn: 1, step: 1, callId: 'verifier' as never, name: 'verifier_current_session', arguments: '{}' })
+    call(during, 'pwsh', 'three')
+    during.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'verifier' as never, content: [{ type: 'text', text: verdict(0.9, 'A', { toSeq: 4 }) }], isError: false }) }, { surfaceOp: 'append' })
+    expect(analyzeAutoTask(during.events, smart)).toMatchObject({ manualVerificationAccepted: false, eligible: true })
   })
 
   it('treats a team message as the task boundary for teammate sessions', () => {

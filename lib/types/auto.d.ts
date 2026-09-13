@@ -35,7 +35,7 @@ export interface AutoTaskEvidence {
 export declare function isSubagentSession(agent: {
     session?: unknown;
 } | undefined): boolean;
-export declare function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVerifyPolicy): AutoTaskEvidence;
+export declare function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVerifyPolicy, sessionId?: string): AutoTaskEvidence;
 /** One criterion's outcome from a session acceptance (candidate A is the session). */
 export interface AcceptanceCriterion {
     id: string;

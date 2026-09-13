@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ScoreCache } from './cache.ts'
-import { extractProgressScore, extractScore, pivotRoundPairs } from './core.ts'
+import { accumulatePairs, extractProgressScore, extractScore, pivotRoundPairs, rankScores } from './core.ts'
 import { resolveConfig } from './config.ts'
 
 const PYTHON_ROOT = join(import.meta.dirname, '..', '..', 'llm-as-a-verifier')
@@ -89,5 +89,54 @@ describe('DSH model routing and cache', () => {
       expect((await second.getOrCreate('key', create)).hit).toBe(true)
       expect(creates).toBe(1)
     } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+})
+
+/**
+ * Offline golden data for the algorithm contract.
+ *
+ * The Python suite above is the primary cross-language check, but it SKIPS when the
+ * sibling checkout is absent — so a drift in the aggregation semantics could go unnoticed
+ * in CI. These fixtures need no Python: they lock one recorded set of pivot pairs and the
+ * two documented aggregation variants with an expectation each.
+ */
+describe('offline aggregation fixtures', () => {
+  // Fixed reward table from the recorded review. `rewards['a,b'] = [a, b]`; the reversed
+  // orientation is emitted with the scores swapped, so position preference cancels.
+  const rewards = new Map<string, readonly [number, number]>()
+  for (const [key, value] of Object.entries({ '0,1': [0.75, 0.25], '0,2': [0.25, 0.75], '0,3': [0.75, 0.25], '1,2': [0.75, 0.25], '1,3': [0, 1], '2,3': [0.5, 0.5] } as Record<string, readonly [number, number]>)) {
+    rewards.set(key, value)
+    const [a, b] = key.split(',')
+    rewards.set(b + ',' + a, [value[1]!, value[0]!])
+  }
+  const ring: Array<[number, number]> = [[3, 2], [2, 0], [0, 1], [1, 3]]
+  const unordered = (a: number, b: number) => (a < b ? a + ',' + b : b + ',' + a)
+  const rank = (pairs: ReadonlyArray<readonly [number, number]>) => {
+    const wins = [0, 0, 0, 0]; const counts = [0, 0, 0, 0]
+    accumulatePairs(pairs, rewards, wins, counts)
+    return rankScores(wins, counts)
+  }
+  const pivotPairs = pivotRoundPairs(4, [3, 2])
+  const ringEdges = new Set(ring.map(([a, b]) => unordered(a, b)))
+
+  it('pins upstream pivot pair generation as golden data', () => {
+    expect(pivotPairs).toEqual([[0, 3], [0, 2], [1, 3], [1, 2], [2, 3]])
+    expect(pivotRoundPairs(7, [1, 4, 5])).toEqual([
+      [0, 1], [0, 4], [0, 5], [2, 1], [2, 4], [2, 5], [3, 1], [3, 4], [3, 5], [6, 1], [6, 4], [6, 5], [1, 4], [1, 5], [4, 5],
+    ])
+  })
+
+  it('records the deliberate aggregation difference with an expectation per variant', () => {
+    // Upstream accumulates the ring AND the full pivot round, so pivot/ring edges are
+    // weighted twice; on this fixture its winner is candidate 3.
+    const upstream = rank([...ring, ...pivotPairs])
+    expect(upstream[0]!.index).toBe(3)
+    expect(upstream[0]!.score).toBeCloseTo(0.5679315652, 9)
+    // This port de-duplicates the overlap, judging each unordered pair once; its winner
+    // is candidate 0. The two semantics genuinely disagree here, so neither may be
+    // described as "the same implementation".
+    const local = rank([...ring, ...pivotPairs.filter(([a, b]) => !ringEdges.has(unordered(a, b)))])
+    expect(local[0]!.index).toBe(0)
+    expect(local[0]!.score).toBeCloseTo(0.5408197771, 9)
   })
 })

@@ -71,6 +71,14 @@ export interface RouterPolicy {
     maxModelCallsPerSession: number;
     maxInputChars: number;
     maxItemChars: number;
+    /**
+     * Model calls that must stay affordable for at least one final acceptance
+     * (criteria × final repeats × judges). Routing reservations are refused when they
+     * would spend into this floor: the gate is mandatory once armed, so a route that
+     * consumes its budget leaves a turn that can never be closed. Optional so callers
+     * that only exercise the counter logic need not supply it (treated as 0).
+     */
+    minFinalModelCalls?: number;
 }
 interface Reservation {
     id: string;
@@ -94,6 +102,14 @@ export interface EvidenceCall {
     callSeq: number;
     resultSeq: number;
     text: string;
+    /**
+     * Whether the result settled successfully. A failed result is still REAL evidence of
+     * the session's state ("the test run failed") and must reach the progress checkpoints;
+     * it is never a selectable candidate.
+     */
+    ok: boolean;
+    /** Raw call arguments, kept so explicit verifier reviews can be bound to their input. */
+    args?: string;
 }
 export interface TeamTaskItem {
     id: string;
@@ -125,7 +141,16 @@ export declare function buildEvidenceIndex(events: readonly SessionEvent[]): Evi
  * are kept and the combined input budget is split across them.
  */
 export declare const MAX_ROUTED_CHECKPOINTS = 6;
-export declare function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandidates?: number, maxItemChars?: number, maxInputChars?: number): RouteDecision | undefined;
+/** Optional state the caller can use to skip decisions the task has already run. */
+export interface StructuredRouteOptions {
+    /**
+     * Whether an automatic decision with this fingerprint was already committed for the
+     * task. Skipping it lets a NEWER, unprocessed candidate group be selected instead of
+     * refusing the whole structured pass.
+     */
+    processed?: (fingerprint: string) => boolean;
+}
+export declare function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandidates?: number, maxItemChars?: number, maxInputChars?: number, options?: StructuredRouteOptions): RouteDecision | undefined;
 /**
  * Whether a smart-mode stop boundary is worth a semantic classification call.
  *
@@ -136,9 +161,57 @@ export declare function analyzeStructuredRoute(events: readonly SessionEvent[], 
  * @returns True when a subagent/workflow/plan artifact exists.
  */
 export declare function semanticRouteHint(events: readonly SessionEvent[]): boolean;
+/**
+ * The bounded, redacted evidence a semantic classification call may see.
+ *
+ * {@link SemanticRouteVisibility} is returned alongside the prompt because the classifier
+ * may only cite what was actually rendered: with a budget, artifacts and checkpoints get
+ * dropped, and a citation of a dropped id is an invalid reference rather than a decision.
+ * Rendering and reference validation therefore share this one result instead of each
+ * re-deriving its own idea of "what was offered".
+ */
+export interface SemanticRouteView {
+    prompt: string;
+    /** callIds rendered into the prompt: the only valid `candidateCallIds` values. */
+    candidateCallIds: Set<string>;
+    /** todo checkpoint sequence numbers rendered into the prompt: the only valid `checkpointSeqs`. */
+    checkpointSeqs: Set<number>;
+    /** How many evidence items were dropped for budget reasons. */
+    omitted: number;
+}
+/** The subset of a view a reference check needs. */
+export interface SemanticRouteVisibility {
+    candidateCallIds: ReadonlySet<string>;
+    checkpointSeqs: ReadonlySet<number>;
+}
+/**
+ * Build the semantic router prompt plus the exact set of references it offered.
+ *
+ * Every piece of evidence is redacted, bounded per item and charged against ONE shared
+ * character budget that also carries each block's framing cost. The previous pass
+ * sanitized artifacts but appended the first todo snapshot unconditionally, so a single
+ * long list could push the prompt past the cap (measured at ~10.8k characters against a
+ * 1000-character budget) while still carrying the raw content into the model input.
+ * @param problem - task statement; bounded separately because it is not untrusted evidence.
+ * @param events - session event log.
+ * @param maxCandidates - upper bound the prompt advertises for a `select`.
+ * @param maxItemChars - hard per-item cap.
+ * @param maxInputChars - hard combined cap for the rendered evidence.
+ * @returns The prompt and the visibility set its references are validated against.
+ */
+export declare function buildSemanticRouteView(problem: string, events: readonly SessionEvent[], maxCandidates: number, maxItemChars?: number, maxInputChars?: number): SemanticRouteView;
+/** Prompt-only wrapper kept for callers that do not validate references themselves. */
 export declare function buildSemanticRoutePrompt(problem: string, events: readonly SessionEvent[], maxCandidates: number, maxItemChars?: number, maxInputChars?: number): string;
 export declare function parseSemanticRoute(text: string, maxCandidates?: number): SemanticRouteOutput | undefined;
-export declare function semanticDecision(output: SemanticRouteOutput, events: readonly SessionEvent[], maxItemChars?: number, maxInputChars?: number): RouteDecision | undefined;
+/**
+ * Whether every reference in a classification was actually offered to it.
+ *
+ * The prompt only renders what fit the shared budget, so citing an omitted artifact or
+ * checkpoint is an invalid reference (a rejected decision), never a decision about
+ * evidence the classifier never saw.
+ */
+export declare function semanticReferencesVisible(output: SemanticRouteOutput, visible: SemanticRouteVisibility): boolean;
+export declare function semanticDecision(output: SemanticRouteOutput, events: readonly SessionEvent[], maxItemChars?: number, maxInputChars?: number, visible?: SemanticRouteVisibility): RouteDecision | undefined;
 /**
  * Estimated model calls for one routed decision.
  *
@@ -206,6 +279,15 @@ export declare class AutoVerifierRouter {
      * @param agent - Agent whose track route cleared the threshold.
      */
     preferFinal(agent: RoutedAgent): void;
+    /**
+     * Discharge the mandatory final gate with a current, passing manual verification.
+     *
+     * `analyzeAutoTask` has already established that the verdict covered the whole task
+     * up to its last consequential work and cleared every criterion; refusing to clear
+     * `finalRequiredFromSeq` here would run the same acceptance a second time.
+     * @param agent - Agent whose task was explicitly verified as accepted.
+     */
+    acceptManual(agent: RoutedAgent): void;
     /** Whether the next stop boundary must skip routing and run the final gate. */
     finalPreferred(agent: RoutedAgent): boolean;
     strictBlocked(agent: RoutedAgent): boolean;

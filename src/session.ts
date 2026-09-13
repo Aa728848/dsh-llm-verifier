@@ -102,7 +102,11 @@ export async function extractSession(agent: Agent, loadImage: (ref: Extract<Cont
       const sourceKind = event.data?.source?.kind as string
       if (sourceKind !== 'user' && sourceKind !== 'team-message') continue
       const text = textOf(event.data.content)
-      if (!problem && sourceKind === 'user' && text.trim()) problem = text.trim()
+      // The window's FIRST user or team message is the task statement. `latestDirectUserSeq`
+      // already treats a team-message as the task boundary, so extracting the problem only
+      // from `user` left a teammate-only window with an empty problem and verifySession
+      // rejected it as "no direct user task found" instead of verifying the assignment.
+      if (!problem && (sourceKind === 'user' || sourceKind === 'team-message') && text.trim()) problem = text.trim()
       for (const block of event.data.content) if (block.type === 'image') images.push(await loadImage(block.attachment))
       const tag = sourceKind === 'team-message' ? 'Team Message' : 'User'
       trace.push('--- ' + tag + ' seq ' + event.seq + ' ---\n' + text)

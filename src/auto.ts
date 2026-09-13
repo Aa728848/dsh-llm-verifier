@@ -77,10 +77,16 @@ function blockText(value: unknown): string {
  * The tool renders its result as JSON, so the verdict is recovered from the emitted
  * text. An unreadable payload returns undefined and the manual review simply does
  * not count: a review that cannot be parsed must never be treated as a pass.
+ *
+ * The per-criterion field is `score` (the acceptance-facing shape `verifySession`
+ * returns), NOT compare's `scoreA`. Reading `scoreA` here silently dropped every
+ * criterion and let a verdict with a failed requirement disarm the gate; the raw
+ * entry count is kept alongside the parsed rows so a payload whose criteria are
+ * missing or malformed fails closed instead of defaulting to "all passed".
  * @param value - Result content blocks (or a raw string).
  * @returns The parsed verdict fields, or undefined.
  */
-function parseSessionVerdict(value: unknown): { winner?: unknown; score?: unknown; criteria?: AcceptanceCriterion[] } | undefined {
+function parseSessionVerdict(value: unknown): ParsedSessionVerdict | undefined {
   const text = blockText(value)
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
@@ -88,15 +94,29 @@ function parseSessionVerdict(value: unknown): { winner?: unknown; score?: unknow
   try {
     const parsed: unknown = JSON.parse(text.slice(start, end + 1))
     if (typeof parsed !== 'object' || parsed === null) return undefined
-    const row = parsed as { winner?: unknown; score?: unknown; criteria?: unknown }
+    const row = parsed as { winner?: unknown; score?: unknown; criteria?: unknown; sessionId?: unknown; fromSeq?: unknown; toSeq?: unknown }
+    const entries = Array.isArray(row.criteria) ? row.criteria : []
     const criteria: AcceptanceCriterion[] = []
-    for (const entry of Array.isArray(row.criteria) ? row.criteria : []) {
-      const item = typeof entry === 'object' && entry !== null ? entry as { id?: unknown; name?: unknown; scoreA?: unknown } : {}
-      if (typeof item.id !== 'string' || typeof item.scoreA !== 'number' || !Number.isFinite(item.scoreA)) continue
-      criteria.push({ id: item.id, ...(typeof item.name === 'string' ? { name: item.name } : {}), score: item.scoreA })
+    for (const entry of entries) {
+      const item = typeof entry === 'object' && entry !== null ? entry as { id?: unknown; name?: unknown; score?: unknown } : {}
+      if (typeof item.id !== 'string' || typeof item.score !== 'number' || !Number.isFinite(item.score)) continue
+      criteria.push({ id: item.id, ...(typeof item.name === 'string' ? { name: item.name } : {}), score: item.score })
     }
-    return { winner: row.winner, score: row.score, criteria }
+    return { winner: row.winner, score: row.score, criteria, criteriaCount: entries.length, sessionId: row.sessionId, fromSeq: row.fromSeq, toSeq: row.toSeq }
   } catch { return undefined }
+}
+
+/** Raw verdict fields plus the bookkeeping needed to judge whether it still covers the task. */
+interface ParsedSessionVerdict {
+  winner?: unknown
+  score?: unknown
+  /** Successfully parsed per-criterion rows; `length < criteriaCount` means the payload was malformed. */
+  criteria: AcceptanceCriterion[]
+  /** Number of entries the payload declared, before any were filtered out. */
+  criteriaCount: number
+  sessionId?: unknown
+  fromSeq?: unknown
+  toSeq?: unknown
 }
 
 function isConsequential(name: string): boolean {
@@ -122,7 +142,7 @@ function isSuccessfulCodeDispatch(data: CodeDispatchData): boolean {
   return true
 }
 
-export function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVerifyPolicy): AutoTaskEvidence {
+export function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVerifyPolicy, sessionId?: string): AutoTaskEvidence {
   const taskStartSeq = latestDirectUserSeq(events)
   if (taskStartSeq === undefined) return { taskStartSeq: 0, toolCalls: 0, completedToolResults: 0, consequentialToolCalls: 0, hasManualSessionVerification: false, manualVerificationAccepted: false, eligible: false, reason: 'no-direct-user-task' }
 
@@ -150,30 +170,46 @@ export function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVer
   // passed the configured threshold AND nothing consequential happened afterwards.
   // Merely calling the tool — a failing verdict, an unreadable result, or a pass that was
   // followed by more edits — must never disarm the gate.
-  const stale = (seq: number) => pairedCalls.some(event => event.seq > seq && isConsequential(event.data.name))
-    || successfulDispatches.some(entry => entry.seq > seq && isConsequential(entry.data.name))
-  const manualVerdicts: Array<{ seq: number; winner: unknown; score: unknown; criteria?: AcceptanceCriterion[] }> = []
+  // Staleness is measured against the interval the verdict actually reviewed (its
+  // `toSeq`), not against the sequence of its own result. A review that only read up
+  // to seq 2 must not stand in for work completed at seq 6 while it was running.
+  // A verdict covers work up to its `toSeq`; work that SETTLED after that sequence is
+  // outside the reviewed interval. Result sequence numbers matter here, not call
+  // sequence numbers: a call issued before the verdict can finish after it.
+  const completedWork = [
+    ...pairedCalls.map(event => ({ seq: results.get(String(event.data.callId))!.seq, name: event.data.name })),
+    ...successfulDispatches.map(entry => ({ seq: entry.seq, name: entry.data.name })),
+  ]
+  const stale = (coveredTo: number) => completedWork.some(entry => entry.seq > coveredTo && isConsequential(entry.name))
+  // One entry per completed call, unreadable payloads included: "did the agent try an
+  // explicit review" is a separate fact from "did that review pass".
+  const manualVerdicts: Array<ParsedSessionVerdict | undefined> = []
   for (const event of pairedCalls) {
     if (event.data.name !== VERIFIER_SESSION_TOOL) continue
     const result = results.get(String(event.data.callId))
     if (result === undefined) continue
-    const verdict = parseSessionVerdict(result.data.message.content)
-    manualVerdicts.push({ seq: result.seq, winner: verdict?.winner, score: verdict?.score, criteria: verdict?.criteria })
+    manualVerdicts.push(parseSessionVerdict(result.data.message.content))
   }
   for (const entry of successfulDispatches) {
     if (entry.data.name !== VERIFIER_SESSION_TOOL) continue
-    const verdict = parseSessionVerdict(entry.data.content)
-    manualVerdicts.push({ seq: entry.seq, winner: verdict?.winner, score: verdict?.score, criteria: verdict?.criteria })
+    manualVerdicts.push(parseSessionVerdict(entry.data.content))
   }
   const hasManualSessionVerification = manualVerdicts.length > 0
-  // Same acceptance rule as the automatic gate, including the per-criterion floor:
-  // otherwise an explicitly called verification with one failed requirement could
-  // disarm the gate that the automatic path would have kept closed.
-  const manualVerificationAccepted = manualVerdicts.some(verdict =>
-    verdict.winner === 'A'
-    && typeof verdict.score === 'number'
-    && sessionAccepted({ score: verdict.score, winner: 'A', criteria: verdict.criteria }, policy.threshold)
-    && !stale(verdict.seq))
+  // Same acceptance rule as the automatic gate, including the per-criterion floor, and
+  // strictly fail-closed on anything the payload did not actually establish: a verdict
+  // whose criteria are missing or malformed, whose interval does not start inside the
+  // current task, whose toSeq predates later consequential work, or that belongs to a
+  // different session must never disarm the gate.
+  const manualVerificationAccepted = manualVerdicts.some(verdict => {
+    if (verdict === undefined) return false
+    if (verdict.criteriaCount === 0 || verdict.criteria.length !== verdict.criteriaCount) return false
+    if (typeof verdict.fromSeq !== 'number' || !Number.isSafeInteger(verdict.fromSeq)) return false
+    if (typeof verdict.toSeq !== 'number' || !Number.isSafeInteger(verdict.toSeq)) return false
+    if (verdict.fromSeq > taskStartSeq) return false
+    if (sessionId !== undefined && verdict.sessionId !== sessionId) return false
+    if (verdict.winner !== 'A' || typeof verdict.score !== 'number' || !Number.isFinite(verdict.score)) return false
+    return sessionAccepted({ score: verdict.score, winner: 'A', criteria: verdict.criteria }, policy.threshold) && !stale(verdict.toSeq)
+  })
 
   if (policy.mode === 'manual') return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, eligible: false, reason: 'manual-mode' }
   if (manualVerificationAccepted) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, eligible: false, reason: 'already-verified' }

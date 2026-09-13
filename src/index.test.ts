@@ -20,8 +20,11 @@ function assemble(config: Record<string, unknown> = {}, options: { root?: string
   const tools = new Map<string, { output: { schema: { properties: Record<string, unknown> } }; execute: (args: unknown, exec: unknown) => Promise<unknown> }>()
   const warnings: string[] = []
   const rpc = new Map<string, (endpoint: string, payload: unknown) => unknown>()
+  // The lifecycle hooks are the highest-risk wiring in the plugin and `on() {}` never ran
+  // them. Capturing the callbacks lets a focused test drive the real turn-stopping gate.
+  const handlers = new Map<string, (payload: unknown, next?: () => unknown) => unknown>()
   const ctx = {
-    inject() {}, on() {}, effect() {},
+    inject() {}, on(name: string, handler: (payload: unknown, next?: () => unknown) => unknown) { handlers.set(name, handler) }, effect() {},
     get() { return undefined },
     logger: { warn(value: unknown) { warnings.push(String(value)) }, info() {}, error() {}, debug() {} },
     tools: { register(definition: never) { tools.set((definition as unknown as { name: string }).name, definition as never) } },
@@ -34,7 +37,7 @@ function assemble(config: Record<string, unknown> = {}, options: { root?: string
     connection: { rpc: { handle(channel: string, handler: (endpoint: string, payload: unknown) => unknown) { rpc.set(channel, handler) } } },
   } as unknown as Context
   apply(ctx, config as never)
-  return { tools, warnings, rpc }
+  return { tools, warnings, rpc, handlers }
 }
 
 /** A session whose model is already logged: the normal case for best-of-N. */
@@ -117,6 +120,15 @@ describe('plugin assembly', () => {
     const custom = assemble({ criteriaPreset: 'custom', criteriaFile: file }, { initiator: exec.agent })
     const parsed = await custom.rpc.get('/llm-verifier')!('probe', undefined) as { value: { rubric: Record<string, unknown> } }
     expect(parsed.value.rubric).toMatchObject({ source: 'custom', count: 1 })
+  })
+
+  it('rejects an explicit selection that pivots and judges push past the call ceiling', async () => {
+    // Regression: the guard assumed exactly two pivots and ignored the judge multiplier,
+    // so 16 candidates with 16 pivots passed a 252-call estimate and then issued 816.
+    const { tools } = assemble(JUDGE)
+    const execute = tools.get('verifier_select')!.execute
+    const candidates = Array.from({ length: 16 }, (_, index) => 'candidate ' + index)
+    await expect(execute({ problem: 'pick one', candidates, pivots: 16, repeats: 2 }, exec)).rejects.toThrow(/judge calls/u)
   })
 
   it('survives an unavailable settings service and an unregistered connection', () => {
@@ -411,5 +423,66 @@ describe('identical-candidate verdicts', () => {
     const result = await definition.execute({ problem: 'choose one', candidates: ['same answer', 'same answer'] }, exec) as Record<string, any>
     expect(result.identical).toBe(true)
     assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'select')
+  })
+})
+
+/**
+ * The turn-stopping gate is the one place a manual pass would previously be honoured even
+ * when it reviewed only an older slice of the task. These drive the REAL registered hook
+ * through the assembly seam instead of asserting the pure rule twice.
+ */
+describe('automatic gate lifecycle', () => {
+  const user = (seq: number, text: string) => ({ type: 'user/message', seq, data: { source: { kind: 'user' }, content: [{ type: 'text', text }] } })
+  const call = (seq: number, id: string, name: string) => ({ type: 'tool/call', seq, data: { turn: 1, step: 1, callId: id, name, arguments: '{}' } })
+  const result = (seq: number, id: string, text: string) => ({ type: 'tool/result', seq, data: { turn: 1, step: 1, message: { source: { callId: id }, content: [{ type: 'text', text }] } } })
+  const manualVerdict = (toSeq: number) => JSON.stringify({ sessionId: 'agent-hook', score: 0.9, baselineScore: 0, winner: 'A', fromSeq: 0, toSeq, criteria: [{ id: 'a', score: 1 }, { id: 'b', score: 1 }, { id: 'c', score: 1 }] })
+  function agent(events: readonly unknown[], steered: unknown[]) {
+    return {
+      id: 'agent-hook',
+      session: { header: { id: 'agent-hook' }, snapshotEvents: () => events, requestHeader: () => ({ config: { provider: 'session-provider', model: 'session-model' } }) },
+      steer(message: unknown) { steered.push(message) },
+    }
+  }
+  const workingEvents = (toSeq: number) => [
+    user(0, 'Implement it'),
+    call(1, 'e', 'edit'), result(2, 'e', 'edited the file'),
+    call(3, 'p', 'pwsh'), result(4, 'p', 'Tests 3 passed'),
+    call(5, 'r', 'read'), result(6, 'r', 'ok'),
+    call(7, 'v', 'verifier_current_session'), result(8, 'v', manualVerdict(toSeq)),
+  ]
+
+  it('runs the final gate when the manual verdict only covered an older interval', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: scriptedStream(1, [], calls), sessions: [{ id: 'topic-1', createdAt: 1 }] })
+    const steered: unknown[] = []
+    await handlers.get('agent/turn-stopping')!({ agent: agent(workingEvents(2), steered), signal: new AbortController().signal })
+    // toSeq=2 misses the pwsh result at seq 4, so the verdict is stale and the gate runs.
+    expect(calls.length).toBeGreaterThan(0)
+  })
+
+  it('records a low-confidence classification so "not routed" has a reason', async () => {
+    // Diagnostics gap named by the review: a task that was never routed showed nothing on the
+    // dashboard. The classification decision itself is now stored with its reason.
+    const stream = () => textStream(JSON.stringify({ kind: 'compare', confidence: 0.2, reason: 'unclear', candidateCallIds: ['s1', 's2'], checkpointSeqs: [] }))
+    const { handlers, rpc } = assemble(JUDGE, { stream, sessions: [{ id: 'agent-hook', createdAt: 1 }] })
+    const events = [
+      user(0, 'Implement it'),
+      call(1, 's1', 'subagent'), result(2, 's1', 'frontend analysis'),
+      call(3, 's2', 'subagent'), result(4, 's2', 'backend analysis'),
+      call(5, 'e', 'edit'), result(6, 'e', 'edited the file'),
+    ]
+    await handlers.get('agent/turn-stopping')!({ agent: agent(events, []), signal: new AbortController().signal })
+    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { ok: boolean; value: { recent: Array<{ toolName: string; verdict?: { outcome?: string } }> } }
+    expect(overview.ok).toBe(true)
+    expect(overview.value.recent.some(row => row.toolName === 'verifier_route_classify' && row.verdict?.outcome === 'low-confidence')).toBe(true)
+  })
+
+  it('does not re-verify when the manual verdict covers the whole current task', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: scriptedStream(1, [], calls), sessions: [{ id: 'topic-2', createdAt: 1 }] })
+    const steered: unknown[] = []
+    await handlers.get('agent/turn-stopping')!({ agent: agent(workingEvents(6), steered), signal: new AbortController().signal })
+    expect(calls).toHaveLength(0)
+    expect(steered).toHaveLength(0)
   })
 })
