@@ -16,6 +16,7 @@ pnpm run typecheck:local # 按 ../deepseek-harness 的实际类型检查（只�
 pnpm test                # vitest run，全部单测
 npx vitest run src/router.test.ts   # 跑单个文件
 pnpm run verify:release  # typecheck + test + build，prepublishOnly 会自动调用
+node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫描 + 解析器 drift，需先 build
 ```
 
 - 受限沙箱下 `pnpm test` 可能因 esbuild 的 piped stdio 直接 `spawn EPERM`——那是沙箱边界，不是代码问题。
@@ -41,11 +42,13 @@ pnpm run verify:release  # typecheck + test + build，prepublishOnly 会自动�
 | `images.ts` | 图片证据加载（data URL / HTTPS，含超时与主机限制） |
 | `client.tsx` / `client-i18n.ts` | Web 设置页与统计看板、中英文字典 |
 | `client-judges.ts` | 设置页“附加裁判”编辑器的纯函数（规范化 / 冲突检测 / 序列化），由 `client.test.ts` 直接测试 |
-| `decisions.ts` | 决策快照（脱敏提示词 + 原始回答）的持久化与限量：一次调用 ≤ 12 次模型调用、单条 ≤ 3 万字符、每话题最近 40 条；看板按需拉取 |
+| `decisions.ts` | 决策快照（脱敏提示词 + 原始回答）的持久化与限量：一次调用 ≤ 12 次模型调用、单条记录 ≤ 3 万字符，且这 3 万字符**按调用数平均分配**（6 次调用的会话验收必须留下 6 条、各自缩窗，而不是只留最先返回的 3 条）；每话题最近 40 条；看板按需拉取 |
+| `criteria.ts` | 判据解析：预设直取、自定义 Markdown 文件每次重读（内容未变则复用解析结果），文件缺失/解析失败**退回 coding 并记录原因**，绝不让门控失效 |
+| `replay.ts` | 离线回放：从 `statistics-v1.json` 重放阈值（用当前 `sessionAccepted` 规则）、从 `decisions-v1.json` 重放解析器；纯函数，配套 `scripts/eval-replay.mjs` 与 `lib/replay.js` 导出 |
 
 ## 硬性规矩
 
-1. **改 `src/` 必须 `pnpm run build` 并连同 `lib/` 一起提交**。`lib/` 是入库产物（81 个文件），宿主加载它；只提交源码会让线上行为与源码脱节。
+1. **改 `src/` 必须 `pnpm run build` 并连同 `lib/` 一起提交**。`lib/` 是入库产物，宿主加载它；只提交源码会让线上行为与源码脱节。
 2. **提交前跑 `pnpm run verify:release`**。提交信息用英文 conventional commits（`fix:` / `feat:` / `chore:`），版本号单独一次 `chore: bump ...`。
 3. **`sanitizeVerifierText` 的返回值必须 ≤ `maxChars`**，截断提示文字也算在预算内——`boundDecision` 用它做硬上限，超一个字符就会把整条自动路由丢掉。
 4. **凡进入提示词的证据都要限长**：单项 + 总量，自动路径与显式工具路径都要。新增字段时先问"它有没有上限、超了会怎样"。自动 `track` 的检查点数还要遵守 `router.ts` 的 `MAX_ROUTED_CHECKPOINTS`。**任何新增候选/检查点来源都必须走 `itemBudget()` 分摊总预算**，保持"Σ items ≤ autoRouteMaxInputChars 且单项 ≤ autoRouteMaxItemChars"，不要再用裸 `maxItemChars` 逐项截断——否则 `boundDecision` 会把整条决策丢掉（`index.ts` 现在会记一条 `dropped-over-budget` 并告警，但门控已经不生效了）。
@@ -79,6 +82,10 @@ pnpm run verify:release  # typecheck + test + build，prepublishOnly 会自动�
 - **检查点证据只有一个判据：`router.ts` 的 `isEvidenceOutput(name, text)`**——检查点渲染、语义候选列表、语义引用校验、PTC 包装体归属四处共用它，别再各写一份名单。不算证据的三类：① 记账/协调类工具（`todo_write`/`create_goal`/`get_goal`/`update_goal`/`interrupt_agent`/`list_agents`/`exit_plan_mode`/`skill`/`present`/`job_list`/`job_kill`/`list_subagent_models`/`send_message`），它们都在活儿干完之后才调用；② 插件自己的判决工具（`verifier_*`）——必须留在证据索引里给 `successfulExplicitKinds` 用，但绝不能作为"观测输出"渲染，否则裁判等于拿自己上一次的判决当证据；③ 后台子 Agent 的启动回执（`started subagent <id>` / `started background subagent job <id>`，只能按文本形状判断：前台 `subagent` 的返回是子 Agent 的真实报告，那本身就是交付物）。PTC 里 `run_code` 的派发全部不算证据时，整条包装结果同样排除（按 `tool/ptc-dispatch` 的 `rootCallId` 归属判断）。新增证据来源时先问"它有没有自己的产出"——`ask_user_question`（用户给的信息）、`edit`/`write`/`pwsh`（状态变更本身就是工作）、`job_output`（带着 job 的真实输出）都是有产出的，故意不排除。这类回归见过三次（`router.test.ts`），最贵的是 `present`：它是每轮最后一个调用，于是「最新观测输出」永远只剩声明本身，裁判按提示词自己的规矩把最新检查点封顶在 K(52.6%)，连续四轮验收不过而活儿早就干完并跑过测试了。**最新检查点还多带一块「最近一次验证运行」**（`verificationEvidence`）：一个输出位放不下"任务尾巴"和"被尾巴挡住的测试"，只给最新检查点补这一块（历史检查点描述的是过去的状态，不补），并附一行确定性的"此后发生了多少次工具结果、分别是哪些工具"（`trailingSummary`），让裁判自己判断这次测试还覆不覆盖当前状态。识别靠 `VERIFICATION_SIGNATURES`（vitest/jest/pytest/go/tsc/EXIT=0 这些输出形状）——**是启发式**：漏判只是退回单输出渲染（不会更糟），误判只是多给裁判看一条真实输出，两者都不可能凭空造出证据；它**不放松任何阈值**，只是把会话里真实发生过的证据重新摆到裁判眼前。
 - **同一字母的多个 token 变体概率必须相加**（`extractScore`）：`" A"` 与 `"A"` 是同一次采样的互斥事件，取 `max` 会系统性压低被拆分的字母并可能翻转判决。**这是与上游唯一的刻意偏差**：上游 `fine_grained_reward.py:678` 用的是 `max`（已核对源码而非猜测），因此 `parity.test.ts` 的 fixture 有意不含同字母多变体用例，新增 fixture 时不要往里面塞这种输入。要退回上游语义就改 `core.ts` 那一行，并同步改 README「与上游的一处已知差异」与本节；改这条评分语义必须同时升 `engine.ts` 里缓存身份的 `version`。
 - **判官温度默认 0.2**（旧版硬编码 1）：自动路由默认只跑 1 轮，低温度让同一次判决更可复现。温度是评分缓存身份的一部分，改默认值或改这个字段必须同时升 `engine.ts` 的缓存 `version`。
+- **判据预设默认必须是 `coding`，且它与 `DEFAULT_CRITERIA` 必须是同一个对象引用**（`CRITERIA_PRESETS.coding === DEFAULT_CRITERIA`，测试锁死）：任何改动都会同时改变自动门控松紧与缓存键。其余预设各 2–4 条窄判据；切换预设即改判据文本 → 提示词与 `promptHash` 变化、缓存自然失效，**不需要**升缓存 `version`。自定义判据文件读取失败**退回 coding 并回报原因**（`CriteriaResolver.error`，见自检面板），因为判据路径写错不该让门控失效；判据 id 必须去重（`normalizeCriteria` / `parseCriteriaMarkdown`），因为 `compare` 按 id 归并逐项结果，重名会把两条判据合并成一行。
+- **前缀预热按"不同提示词前缀"各一次**：`compare` 按 A/B 槽位（奇偶换位）分组各预热一个 job，`track` 先跑第一轮再扇出其余重复轮次。预热用的就是本来就要发生的调用，**调用次数必须保持不变**，只允许改变顺序（多一次串行等待）。`select` 每对候选本来就是独立 `compare`，不需要额外处理。改动分组要同步改 `engine.test.ts` 里"预热顺序 + 调用数不变"的断言。
+- **逐字节相同的候选绝不送给判官**：`compare` 两侧相同 → `identical: true` + `tie` + 0.5/0.5（**不是**高分，否则会话验收会放行一个与空工作基线无法区分的会话）；`select` 全同 → 0 调用、全 0.5；有重复则先去重再跑锦标赛、结果按代表性索引映射回原列表（`rankByScore`）；空白候选直接报错。verdict 分别记 `identical` / `identical-candidates`，看板据此区别于"真的判过且打平"。这是上游「多数投票跳过锦标赛」的成本收益版，**不采纳**其"多数票直接返回未评判候选"的语义。
+- **判官自检是诊断，不是验收**：`{kind:'probe'}` 与统计/决策走同一条 `/api/llm-verifier/statistics` 路由，对每个判官发一次真实调用（超时上限 30s、不重试、**不写入统计**），回报可达性、实际通道、能否解析出 A–T、延迟与当前生效判据。它不得参与任何判定，也不得写进评分缓存。
 - **统计的 `verdict` 是增量可选字段**：旧记录没有它也必须能加载（`isRecord` 只做宽松校验），看板对缺字段的行按旧样式渲染；`success` 恒为"模型调用是否抛错"，不要把它当验收结果。
 - **显式证据有硬上限**：一次显式调用合计 ≤ 24 万字符（`EXPLICIT_MAX_TOTAL_CHARS`），超出直接报错。放宽它要重新评估判官模型上下文。
 - **显式 `verifier_current_session` 不等于"已验收"**：只有该次复核达到阈值（`winner === 'A'` 且分数 ≥ 阈值）**并且之后没有实质工作**时才解除自动门控。判决失败、低于阈值、结果解析不出、或通过之后又改动过，都照常验收。别简化回"调用过即放行"。
@@ -102,4 +109,4 @@ pnpm run verify:release  # typecheck + test + build，prepublishOnly 会自动�
 
 ## 发布
 
-`pnpm publish` → `prepublishOnly` → `verify:release`（按 npm 锁定版本 typecheck + 测试 + 重建 `lib/`）。tarball 内容由 `package.json` 的 `files` 决定（`lib`、`src`、`cordis.patch.yml`、`README.md`）；本文件不进包。发布前记得单独 bump 版本号，否则 npm 会拒绝重名。
+`pnpm publish` → `prepublishOnly` → `verify:release`（按 npm 锁定版本 typecheck + 测试 + 重建 `lib/`）。tarball 内容由 `package.json` 的 `files` 决定（`lib`、`src`、`scripts`、`cordis.patch.yml`、`README.md`）；本文件不进包。发布前记得单独 bump 版本号，否则 npm 会拒绝重名。
