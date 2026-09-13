@@ -16,7 +16,7 @@ import { CriteriaResolver, type ResolvedCriteria } from './criteria.ts'
 import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, MAX_ROUTE_FEEDBACK_CHARS, type AcceptanceCriterion, type RoutedCandidateRef } from './auto.ts'
 import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, inspectRecoverySignal, latestDirectUserSeq, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type CandidateArtifact, type Reservation, type RouteDecision, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
 import { ProcessCycleStore, ProcessSelector, resolveProcessFile, type ProcessCycleReport } from './process-selection.ts'
-import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, PROPOSAL_CRITERIA, buildGenerationPrompt, buildPairwisePrompt, extractScore, type ReviewStage } from './core.ts'
+import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, PROPOSAL_CRITERIA, buildGenerationPrompt, buildPairwisePrompt, extractScore, renderReferenceContext, type ReviewStage } from './core.ts'
 import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from './plan-gate.ts'
 import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from './team-gate.ts'
 import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, parseStatisticsQuery, resolveStatisticsFile, summarizeVerdict, type RouteObservation, type StatisticsOverview, type VerdictSummary, type VerifierToolName } from './statistics.ts'
@@ -404,13 +404,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     const result: SessionVerificationResult = { sessionId: extracted.sessionId, problem: extracted.problem, score: compared.scoreA, baselineScore: compared.scoreB, winner: compared.winner, criteria: compared.criteria.map(row => ({ id: row.id, name: row.name, score: row.scoreA })), fromSeq: extracted.fromSeq, toSeq: extracted.toSeq, omittedCharacters: extracted.omittedCharacters, calls: compared.calls, stats: compared.stats, judges: compared.judges, agreement: compared.agreement }
     return { result, selected }
   }, phase, observation)
-  const compareCandidates = async (agent: Agent, problem: string, candidateA: string, candidateB: string, repeats: number, signal: AbortSignal, rubric: ResolvedCriteria, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit', observation?: RouteObservation) => record('verifier_compare', agent, async (trace) => {
+  const compareCandidates = async (agent: Agent, problem: string, candidateA: string, candidateB: string, repeats: number, signal: AbortSignal, rubric: ResolvedCriteria, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit', observation?: RouteObservation, reviewStage: ReviewStage = 'artifact') => record('verifier_compare', agent, async (trace) => {
     const { verifier, selected } = await engine(agent)
-    return { result: await verifier.compare({ problem, candidateA, candidateB, criteria: rubric.criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats, images: routedImages, ...(trace ? { trace } : {}) }, signal), selected }
+    return { result: await verifier.compare({ problem, candidateA, candidateB, criteria: rubric.criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats, reviewStage, domain: rubric.source, images: routedImages, ...(trace ? { trace } : {}) }, signal), selected }
   }, phase, observation)
-  const selectCandidates = async (agent: Agent, problem: string, candidates: readonly string[], repeats: number, signal: AbortSignal, rubric: ResolvedCriteria, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit', observation?: RouteObservation) => record('verifier_select', agent, async (trace) => {
+  const selectCandidates = async (agent: Agent, problem: string, candidates: readonly string[], repeats: number, signal: AbortSignal, rubric: ResolvedCriteria, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit', observation?: RouteObservation, reviewStage: ReviewStage = 'artifact') => record('verifier_select', agent, async (trace) => {
     const { verifier, selected } = await engine(agent)
-    return { result: await verifier.select({ problem, candidates, criteria: rubric.criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats, pivots: Math.min(2, candidates.length), seed: 0, images: routedImages, ...(trace ? { trace } : {}) }, signal), selected }
+    return { result: await verifier.select({ problem, candidates, criteria: rubric.criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats, pivots: Math.min(2, candidates.length), seed: 0, reviewStage, domain: rubric.source, images: routedImages, ...(trace ? { trace } : {}) }, signal), selected }
   }, phase, observation)
   const trackProgress = async (agent: Agent, problem: string, steps: readonly string[], checkpoints: readonly number[], repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit', observation?: RouteObservation) => record('verifier_track', agent, async (trace) => {
     const { verifier, selected } = await engine(agent)
@@ -435,7 +435,7 @@ export function apply(ctx: Context, config: Config = {}): void {
    * @param signal - tool-call abort signal.
    * @param criteriaInput - caller-supplied criteria, or undefined for the configured rubric.
    */
-  const bestOfN = async (agent: Agent, task: string, count: number, repeats: number | undefined, signal: AbortSignal, criteriaInput: unknown) => record('verifier_best_of_n', agent, async (trace) => {
+  const bestOfN = async (agent: Agent, task: string, count: number, repeats: number | undefined, signal: AbortSignal, criteriaInput: unknown, contextInput?: unknown) => record('verifier_best_of_n', agent, async (trace) => {
     const { verifier, selected } = await engine(agent)
     if (!Number.isSafeInteger(count) || count < MIN_BEST_OF_N || count > MAX_BEST_OF_N) throw new Error('llm-verifier: n must be an integer between ' + MIN_BEST_OF_N + ' and ' + MAX_BEST_OF_N)
     const rounds = capped(repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats')
@@ -457,7 +457,20 @@ export function apply(ctx: Context, config: Config = {}): void {
     const call = agent.session.requestHeader()?.config
     if (call === undefined) throw new Error('llm-verifier: this session has no logged request header yet, so best-of-n cannot tell which model should write the drafts — generate candidates with parallel subagents and rank them with verifier_select instead')
     const target = { provider: call.provider, model: call.model, ...(call.reasoningEffort === undefined ? {} : { reasoningEffort: String(call.reasoningEffort) }) }
-    const problem = explicitEvidence([task], explicitItemChars(selected), explicitBudget(selected), 'task')[0]!
+    // The task and the optional reference context share ONE explicit budget, each with its own item
+    // cap, so a huge context cannot push the combined request past the documented ceiling.
+    const contextRaw = typeof contextInput === 'string' ? contextInput : undefined
+    const bounded = explicitEvidence(
+      [task, ...(contextRaw?.trim() ? [contextRaw] : [])],
+      explicitItemChars(selected),
+      explicitBudget(selected),
+      'task',
+    )
+    const problem = bounded[0]!
+    const referenceContext = bounded[1]
+    // Both judge comparisons read the same block the drafts were given; appending it to the problem
+    // is what makes "same context everywhere" true rather than aspirational.
+    const judgedProblem = referenceContext === undefined ? problem : problem + '\n\n' + renderReferenceContext(problem, referenceContext)
     // N independent drafts, in parallel. A failure is captured per draft so the error below can
     // name it; a draft that fails is never substituted with another one.
     // Accumulated from the first generation call onward, so a failure in ANY phase (a draft, the
@@ -473,7 +486,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       throw error
     }
     const attempts = await Promise.all(Array.from({ length: count }, async (_unused, index) => {
-      const prompt = buildGenerationPrompt(problem, index, count)
+      const prompt = buildGenerationPrompt(problem, index, count, referenceContext)
       try {
         const completion = await generateCandidate(verifier.client, target, prompt, signal)
         trace?.({ label: 'draft ' + (index + 1), channel: completion.scoringMode, prompt, output: completion.text })
@@ -507,7 +520,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (survivors.length < MIN_BEST_OF_N) failWithUsage(new Error('llm-verifier: best-of-n produced ' + survivors.length + ' usable draft(s) out of ' + count + '; at least ' + MIN_BEST_OF_N + ' are required to choose between them' + (failures.length === 0 ? '' : ' — ' + failures.join('; '))))
     let ranked: Awaited<ReturnType<typeof verifier.select>>
     try {
-      ranked = await verifier.select({ problem, candidates: survivors.map(survivor => survivor.text), criteria: rankingRubric.criteria, ...(rankingRubric.groundTruthNote ? { groundTruthNote: rankingRubric.groundTruthNote } : {}), repeats: rounds, pivots: Math.min(2, survivors.length), seed: 0, reviewStage: 'proposal', domain: rankingRubric.source, ...(trace ? { trace } : {}) }, signal)
+      ranked = await verifier.select({ problem: judgedProblem, candidates: survivors.map(survivor => survivor.text), criteria: rankingRubric.criteria, ...(rankingRubric.groundTruthNote ? { groundTruthNote: rankingRubric.groundTruthNote } : {}), repeats: rounds, pivots: Math.min(2, survivors.length), seed: 0, reviewStage: 'proposal', domain: rankingRubric.source, ...(trace ? { trace } : {}) }, signal)
     } catch (error) {
       // The drafts are already paid for; a tournament failure must not hide them.
       mergeRunStats(generation, partialStats(error))
@@ -521,7 +534,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // tournament above, so without it two different comparisons share one set of labels.
     let compared: Awaited<ReturnType<typeof verifier.compare>>
     try {
-      compared = await verifier.compare({ problem, candidateA: ranked.best, candidateB: EMPTY_WORK_BASELINE, criteria: baselineRubric.criteria, traceLabelPrefix: 'baseline: ', reviewStage: 'artifact', domain: baselineRubric.source, ...(baselineRubric.groundTruthNote ? { groundTruthNote: baselineRubric.groundTruthNote } : {}), repeats: rounds, ...(trace ? { trace } : {}) }, signal)
+      compared = await verifier.compare({ problem: judgedProblem, candidateA: ranked.best, candidateB: EMPTY_WORK_BASELINE, criteria: baselineRubric.criteria, traceLabelPrefix: 'baseline: ', reviewStage: 'artifact', domain: baselineRubric.source, ...(baselineRubric.groundTruthNote ? { groundTruthNote: baselineRubric.groundTruthNote } : {}), repeats: rounds, ...(trace ? { trace } : {}) }, signal)
     } catch (error) {
       // Baseline scoring failed: keep the generation AND tournament usage that preceded it.
       mergeRunStats(generation, partialStats(error))
@@ -552,6 +565,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       rankingCriteriaCount: rankingRubric.criteria.length,
       baselineCriteriaSource: baselineRubric.source,
       baselineCriteriaCount: baselineRubric.criteria.length,
+      /** Whether the optional reference context was supplied and therefore seen by every call. */
+      contextIncluded: referenceContext !== undefined,
       /** 1-based draft numbers of the survivors, in `scores`/`ranking` order. */
       sources: survivors.map(survivor => survivor.attempt),
       scores: ranked.scores,
@@ -614,6 +629,19 @@ export function apply(ctx: Context, config: Config = {}): void {
    * The whole message — fixed opening, detail and fixed instruction — is redacted and bounded
    * by one shared budget, because the locator lines added by S04 count against it too.
    */
+  /**
+   * Append a candidate group's scope annotation to an automatic feedback body.
+   *
+   * A v2 trusted workflow envelope MAY declare the task range / source reference its group was
+   * produced for; putting it in the feedback is what makes it checkable by the agent that receives
+   * the verdict instead of only by the plugin's own logs.
+   * @param detail - the rendered feedback body.
+   * @param scope - the group's scope annotation, when it declared one.
+   * @returns The body, bounded by the shared feedback budget.
+   */
+  const withScope = (detail: string, scope: string | undefined): string => scope === undefined
+    ? detail
+    : sanitizeVerifierText(detail + '\nCandidate group scope: ' + scope, MAX_ROUTE_FEEDBACK_CHARS)
   const routeFeedback = (decision: RouteDecision, detail: string) => createUserMessage({ content: [{ type: 'text' as const, text: sanitizeVerifierText('[Automatic verifier routing: ' + decision.kind + ']\n' + detail + '\nUse this independent result to continue the actual task. Do not merely restate the ranking or progress score; implement, correct, and verify the required work.', MAX_ROUTE_FEEDBACK_CHARS) }], source: { kind: 'plugin' as const, plugin: 'dsh-llm-verifier', form: 'notice' as const, summary: 'Automatic verifier routed ' + decision.kind } })
 
   /**
@@ -661,22 +689,27 @@ export function apply(ctx: Context, config: Config = {}): void {
     try {
       const extracted = await extractTask(agent, taskStartSeq, admittedLastSeq, selected.autoVerifyMaxChars, signal)
       if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return undefined }
+      const stage = bounded.candidates[0]!.reviewStage
       if (bounded.kind === 'compare') {
-        const result = await compareCandidates(agent, extracted.problem, bounded.candidates[0].content, bounded.candidates[1].content, repeats, signal, rubric, extracted.images, 'compare', observation)
+        const result = await compareCandidates(agent, extracted.problem, bounded.candidates[0].content, bounded.candidates[1].content, repeats, signal, rubric, extracted.images, 'compare', observation, stage)
         if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return undefined }
         if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return undefined
-        return routeFeedback(bounded, compareRouteFeedbackDetail(
+        return routeFeedback(bounded, withScope(compareRouteFeedbackDetail(
           [candidateRef(bounded.candidates[0]), candidateRef(bounded.candidates[1])],
           { winner: result.winner, scoreA: result.scoreA, scoreB: result.scoreB, ...(result.identical === true ? { identical: true } : {}) },
-        ))
+          MAX_ROUTE_FEEDBACK_CHARS,
+          stage,
+        ), bounded.scope))
       }
-      const result = await selectCandidates(agent, extracted.problem, bounded.candidates.map(candidate => candidate.content), repeats, signal, rubric, extracted.images, 'select', observation)
+      const result = await selectCandidates(agent, extracted.problem, bounded.candidates.map(candidate => candidate.content), repeats, signal, rubric, extracted.images, 'select', observation, stage)
       if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return undefined }
       if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return undefined
-      return routeFeedback(bounded, selectRouteFeedbackDetail(
+      return routeFeedback(bounded, withScope(selectRouteFeedbackDetail(
         bounded.candidates.map(candidateRef),
         { index: result.index, ranking: result.ranking, scores: result.scores, ...(result.identical === true ? { identical: true } : {}) },
-      ))
+        MAX_ROUTE_FEEDBACK_CHARS,
+        stage,
+      ), bounded.scope))
     } catch (error) {
       autoRouter.fail(agent, reservation, false)
       ctx.logger.warn('llm-verifier early candidate review failed; leaving the step to the stop-boundary fallback: ' + (error instanceof Error ? error.message : String(error)))
@@ -1313,8 +1346,11 @@ export function apply(ctx: Context, config: Config = {}): void {
         try {
           const extracted = await extractTask(agent, evidence.taskStartSeq, admittedLastSeq, selected.autoVerifyMaxChars, signal)
           const routedObservation: RouteObservation = { cycleId: reservation.id, trigger: 'turn-stopping', stage: 'execution', destination: decision.kind, attempt: reservation.attempt, reservedCalls: reservation.expectedCalls }
+          // The stage the candidate group declared (a v2 workflow envelope may say "proposal").
+          // A track decision has no candidates at all, so it is an artifact by construction.
+          const decisionStage: ReviewStage = decision.kind === 'track' ? 'artifact' : decision.candidates[0]!.reviewStage
           if (decision.kind === 'compare') {
-            const result = await compareCandidates(agent, extracted.problem, decision.candidates[0].content, decision.candidates[1].content, repeats, signal, rubric, extracted.images, 'compare', routedObservation)
+            const result = await compareCandidates(agent, extracted.problem, decision.candidates[0].content, decision.candidates[1].content, repeats, signal, rubric, extracted.images, 'compare', routedObservation, decisionStage)
             if (!stillCurrent()) {
               await recordSkippedRoute(agent, decision.kind, decision.source, 'canceled', { ...routedObservation, stage: 'skipped', canceled: true })
               autoRouter.fail(agent, reservation, false)
@@ -1323,14 +1359,16 @@ export function apply(ctx: Context, config: Config = {}): void {
             if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
             // S04: a tie, a byte-identical pair and a real winner are three different
             // outcomes and are reported as such, with locators instead of copied candidates.
-            agent.steer(routeFeedback(decision, compareRouteFeedbackDetail(
+            agent.steer(routeFeedback(decision, withScope(compareRouteFeedbackDetail(
               [candidateRef(decision.candidates[0]), candidateRef(decision.candidates[1])],
               { winner: result.winner, scoreA: result.scoreA, scoreB: result.scoreB, ...(result.identical === true ? { identical: true } : {}) },
-            )))
+              MAX_ROUTE_FEEDBACK_CHARS,
+              decisionStage,
+            ), decision.scope)))
             return
           }
           if (decision.kind === 'select') {
-            const result = await selectCandidates(agent, extracted.problem, decision.candidates.map(candidate => candidate.content), repeats, signal, rubric, extracted.images, 'select', routedObservation)
+            const result = await selectCandidates(agent, extracted.problem, decision.candidates.map(candidate => candidate.content), repeats, signal, rubric, extracted.images, 'select', routedObservation, decisionStage)
             if (!stillCurrent()) {
               await recordSkippedRoute(agent, decision.kind, decision.source, 'canceled', { ...routedObservation, stage: 'skipped', canceled: true })
               autoRouter.fail(agent, reservation, false)
@@ -1339,10 +1377,12 @@ export function apply(ctx: Context, config: Config = {}): void {
             if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
             // A selection only has relative shares: a shared top score is reported as a tie
             // set, and the stable-sort first entry is never called the clear winner.
-            agent.steer(routeFeedback(decision, selectRouteFeedbackDetail(
+            agent.steer(routeFeedback(decision, withScope(selectRouteFeedbackDetail(
               decision.candidates.map(candidateRef),
               { index: result.index, ranking: result.ranking, scores: result.scores, ...(result.identical === true ? { identical: true } : {}) },
-            )))
+              MAX_ROUTE_FEEDBACK_CHARS,
+              decisionStage,
+            ), decision.scope)))
             return
           }
           const result = await trackProgress(agent, extracted.problem, decision.steps, decision.checkpoints, repeats, signal, extracted.images, 'track', routedObservation)
@@ -1442,6 +1482,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     parameters: {
       task: { type: 'string', required: true, description: 'The request every draft must answer. Bound to the explicit per-item evidence cap after redaction.' },
       n: { type: 'integer', description: 'How many independent drafts to generate; between 2 and 4, default 3. Cost grows with n.' },
+      context: { type: 'string', description: 'Optional repository constraints, interfaces, file excerpts and known facts the drafts must respect. Redacted, per-item bounded and charged against the same explicit evidence budget as task. Every draft AND both judge comparisons see the identical block; omitted keeps the task-only input of earlier versions.' },
       criteria: commonParams.criteria,
       repeats: commonParams.repeats,
     },
@@ -1457,6 +1498,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           rankingCriteriaCount: { type: 'integer', required: true },
           baselineCriteriaSource: { type: 'string', required: true },
           baselineCriteriaCount: { type: 'integer', required: true },
+          contextIncluded: { type: 'boolean', required: true },
           sources: { type: 'array', items: { type: 'integer' }, required: true },
           scores: { type: 'array', items: { type: 'number' }, required: true },
           ranking: { type: 'array', items: { type: 'integer' }, required: true },
@@ -1488,7 +1530,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     async execute(args, exec) {
       requireEnabled()
       const agent = requireAgent(exec.agent)
-      return bestOfN(agent, args.task, args.n ?? DEFAULT_BEST_OF_N, args.repeats, exec.signal, args.criteria)
+      return bestOfN(agent, args.task, args.n ?? DEFAULT_BEST_OF_N, args.repeats, exec.signal, args.criteria, args.context)
     },
   }))
 

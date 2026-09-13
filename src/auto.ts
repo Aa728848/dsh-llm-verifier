@@ -2,6 +2,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 // Shared with the router so both agree on what opens a task; imported (type-only in the
 // other direction) rather than duplicated, because a drift here silently disables gating.
 import { latestDirectUserSeq } from './router.ts'
+import type { ReviewStage } from './core.ts'
 import { sanitizeVerifierText } from './session.ts'
 
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict'
@@ -355,6 +356,7 @@ export function compareRouteFeedbackDetail(
   candidates: readonly [RoutedCandidateRef, RoutedCandidateRef],
   result: { winner: 'A' | 'B' | 'tie'; scoreA: number; scoreB: number; identical?: boolean },
   maxChars = MAX_ROUTE_FEEDBACK_CHARS,
+  stage: ReviewStage = 'artifact',
 ): string {
   const perItem = Math.max(48, Math.floor(maxChars / 6))
   const located = [locate(candidates[0], perItem, 1), locate(candidates[1], perItem, 2)]
@@ -380,9 +382,19 @@ export function compareRouteFeedbackDetail(
   const losing = result.winner === 'A' ? result.scoreB : result.scoreA
   return bound([
     'Winner: ' + located[winnerIndex] + ' (' + percent(winning) + ' vs ' + percent(losing) + ').',
+    // A proposal comparison ranks PLANS: the higher score says "more promising", never "already done".
+    ...(stage === 'proposal' ? [PROPOSAL_FEEDBACK_NOTE] : []),
     'Implement the winning candidate and verify the required work before concluding.',
   ].join('\n'))
 }
+
+/**
+ * What a proposal verdict does and does not mean.
+ *
+ * The two stages produce the same numbers from different questions, and reading a proposal win as
+ * evidence that the work is done is exactly the confusion the stage split exists to prevent.
+ */
+export const PROPOSAL_FEEDBACK_NOTE = 'This was a PROPOSAL review: neither side has been executed, so the score compares plans, not results. A higher score means more promising, NOT more reliable or already done — implement it and verify the required work before treating anything as complete.'
 
 /**
  * Deterministic automatic feedback for one routed selection.
@@ -400,6 +412,7 @@ export function selectRouteFeedbackDetail(
   candidates: readonly RoutedCandidateRef[],
   result: { index: number; ranking: readonly number[]; scores: readonly number[]; identical?: boolean },
   maxChars = MAX_ROUTE_FEEDBACK_CHARS,
+  stage: ReviewStage = 'artifact',
 ): string {
   const perItem = Math.max(32, Math.floor(maxChars / Math.max(2, candidates.length + 3)))
   const located = candidates.map((candidate, index) => locate(candidate, perItem, index + 1))
@@ -425,6 +438,7 @@ export function selectRouteFeedbackDetail(
   const best = top[0]!
   const order = result.ranking.length > 0 ? [...result.ranking] : candidates.map((_, index) => index)
   return bound([
+    ...(stage === 'proposal' ? [PROPOSAL_FEEDBACK_NOTE] : []),
     'Ranking (shares are relative preferences, not an absolute quality score, and a selection has no per-criterion breakdown):',
     ...order.map((index, rank) => (rank + 1) + '. ' + located[index] + ' (' + percent(result.scores[index] ?? 0) + ')'),
     'Proceed with ' + located[best] + ', implement it, and verify the required work before concluding.',

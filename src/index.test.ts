@@ -560,6 +560,56 @@ describe('explicit review stages', () => {
     assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'best_of_n')
   })
 
+  it('gives every draft and both judge comparisons the same reference context', async () => {
+    const prompts: string[] = []
+    const stream = (options: { messages: readonly unknown[] }) => {
+      const prompt = promptText(options)
+      prompts.push(prompt)
+      const draft = /Draft (\d+) of \d+\./.exec(prompt)
+      if (draft !== null) return textStream('draft ' + draft[1] + ' body')
+      const sideA = section(prompt, 'TRAJECTORY_A') || section(prompt, 'PROPOSAL_A')
+      const sideB = section(prompt, 'TRAJECTORY_B') || section(prompt, 'PROPOSAL_B')
+      return textStream('<score_A> ' + verdictLetter(sideA) + ' </score_A>\n<score_B> ' + verdictLetter(sideB) + ' </score_B>')
+    }
+    const definition = assemble(JUDGE, { stream, sessions: [{ id: 'session-1', createdAt: 1 }] }).tools.get('verifier_best_of_n')!
+    const result = await definition.execute({ task: 'do the thing', n: 2, context: 'Only stdlib may be used.' }, exec) as Record<string, any>
+    expect(result.contextIncluded).toBe(true)
+    const blocks = prompts.map(prompt => section(prompt, 'CONTEXT'))
+    expect(blocks).toHaveLength(prompts.length)
+    // Every call — 2 drafts plus the tournament and the baseline — sees the identical block.
+    expect(new Set(blocks).size).toBe(1)
+    expect(blocks[0]).toContain('Only stdlib may be used.')
+    assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'best_of_n')
+  })
+
+  it('keeps the task-only input when no context is given', async () => {
+    const prompts: string[] = []
+    const stream = (options: { messages: readonly unknown[] }) => {
+      prompts.push(promptText(options))
+      return textStream('reasoning\n<score_A> A </score_A>\n<score_B> T </score_B>')
+    }
+    const definition = assemble(JUDGE, { stream, sessions: [{ id: 'session-1', createdAt: 1 }] }).tools.get('verifier_best_of_n')!
+    const result = await definition.execute({ task: 'do the thing', n: 2 }, exec) as Record<string, any>
+    expect(result.contextIncluded).toBe(false)
+    expect(prompts.every(prompt => !prompt.includes('<<<CONTEXT:'))).toBe(true)
+  })
+
+  it('bounds the context per item and rejects a blank one, like every other evidence field', async () => {
+    const prompts: string[] = []
+    const stream = (options: { messages: readonly unknown[] }) => {
+      prompts.push(promptText(options))
+      return textStream('reasoning\n<score_A> A </score_A>\n<score_B> T </score_B>')
+    }
+    const definition = assemble(JUDGE, { stream, sessions: [{ id: 'session-1', createdAt: 1 }] }).tools.get('verifier_best_of_n')!
+    const result = await definition.execute({ task: 'do the thing', n: 2, context: 'C'.repeat(300_000) }, exec) as Record<string, any>
+    expect(result.contextIncluded).toBe(true)
+    // Per-item cap (autoRouteMaxItemChars = 20000) plus the block framing, not 300k characters.
+    expect(section(prompts[0]!, 'CONTEXT').length).toBeLessThan(20_100)
+    // A whitespace-only context is simply "no context", never an error the caller must fix.
+    const bare = await definition.execute({ task: 'do the thing', n: 2, context: '   ' }, exec) as Record<string, any>
+    expect(bare.contextIncluded).toBe(false)
+  })
+
   it('keeps an explicit best-of-N rubric in control of both phases', async () => {
     const result = await assemble(JUDGE, { stream: scriptedStream(2, [], []) }).tools.get('verifier_best_of_n')!
       .execute({ task: 'do the thing', n: 2, criteria: [{ id: 'mine', name: 'Mine', description: 'judge only this one thing' }] }, exec) as Record<string, any>

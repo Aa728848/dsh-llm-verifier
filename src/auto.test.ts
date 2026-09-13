@@ -256,6 +256,20 @@ describe('routed selection feedback', () => {
     expect(text).toContain('Tied candidates:')
   })
 
+  it('says a proposal verdict ranks plans, not results', () => {
+    const artifact = compareRouteFeedbackDetail([ref('A'), ref('B')], { winner: 'A', scoreA: 0.9, scoreB: 0.2 })
+    expect(artifact).not.toContain('PROPOSAL review')
+    // Omitting the stage keeps the historical artifact wording byte for byte.
+    expect(compareRouteFeedbackDetail([ref('A'), ref('B')], { winner: 'A', scoreA: 0.9, scoreB: 0.2 }, undefined, 'artifact')).toBe(artifact)
+
+    const proposal = compareRouteFeedbackDetail([ref('A'), ref('B')], { winner: 'A', scoreA: 0.9, scoreB: 0.2 }, undefined, 'proposal')
+    expect(proposal).toContain('PROPOSAL review')
+    expect(proposal).toContain('neither side has been executed')
+    expect(proposal).toContain('NOT more reliable or already done')
+    const selected = selectRouteFeedbackDetail([ref('A'), ref('B'), ref('C')], { index: 0, ranking: [0, 1, 2], scores: [0.6, 0.3, 0.1] }, undefined, 'proposal')
+    expect(selected).toContain('PROPOSAL review')
+  })
+
   it('reports byte-identical candidates as an unperformed comparison', () => {
     const text = compareRouteFeedbackDetail([ref('A'), ref('B')], { winner: 'tie', scoreA: 0.5, scoreB: 0.5, identical: true })
     expect(text).toContain('byte-identical')

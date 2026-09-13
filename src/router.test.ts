@@ -812,6 +812,51 @@ describe('structured route dedup and selection', () => {
     expect(analyzeStructuredRoute(value.events)).toBeUndefined()
   })
 
+  it('accepts a v2 envelope that declares a proposal group and keeps the stage on the decision', () => {
+    const value = session()
+    const contents = ['plan a', 'plan b', 'plan c']
+    tool(value, 'workflow', 'w2', JSON.stringify({
+      protocol: 'dsh-verifier-candidates', version: 2, groupId: 'plans', reviewStage: 'proposal',
+      scope: 'parser fix, step 1 of 2', candidates: contents.map((content, index) => ({ id: 'p' + index, label: 'P' + index, status: 'completed', content })),
+    }))
+    const decision = analyzeStructuredRoute(value.events)
+    expect(decision?.kind).toBe('select')
+    if (decision?.kind === 'select') {
+      expect(decision.candidates.map(candidate => candidate.reviewStage)).toEqual(['proposal', 'proposal', 'proposal'])
+      expect(decision.scope).toBe('parser fix, step 1 of 2')
+    }
+  })
+
+  it('rejects a v2 envelope whose stage is missing or unknown instead of treating it as an artifact', () => {
+    // Fail closed: a v2 producer that omits its stage is malformed, and guessing "artifact" would
+    // silently apply the delivery rubric to unexecuted plans.
+    for (const reviewStage of [undefined, 'draft', 3]) {
+      const value = session()
+      tool(value, 'workflow', 'w2', JSON.stringify({
+        protocol: 'dsh-verifier-candidates', version: 2, groupId: 'g', reviewStage,
+        candidates: ['a', 'b', 'c'].map((content, index) => ({ id: 'c' + index, status: 'completed', content })),
+      }))
+      expect(analyzeStructuredRoute(value.events)).toBeUndefined()
+    }
+  })
+
+  it('keeps v1 envelopes as artifact groups', () => {
+    const value = session()
+    tool(value, 'workflow', 'w1', JSON.stringify({ protocol: 'dsh-verifier-candidates', version: 1, groupId: 'g', candidates: ['a', 'b', 'c'].map((content, index) => ({ id: 'c' + index, status: 'completed', content })) }))
+    const decision = analyzeStructuredRoute(value.events)
+    if (decision?.kind === 'select') expect(decision.candidates[0]!.reviewStage).toBe('artifact')
+    else throw new Error('expected a select decision')
+  })
+
+  it('changes the fingerprint when the group scope changes', () => {
+    const build = (scope: string) => {
+      const value = session()
+      tool(value, 'workflow', 'w2', JSON.stringify({ protocol: 'dsh-verifier-candidates', version: 2, groupId: 'g', reviewStage: 'artifact', scope, candidates: ['a', 'b', 'c'].map((content, index) => ({ id: 'c' + index, status: 'completed', content })) }))
+      return analyzeStructuredRoute(value.events)?.fingerprint
+    }
+    expect(build('one')).not.toBe(build('two'))
+  })
+
   it('does not let a proposal review suppress an artifact route over the same content', () => {
     // A proposal review and an artifact review are different questions about different objects:
     // the same text arriving later WITH execution evidence must still be routed. Omitted

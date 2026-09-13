@@ -59,10 +59,12 @@ interface RouteBase {
 export interface CompareRouteDecision extends RouteBase {
     kind: 'compare';
     candidates: [CandidateArtifact, CandidateArtifact];
+    scope?: string;
 }
 export interface SelectRouteDecision extends RouteBase {
     kind: 'select';
     candidates: CandidateArtifact[];
+    scope?: string;
 }
 export interface TrackRouteDecision extends RouteBase {
     kind: 'track';

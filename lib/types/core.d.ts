@@ -143,7 +143,19 @@ export declare function buildProgressPrompt(problem: string, steps: readonly str
  * @param total - how many drafts are being generated.
  * @returns The rendered prompt.
  */
-export declare function buildGenerationPrompt(task: string, index: number, total: number): string;
+/**
+ * Render the optional best-of-N reference context as a deterministic, data-only block.
+ *
+ * The block must be IDENTICAL wherever it appears: every draft and both judge comparisons have to
+ * see the same facts, otherwise the ranking measures who got more context rather than who drafted
+ * better. It is delimited with the same nonce machinery as every other evidence block and labelled
+ * as untrusted data — it must never be promoted into an extra system instruction.
+ * @param task - the request, part of the nonce so two different tasks cannot share a terminator.
+ * @param context - caller-supplied constraints/excerpts; blank or missing renders nothing.
+ * @returns The rendered block, or '' when there is no context.
+ */
+export declare function renderReferenceContext(task: string, context: string | undefined): string;
+export declare function buildGenerationPrompt(task: string, index: number, total: number, context?: string): string;
 /** Progress uses A=NO..T=YES, the reverse of pairwise success scoring. */
 export declare function extractProgressScore(completion: CompletionLogprobs, tag: string): number;
 export declare function bradleyTerry(rewardA: number, rewardB: number): number;

@@ -70,8 +70,8 @@ export interface CandidateArtifact {
 }
 
 interface RouteBase { source: 'structured' | 'semantic'; confidence: number; reason: string; fingerprint: string }
-export interface CompareRouteDecision extends RouteBase { kind: 'compare'; candidates: [CandidateArtifact, CandidateArtifact] }
-export interface SelectRouteDecision extends RouteBase { kind: 'select'; candidates: CandidateArtifact[] }
+export interface CompareRouteDecision extends RouteBase { kind: 'compare'; candidates: [CandidateArtifact, CandidateArtifact]; scope?: string }
+export interface SelectRouteDecision extends RouteBase { kind: 'select'; candidates: CandidateArtifact[]; scope?: string }
 export interface TrackRouteDecision extends RouteBase { kind: 'track'; steps: string[]; checkpoints: number[]; evidenceSeqs: number[] }
 export type RouteDecision = CompareRouteDecision | SelectRouteDecision | TrackRouteDecision
 
@@ -177,7 +177,18 @@ interface RouterState {
 }
 
 const ROUTED_TOOLS = new Set(['verifier_compare', 'verifier_select', 'verifier_track'])
-const TRUSTED_WORKFLOW_VERSION = 1
+/**
+ * Trusted workflow candidate envelope versions.
+ *
+ * v1 was implicitly an artifact group. v2 must declare its group-level `reviewStage` and may carry a
+ * `scope` (the task range / source reference the group was produced for) so a reviewer can check
+ * that the candidates really answer the same task. Both versions are accepted; a v2 envelope with a
+ * missing or unknown stage is REJECTED as a whole rather than silently downgraded to an artifact.
+ */
+const TRUSTED_WORKFLOW_VERSIONS = new Set([1, 2])
+const TRUSTED_WORKFLOW_VERSION = 2
+/** Bound on the group-level scope annotation carried by a v2 envelope. */
+const MAX_WORKFLOW_SCOPE_CHARS = 2000
 const KNOWN_ROUTE_KEYS = new Set(['kind', 'confidence', 'reason', 'candidateCallIds', 'checkpointSeqs'])
 
 /**
@@ -374,24 +385,36 @@ export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceInd
   return { problemSeq: taskStartSeq, calls: paired, todos, teamTasks, narration }
 }
 
-function parseTrustedWorkflow(value: unknown, callId: string, callSeq: number, resultSeq: number, maxCandidates: number, maxItemChars: number, maxInputChars: number, reviewStage: ReviewStage = 'artifact'): CandidateArtifact[] {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return []
+/** One parsed trusted-workflow group: its candidates plus the optional scope annotation. */
+interface TrustedWorkflowGroup { candidates: CandidateArtifact[]; scope?: string }
+
+function parseTrustedWorkflow(value: unknown, callId: string, callSeq: number, resultSeq: number, maxCandidates: number, maxItemChars: number, maxInputChars: number): TrustedWorkflowGroup | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const envelope = value as Record<string, unknown>
-  if (envelope.protocol !== 'dsh-verifier-candidates' || envelope.version !== TRUSTED_WORKFLOW_VERSION || typeof envelope.groupId !== 'string' || !envelope.groupId.trim() || !Array.isArray(envelope.candidates)) return []
+  const version = envelope.version
+  if (envelope.protocol !== 'dsh-verifier-candidates' || typeof version !== 'number' || !TRUSTED_WORKFLOW_VERSIONS.has(version) || typeof envelope.groupId !== 'string' || !envelope.groupId.trim() || !Array.isArray(envelope.candidates)) return undefined
+  // v1 predates the stage split, so it is an artifact group by definition. v2 declares it, and an
+  // unknown/missing value is an invalid envelope rather than a free pass.
+  let reviewStage: ReviewStage = 'artifact'
+  if (version >= 2) {
+    if (envelope.reviewStage !== 'proposal' && envelope.reviewStage !== 'artifact') return undefined
+    reviewStage = envelope.reviewStage
+  }
+  const scope = typeof envelope.scope === 'string' && envelope.scope.trim() ? sanitizeVerifierText(envelope.scope.trim(), MAX_WORKFLOW_SCOPE_CHARS) : undefined
   const groupId = envelope.groupId.trim()
   const seen = new Set<string>()
   const candidates: CandidateArtifact[] = []
   const considered = envelope.candidates.slice(0, maxCandidates)
   const perItem = itemBudget(considered.length, maxItemChars, maxInputChars)
   for (const item of considered) {
-    if (typeof item !== 'object' || item === null || Array.isArray(item)) return []
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) return undefined
     const row = item as Record<string, unknown>
-    if (row.status !== 'completed' || typeof row.id !== 'string' || !row.id.trim() || seen.has(row.id.trim()) || typeof row.content !== 'string' || !row.content.trim()) return []
+    if (row.status !== 'completed' || typeof row.id !== 'string' || !row.id.trim() || seen.has(row.id.trim()) || typeof row.content !== 'string' || !row.content.trim()) return undefined
     const id = row.id.trim(); seen.add(id)
     const label = typeof row.label === 'string' && row.label.trim() ? row.label.trim() : id
     candidates.push({ id, groupId, label: sanitizeVerifierText(label, Math.min(120, perItem)), content: sanitizeVerifierText(row.content, perItem), identity: sanitizeVerifierText(row.content, 1_000_000_000), callId, fromSeq: callSeq, toSeq: resultSeq, reviewStage })
   }
-  return candidates.length >= 2 ? candidates : []
+  return candidates.length >= 2 ? { candidates, ...(scope === undefined ? {} : { scope }) } : undefined
 }
 
 /** Content identity of a candidate set, independent of labels and container order. */
@@ -921,28 +944,30 @@ export function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandi
   const index = buildEvidenceIndex(events)
   if (!index) return undefined
   const reviewed = explicitReviewKeys(events.filter(event => event.seq >= index.problemSeq))
-  const groups: CandidateArtifact[][] = []
+  const groups: TrustedWorkflowGroup[] = []
   for (const [callId, pair] of index.calls) {
     // A failed workflow run reports an error, not candidates.
     if (!pair.ok || pair.name !== 'workflow') continue
-    const candidates = parseTrustedWorkflow(parseWorkflowResult(pair.text), callId, pair.callSeq, pair.resultSeq, maxCandidates, maxItemChars, maxInputChars)
-    if (candidates.length >= 2) groups.push(candidates)
+    const group = parseTrustedWorkflow(parseWorkflowResult(pair.text), callId, pair.callSeq, pair.resultSeq, maxCandidates, maxItemChars, maxInputChars)
+    if (group !== undefined) groups.push(group)
   }
   // NEWEST group first: picking the largest group let an old, already-reviewed envelope
   // hide a newer one that had never been routed.
-  groups.sort((a, b) => b[0]!.toSeq - a[0]!.toSeq)
-  for (const candidates of groups) {
+  groups.sort((a, b) => b.candidates[0]!.toSeq - a.candidates[0]!.toSeq)
+  for (const group of groups) {
+    const candidates = group.candidates
     // The stage is part of the de-duplication credential: an envelope reviewed as an unexecuted
     // proposal must not suppress the same content arriving later WITH execution evidence.
     const key = reviewKey(candidates[0]!.reviewStage, candidates.map(candidate => candidate.identity))
+    const scopeKey = group.scope ?? null
     if (candidates.length >= 3) {
       if (reviewed.select.has(key)) continue
-      const decision: SelectRouteDecision = { kind: 'select', source: 'structured', confidence: 1, reason: 'trusted workflow candidate envelope', fingerprint: stableHash({ kind: 'select', candidates }), candidates }
+      const decision: SelectRouteDecision = { kind: 'select', source: 'structured', confidence: 1, reason: 'trusted workflow candidate envelope', fingerprint: stableHash({ kind: 'select', candidates, scope: scopeKey }), ...(group.scope === undefined ? {} : { scope: group.scope }), candidates }
       if (options.processed?.(decision.fingerprint)) continue
       return decision
     }
     if (reviewed.compare.has(key)) continue
-    const decision: CompareRouteDecision = { kind: 'compare', source: 'structured', confidence: 1, reason: 'trusted workflow candidate envelope', fingerprint: stableHash({ kind: 'compare', candidates }), candidates: [candidates[0]!, candidates[1]!] }
+    const decision: CompareRouteDecision = { kind: 'compare', source: 'structured', confidence: 1, reason: 'trusted workflow candidate envelope', fingerprint: stableHash({ kind: 'compare', candidates, scope: scopeKey }), ...(group.scope === undefined ? {} : { scope: group.scope }), candidates: [candidates[0]!, candidates[1]!] }
     if (options.processed?.(decision.fingerprint)) continue
     return decision
   }

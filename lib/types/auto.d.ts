@@ -1,4 +1,5 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
+import type { ReviewStage } from './core.ts';
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict';
 export interface AutoVerifyPolicy {
     mode: AutoVerifyMode;
@@ -111,7 +112,14 @@ export declare function compareRouteFeedbackDetail(candidates: readonly [RoutedC
     scoreA: number;
     scoreB: number;
     identical?: boolean;
-}, maxChars?: number): string;
+}, maxChars?: number, stage?: ReviewStage): string;
+/**
+ * What a proposal verdict does and does not mean.
+ *
+ * The two stages produce the same numbers from different questions, and reading a proposal win as
+ * evidence that the work is done is exactly the confusion the stage split exists to prevent.
+ */
+export declare const PROPOSAL_FEEDBACK_NOTE = "This was a PROPOSAL review: neither side has been executed, so the score compares plans, not results. A higher score means more promising, NOT more reliable or already done \u2014 implement it and verify the required work before treating anything as complete.";
 /**
  * Deterministic automatic feedback for one routed selection.
  *
@@ -129,5 +137,5 @@ export declare function selectRouteFeedbackDetail(candidates: readonly RoutedCan
     ranking: readonly number[];
     scores: readonly number[];
     identical?: boolean;
-}, maxChars?: number): string;
+}, maxChars?: number, stage?: ReviewStage): string;
 //# sourceMappingURL=auto.d.ts.map
