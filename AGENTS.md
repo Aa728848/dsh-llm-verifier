@@ -73,7 +73,7 @@ pnpm run verify:release  # typecheck + test + build，prepublishOnly 会自动�
 - **任务模型调用预算默认 96**（会话 240）：8 候选锦标赛 54 次（单轮；位置偏差在引擎侧定向解决，不靠翻倍轮次）+ 最终验收 6 次/裁判。
 - **验收期间会阻塞 turn 关闭**、**`engine.track` 不参与评分缓存**、**`resolveCallConfig` 每次调用做一次适配器 I/O**：都是已知取舍。
 - **子 Agent 会话默认不门控**（`autoVerifySubagents=false`）。子会话用真实用户消息播种，门控它们会额外消耗预算并反复 steering 子 Agent。
-- **记账类工具（`todo_write`/`create_goal`/`get_goal`/`update_goal`/`interrupt_agent`/`list_agents`/`exit_plan_mode`/`skill`）的输出永远不作为检查点证据或语义候选**，PTC 里 `run_code` 只派发这些工具时整条包装结果同样排除（按 `tool/ptc-dispatch` 的 `rootCallId` 归属判断）。新增证据来源时先问"它有没有自己的产出"，记账结果顶掉真正干活输出的回归见过两次（`router.test.ts`）。
+- **记账类工具（`todo_write`/`create_goal`/`get_goal`/`update_goal`/`interrupt_agent`/`list_agents`/`exit_plan_mode`/`skill`/`present`）的输出永远不作为检查点证据或语义候选**，PTC 里 `run_code` 只派发这些工具时整条包装结果同样排除（按 `tool/ptc-dispatch` 的 `rootCallId` 归属判断）。新增证据来源时先问"它有没有自己的产出"，记账结果顶掉真正干活输出的回归见过三次（`router.test.ts`）；`present` 那次最贵：它是每轮最后一个调用，于是「最新观测输出」永远只剩声明本身，裁判按提示词自己的规矩把最新检查点封顶在 K(52.6%)，连续四轮验收不过而活儿早就干完并跑过测试了。
 - **同一字母的多个 token 变体概率必须相加**（`extractScore`）：`" A"` 与 `"A"` 是同一次采样的互斥事件，取 `max` 会系统性压低被拆分的字母并可能翻转判决。**这是与上游唯一的刻意偏差**：上游 `fine_grained_reward.py:678` 用的是 `max`（已核对源码而非猜测），因此 `parity.test.ts` 的 fixture 有意不含同字母多变体用例，新增 fixture 时不要往里面塞这种输入。要退回上游语义就改 `core.ts` 那一行，并同步改 README「与上游的一处已知差异」与本节；改这条评分语义必须同时升 `engine.ts` 里缓存身份的 `version`。
 - **判官温度默认 0.2**（旧版硬编码 1）：自动路由默认只跑 1 轮，低温度让同一次判决更可复现。温度是评分缓存身份的一部分，改默认值或改这个字段必须同时升 `engine.ts` 的缓存 `version`。
 - **统计的 `verdict` 是增量可选字段**：旧记录没有它也必须能加载（`isRecord` 只做宽松校验），看板对缺字段的行按旧样式渲染；`success` 恒为"模型调用是否抛错"，不要把它当验收结果。

@@ -162,6 +162,31 @@ describe('production structured routing', () => {
     expect(decision.steps[1]).not.toContain('counts:')
   })
 
+  it('never attaches a deliverable presentation as checkpoint evidence', () => {
+    // Regression (live session, four routes in a row): `present` is the last call of a
+    // turn, so the newest "observed tool output" reaching the judge was the wrapper's
+    // `presented: 1` — the paths the agent had just declared — while the typecheck and
+    // test run sat one call earlier. The judge's own rule ("a state without real
+    // verification should not exceed K") then capped the newest checkpoint at exactly
+    // K = 52.6% against a 0.8 threshold, so every route steered "continue the
+    // unfinished work" for work that was finished and verified, until the per-task
+    // route budget ran out.
+    const value = session()
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    tool(value, 'pwsh', 'verify', 'TYPECHECK_EXIT=0\nTests 309 passed')
+    value.append('tool/call', { turn: 1, step: 1, callId: 'wrap' as never, name: 'run_code', arguments: '{}' })
+    value.append('tool/ptc-dispatch' as never, { rootCallId: 'wrap', subCallId: 'wrap:ptc:1', name: 'present', arguments: '{}', isError: false, content: [{ type: 'text', text: 'Presented C:\\repo\\src\\mapper.ts' }] } as never)
+    value.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'wrap' as never, content: [{ type: 'text', text: 'presented: 1' }], isError: false }) }, { surfaceOp: 'append' })
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind !== 'track') return
+    // The verification run is older than the presentation, and must still win.
+    expect(decision.steps[1]).toContain('309 passed')
+    expect(decision.steps[1]).not.toContain('Presented C:')
+    expect(decision.steps[1]).not.toContain('presented: 1')
+  })
+
   it('keeps a wrapper that dispatched real work', () => {
     const value = session()
     value.append('tool/call', { turn: 1, step: 1, callId: 'wrap' as never, name: 'run_code', arguments: '{}' })
@@ -236,10 +261,12 @@ describe('semantic evidence references', () => {
     tool(value, 'subagent', 'a', 'candidate A from a real subagent')
     tool(value, 'create_goal', 'goal', '{"goal":{"id":"g1","phase":"active"}}')
     tool(value, 'skill', 'skill', 'loaded review skill body')
+    tool(value, 'present', 'present', 'Presented C:\\repo\\src\\mapper.ts')
     const prompt = buildSemanticRoutePrompt('pick the better one', value.events, 8, 20000, 60000)
     expect(prompt).toContain('candidate A from a real subagent')
     expect(prompt).not.toContain('"phase":"active"')
     expect(prompt).not.toContain('loaded review skill body')
+    expect(prompt).not.toContain('Presented C:')
   })
 
   it('rejects a semantic decision that cites bookkeeping evidence', () => {
