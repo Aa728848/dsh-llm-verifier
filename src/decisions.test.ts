@@ -44,6 +44,25 @@ describe('boundDecisionCalls', () => {
   })
 })
 
+describe('boundCaptureText', () => {
+  it('keeps both ends of an over-long prompt instead of only the head', () => {
+    // A session-acceptance prompt runs past 100k characters: head-only truncation saved
+    // the instructions and dropped the trajectory tail, i.e. the part the judge graded.
+    const prompt = 'HEAD-MARKER\n' + 'x'.repeat(30000) + '\nTAIL-MARKER'
+    const kept = boundDecisionCalls([call({ prompt })])[0]!.prompt
+    expect(kept.length).toBeLessThanOrEqual(8000)
+    expect(kept.startsWith('HEAD-MARKER')).toBe(true)
+    expect(kept.endsWith('TAIL-MARKER')).toBe(true)
+    expect(kept).toContain('characters omitted')
+  })
+
+  it('leaves a prompt that already fits untouched', () => {
+    const kept = boundDecisionCalls([call({ prompt: 'short prompt' })])[0]!.prompt
+    expect(kept).toBe('short prompt')
+    expect(kept).not.toContain('omitted')
+  })
+})
+
 describe('DecisionStore', () => {
   it('stores a snapshot and finds it again from a fresh instance', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-decisions-'))

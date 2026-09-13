@@ -37,6 +37,18 @@ export declare function resolveDecisionsFile(cacheFile: string): string;
  * @param calls - captured calls, oldest first.
  * @returns The bounded calls; empty when nothing was captured.
  */
+export declare function boundCaptureText(text: string, maxChars: number): string;
+/**
+ * Redact and bound captured calls.
+ *
+ * Runs the same sanitizer the prompts do, so a snapshot can never persist a secret the
+ * judge itself never saw, and drops calls past the per-record budget instead of writing
+ * an unbounded file. Text uses {@link boundCaptureText}, which keeps both ends: a
+ * session-acceptance prompt runs past 100k characters, and head-only truncation kept the
+ * instructions while dropping the trajectory tail the judge actually graded.
+ * @param calls - captured calls, oldest first.
+ * @returns The bounded calls; empty when nothing was captured.
+ */
 export declare function boundDecisionCalls(calls: readonly DecisionCall[]): DecisionCall[];
 export interface DecisionInput {
     toolName: string;
