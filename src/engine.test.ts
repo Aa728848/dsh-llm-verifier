@@ -385,6 +385,33 @@ describe('VerifierEngine N-judge ensemble', () => {
     expect('ranking' in failedJudge).toBe(false)
   })
 
+  it('marks usage incomplete and keeps the failed attempts when a judge dies', async () => {
+    const client1 = clientConfig({ provider: 'prov-1', model: 'model-1', llm: { stream: scriptedStream([]) } as any })
+    const client2 = clientConfig({ provider: 'prov-2', model: 'model-2', llm: { stream: async function* () { throw new Error('judge 2 network timeout') } } as any })
+    const engine = new VerifierEngine([client1, client2], 4)
+    const result = await engine.compare({ problem: 'task', candidateA: 'STRONG-1', candidateB: 'WEAK-2', repeats: 1 })
+    // The request really happened even though its usage never arrived: the row must say so
+    // instead of presenting the invocation as a complete, zero-cost measurement.
+    expect(result.stats.usageIncomplete).toBe(true)
+    expect(result.stats.attempts).toBeGreaterThanOrEqual(1)
+  })
+
+  it('counts a channel that was downgraded from the direct transport', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":{"message":"max_tokens is too large"}}', { status: 400 })))
+    const settingsValue = { providers: { 'prov-fb': { api: 'openai-completions', baseURL: 'https://example.test/v1' } } }
+    const fallback = clientConfig({
+      provider: 'prov-fb',
+      model: 'model-fb',
+      ctx: { get: (name: string) => name === 'settings' ? { get: () => settingsValue } : name === 'credentials' ? { resolve: async () => ({ value: 'secret' }) } : undefined } as any,
+      llm: { stream: scriptedStream([]) } as any,
+    })
+    const engine = new VerifierEngine([fallback], 2)
+    const result = await engine.compare({ problem: 'task', candidateA: 'STRONG-1', candidateB: 'WEAK-2', repeats: 1 })
+    expect(result.stats.channelFallbacks).toBe(1)
+    // A downgrade is not a failure: the answer is usable and the usage is known.
+    expect(result.stats.usageIncomplete).toBeUndefined()
+  })
+
   it('All judges fail: compare rejects with the first error', async () => {
     const client1 = clientConfig({
       provider: 'prov-1',

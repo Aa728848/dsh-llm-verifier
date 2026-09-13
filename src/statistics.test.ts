@@ -204,6 +204,92 @@ describe('StatisticsStore', () => {
     })
   })
 
+  it('round-trips an optional routing-cycle observation and drops a malformed one', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const file = join(root, 'statistics.json')
+    const store = new StatisticsStore(file)
+    await store.record({
+      toolName: 'verifier_compare',
+      startedAt: 10,
+      finishedAt: 20,
+      success: true,
+      provider: 'p',
+      model: 'm',
+      stats: stats(),
+      verdict: { phase: 'compare', outcome: 'compared' },
+      route: {
+        cycleId: 'cycle-7',
+        trigger: 'turn-stopping',
+        stage: 'execution',
+        destination: 'compare',
+        attempt: 2,
+        reservedCalls: 7,
+        evidenceKept: 3,
+        evidenceOmitted: 1,
+        evidenceChars: 1234,
+        usageIncomplete: true,
+        canceled: true,
+      },
+    })
+    // A malformed observation is diagnostics, not a reason to lose the cost row it describes.
+    const malformed = await store.record({
+      toolName: 'verifier_select',
+      startedAt: 30,
+      finishedAt: 40,
+      success: true,
+      provider: 'p',
+      model: 'm',
+      stats: stats(),
+      route: { cycleId: '', trigger: 'nowhere', stage: 'nope', destination: '' } as never,
+    })
+    expect(malformed.route).toBeUndefined()
+
+    // The observation survives persistence, and a record WITHOUT one still loads.
+    const fresh = new StatisticsStore(file)
+    const overview = await fresh.overview({ fromMs: 0, toMs: 1_000 })
+    const routed = overview.recent.find(row => row.toolName === 'verifier_compare')
+    expect(routed?.route).toEqual({
+      cycleId: 'cycle-7',
+      trigger: 'turn-stopping',
+      stage: 'execution',
+      destination: 'compare',
+      attempt: 2,
+      reservedCalls: 7,
+      evidenceKept: 3,
+      evidenceOmitted: 1,
+      evidenceChars: 1234,
+      usageIncomplete: true,
+      canceled: true,
+    })
+    const plain = overview.recent.find(row => row.toolName === 'verifier_select')
+    expect(plain?.route).toBeUndefined()
+  })
+
+  it('loads pre-observation records written without a route field', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const file = join(root, 'statistics.json')
+    // Exactly the shape the previous version persisted: no route key at all.
+    await writeFile(file, JSON.stringify({
+      version: 1,
+      records: [{
+        id: 'legacy-1',
+        toolName: 'verifier_track',
+        startedAt: 5,
+        finishedAt: 6,
+        durationMs: 1,
+        success: true,
+        provider: 'p',
+        model: 'm',
+        stats: stats(),
+        verdict: { phase: 'track', outcome: 'passed', score: 0.9 },
+      }],
+    }), 'utf8')
+    const overview = await new StatisticsStore(file).overview({ fromMs: 0, toMs: 100 })
+    expect(overview.recent).toHaveLength(1)
+    expect(overview.recent[0]?.route).toBeUndefined()
+    expect(overview.recent[0]?.verdict?.outcome).toBe('passed')
+  })
+
   it('summarizes every tool verdict from its own result shape', () => {
     const thresholds: VerdictThresholds = { autoVerifyThreshold: 0.65, autoTrackCompletionThreshold: 0.8 }
     // Route classification reports no score at all.

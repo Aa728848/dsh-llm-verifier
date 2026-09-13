@@ -6,7 +6,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import { Config, installVerifierSettings, resolveConfig } from './config.ts'
-import { RequestLimiter, addUsage, callVerifier, callVerifierText, generateCandidate, type UsageStats, type VerifierClientConfig } from './caller.ts'
+import { RequestLimiter, addUsage, callVerifier, callVerifierText, generateCandidate, requestAttempts, type UsageStats, type VerifierClientConfig } from './caller.ts'
 import { TopLogprobCapabilityCache, resolveCapabilityFile } from './top-logprobs.ts'
 import { ScoreCache, SingleFlight, resolveCacheFile, stableHash, type CachedPairScore } from './cache.ts'
 import { VerifierEngine, normalizeCriteria, type JudgeScore, type RunStats } from './engine.ts'
@@ -14,11 +14,11 @@ import { loadVerifierImages } from './images.ts'
 import { extractSession, sanitizeVerifierText, sessionEvents } from './session.ts'
 import { CriteriaResolver, type ResolvedCriteria } from './criteria.ts'
 import { analyzeAutoTask, automaticFeedback, failedAcceptanceCriteria, isSubagentSession, sessionAccepted, type AcceptanceCriterion } from './auto.ts'
-import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type RouteDecision, type RoutedVerifierKind } from './router.ts'
+import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type Reservation, type RouteDecision, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
 import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, buildGenerationPrompt, buildPairwisePrompt, extractScore } from './core.ts'
 import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from './plan-gate.ts'
 import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from './team-gate.ts'
-import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, parseStatisticsQuery, resolveStatisticsFile, summarizeVerdict, type StatisticsOverview, type VerifierToolName } from './statistics.ts'
+import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, parseStatisticsQuery, resolveStatisticsFile, summarizeVerdict, type RouteObservation, type StatisticsOverview, type VerifierToolName } from './statistics.ts'
 import { resolveTopicDataDir, type SessionArtifactLocator } from './topic-storage.ts'
 import { DecisionStore, boundDecisionCalls, resolveDecisionsFile, type DecisionCall, type DecisionRecord, type DecisionTrace } from './decisions.ts'
 
@@ -38,7 +38,7 @@ export * from './team-gate.ts'
 export { callVerifier, RequestLimiter, type VerifierClientConfig, type VerifierImage, type UsageStats, type VerifierCompletion } from './caller.ts'
 
 const criterionSchema = { type: 'object' as const, additionalProperties: false, properties: { id: { type: 'string' as const, required: true as const }, name: { type: 'string' as const, required: true as const }, description: { type: 'string' as const, required: true as const } } }
-const statsSchema = { type: 'object' as const, additionalProperties: false, properties: { calls: { type: 'integer' as const, required: true as const }, attempts: { type: 'integer' as const, required: true as const }, retries: { type: 'integer' as const, required: true as const }, inputTokens: { type: 'integer' as const, required: true as const }, cachedInputTokens: { type: 'integer' as const, required: true as const }, outputTokens: { type: 'integer' as const, required: true as const }, reasoningTokens: { type: 'integer' as const, required: true as const }, cacheHits: { type: 'integer' as const, required: true as const }, cacheMisses: { type: 'integer' as const, required: true as const }, estimatedCostUsd: { type: 'number' as const, required: true as const }, topLogprobScores: { type: 'integer' as const, required: true as const }, explicitTagScores: { type: 'integer' as const, required: true as const } } }
+const statsSchema = { type: 'object' as const, additionalProperties: false, properties: { calls: { type: 'integer' as const, required: true as const }, attempts: { type: 'integer' as const, required: true as const }, retries: { type: 'integer' as const, required: true as const }, inputTokens: { type: 'integer' as const, required: true as const }, cachedInputTokens: { type: 'integer' as const, required: true as const }, outputTokens: { type: 'integer' as const, required: true as const }, reasoningTokens: { type: 'integer' as const, required: true as const }, cacheHits: { type: 'integer' as const, required: true as const }, cacheMisses: { type: 'integer' as const, required: true as const }, estimatedCostUsd: { type: 'number' as const, required: true as const }, topLogprobScores: { type: 'integer' as const, required: true as const }, explicitTagScores: { type: 'integer' as const, required: true as const }, usageIncomplete: { type: 'boolean' as const }, channelFallbacks: { type: 'integer' as const } } }
 const criterionResultSchema = { type: 'object' as const, additionalProperties: false, properties: { id: { type: 'string' as const, required: true as const }, name: { type: 'string' as const, required: true as const }, scoreA: { type: 'number' as const, required: true as const }, scoreB: { type: 'number' as const, required: true as const } } }
 /**
  * The per-criterion row `verifySession` reports: the compare engine's rows reduced to the
@@ -121,7 +121,19 @@ function selectComparisonsUpperBound(count: number, pivots = 2): number {
   return count + (count - pivotCount) * pivotCount + (pivotCount * (pivotCount - 1)) / 2
 }
 function numberField(value: unknown, fallback: number): number { return typeof value === 'number' && Number.isFinite(value) ? value : fallback }
-function statsFrom(value: unknown): RunStats { if (typeof value !== 'object' || value === null || !('stats' in value)) return emptyRunStats(); const source = (value as { stats?: unknown }).stats; if (typeof source !== 'object' || source === null) return emptyRunStats(); const row = source as Record<string, unknown>; return { calls: numberField(row.calls, 0), attempts: numberField(row.attempts, 0), retries: numberField(row.retries, 0), inputTokens: numberField(row.inputTokens, 0), cachedInputTokens: numberField(row.cachedInputTokens, 0), outputTokens: numberField(row.outputTokens, 0), reasoningTokens: numberField(row.reasoningTokens, 0), cacheHits: numberField(row.cacheHits, 0), cacheMisses: numberField(row.cacheMisses, 0), estimatedCostUsd: numberField(row.estimatedCostUsd, 0), topLogprobScores: numberField(row.topLogprobScores, 0), explicitTagScores: numberField(row.explicitTagScores, 0) } }
+function statsFrom(value: unknown): RunStats {
+  if (typeof value !== 'object' || value === null || !('stats' in value)) return emptyRunStats()
+  const source = (value as { stats?: unknown }).stats
+  if (typeof source !== 'object' || source === null) return emptyRunStats()
+  const row = source as Record<string, unknown>
+  const stats: RunStats = { calls: numberField(row.calls, 0), attempts: numberField(row.attempts, 0), retries: numberField(row.retries, 0), inputTokens: numberField(row.inputTokens, 0), cachedInputTokens: numberField(row.cachedInputTokens, 0), outputTokens: numberField(row.outputTokens, 0), reasoningTokens: numberField(row.reasoningTokens, 0), cacheHits: numberField(row.cacheHits, 0), cacheMisses: numberField(row.cacheMisses, 0), estimatedCostUsd: numberField(row.estimatedCostUsd, 0), topLogprobScores: numberField(row.topLogprobScores, 0), explicitTagScores: numberField(row.explicitTagScores, 0) }
+  // Optional diagnostics: carried into the statistics row so "unknown usage" is visible
+  // instead of being silently averaged in as a free call.
+  if (row.usageIncomplete === true) stats.usageIncomplete = true
+  const fallbacks = numberField(row.channelFallbacks, 0)
+  if (fallbacks > 0) stats.channelFallbacks = fallbacks
+  return stats
+}
 /**
  * One judge's contribution to a verdict.
  *
@@ -230,7 +242,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       autoTrackCompletionThreshold: selected.autoTrackCompletionThreshold,
     })
   }
-  const record = async <T>(toolName: VerifierToolName, agent: Agent, operation: (trace?: DecisionTrace) => Promise<{ result: T; selected: { provider: string; model: string } }>, phase = 'explicit'): Promise<T & { provider: string; model: string }> => {
+  const record = async <T>(toolName: VerifierToolName, agent: Agent, operation: (trace?: DecisionTrace) => Promise<{ result: T; selected: { provider: string; model: string } }>, phase = 'explicit', observation?: RouteObservation): Promise<T & { provider: string; model: string }> => {
     const startedAt = Date.now()
     let selected: { provider: string; model: string } = current()
     const topicEntry = topic(agent.session.header)
@@ -245,7 +257,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const completed = await operation(trace)
       selected = completed.selected
       const value = { ...completed.result as T & object, ...route(selected) } as T & { provider: string; model: string }
-      await statistics.record({ toolName, sessionId: String(agent.id), startedAt, success: true, provider: selected.provider, model: selected.model, stats: statsFrom(value), verdict: verdictFrom(toolName, value, phase) }).catch(() => {})
+      await statistics.record({ toolName, sessionId: String(agent.id), startedAt, success: true, provider: selected.provider, model: selected.model, stats: statsFrom(value), verdict: verdictFrom(toolName, value, phase), ...(observation ? { route: observation } : {}) }).catch(() => {})
       // Order by label before storing: the engine reports calls as they complete, so a concurrent
       // fan-out reports them in network order. Sorting makes "which calls are in the snapshot"
       // reproducible even when the record has to bound its text.
@@ -253,7 +265,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       return value
     } catch (error) {
       const details = errorDetails(error)
-      await statistics.record({ toolName, sessionId: String(agent.id), startedAt, success: false, ...details, provider: selected.provider, model: selected.model, stats: emptyRunStats(), verdict: { phase, outcome: 'error' } }).catch(() => {})
+      // A request that failed before returning usage leaves the tokens UNKNOWN. The transport
+      // does know how many attempts it made, so those are kept and the row is marked
+      // incomplete instead of being reported as a confident zero-cost call.
+      const attempts = requestAttempts(error)
+      const failedStats = attempts > 0 ? { ...emptyRunStats(), attempts, retries: Math.max(0, attempts - 1) } : emptyRunStats()
+      await statistics.record({ toolName, sessionId: String(agent.id), startedAt, success: false, ...details, provider: selected.provider, model: selected.model, stats: failedStats, verdict: { phase, outcome: 'error' }, ...(observation ? { route: attempts > 0 ? { ...observation, usageIncomplete: true } : observation } : {}) }).catch(() => {})
       throw error
     }
   }
@@ -271,10 +288,10 @@ export function apply(ctx: Context, config: Config = {}): void {
    * @param phase - Routing phase that produced it (structured | semantic).
    * @param outcome - Why it was dropped.
    */
-  const recordSkippedRoute = async (agent: Agent, kind: RoutedVerifierKind | 'none', phase: string, outcome: string): Promise<void> => {
+  const recordSkippedRoute = async (agent: Agent, kind: RoutedVerifierKind | 'none' | 'final', phase: string, outcome: string, observation?: RouteObservation): Promise<void> => {
     const selected = current()
     await topic(agent.session.header).statistics.record({
-      toolName: kind === 'none' ? 'verifier_route_classify' : ROUTED_TOOL_BY_KIND[kind],
+      toolName: kind === 'none' ? 'verifier_route_classify' : kind === 'final' ? 'verifier_current_session' : ROUTED_TOOL_BY_KIND[kind],
       sessionId: String(agent.id),
       startedAt: Date.now(),
       success: true,
@@ -282,9 +299,31 @@ export function apply(ctx: Context, config: Config = {}): void {
       model: selected.model,
       stats: emptyRunStats(),
       verdict: { phase, outcome },
+      ...(observation ? { route: observation } : {}),
     }).catch(() => {})
   }
-  const verifySession = async (agent: Agent, options: SessionVerificationOptions, signal: AbortSignal, phase = 'explicit', rubricOverride?: ResolvedCriteria): Promise<SessionVerificationResult & { provider: string; model: string }> => record('verifier_current_session', agent, async (trace) => {
+  /**
+   * Route cycles that never reached a reservation still need an id for the observation.
+   *
+   * Deliberately NOT the router's reservation serial: these rows carry no model call and a
+   * shared id namespace would let a reader mistake a diagnostic row for a purchased cycle.
+   */
+  let routeCycleSerial = 0
+  const nextCycleId = (): string => 'diagnostic-' + (++routeCycleSerial)
+  /**
+   * Evidence-budget numbers of one bounded routing view.
+   *
+   * Kept next to the view so a routing change caused by truncation can be told apart from a
+   * routing change caused by the model: the plan's S05-A asks for exactly that comparison.
+   * @param view - the bounded semantic view that was rendered.
+   * @returns The kept/omitted/character counts to store on the observation.
+   */
+  const viewObservation = (view: SemanticRouteView): Pick<RouteObservation, 'evidenceKept' | 'evidenceOmitted' | 'evidenceChars'> => ({
+    evidenceKept: view.candidateCallIds.size + view.checkpointSeqs.size,
+    evidenceOmitted: view.omitted,
+    evidenceChars: view.evidenceChars,
+  })
+  const verifySession = async (agent: Agent, options: SessionVerificationOptions, signal: AbortSignal, phase = 'explicit', rubricOverride?: ResolvedCriteria, observation?: RouteObservation): Promise<SessionVerificationResult & { provider: string; model: string }> => record('verifier_current_session', agent, async (trace) => {
     const extracted = await extractSession(agent, async (ref: ImageAttachmentRef) => { const stored = await services.attachments.readImage(ref, signal); return { data: stored.data, mediaType: stored.ref.mediaType } }, { fromSeq: options.fromSeq, toSeq: options.toSeq, includeAssistantText: options.includeAssistantText, redactPatterns: options.redactPatterns, maxChars: options.maxChars })
     if (!extracted.problem.trim()) throw new Error('llm-verifier: no direct user task found in the selected session range — widen from_seq so the task statement is included')
     const { verifier, selected } = await engine(agent)
@@ -300,19 +339,19 @@ export function apply(ctx: Context, config: Config = {}): void {
     const compared = await verifier.compare({ problem: extracted.problem, candidateA: extracted.trace, candidateB: EMPTY_WORK_BASELINE, criteria: rubric.criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats, images: extracted.images, ...(trace ? { trace } : {}) }, signal)
     const result: SessionVerificationResult = { sessionId: extracted.sessionId, problem: extracted.problem, score: compared.scoreA, baselineScore: compared.scoreB, winner: compared.winner, criteria: compared.criteria.map(row => ({ id: row.id, name: row.name, score: row.scoreA })), fromSeq: extracted.fromSeq, toSeq: extracted.toSeq, omittedCharacters: extracted.omittedCharacters, calls: compared.calls, stats: compared.stats, judges: compared.judges, agreement: compared.agreement }
     return { result, selected }
-  }, phase)
-  const compareCandidates = async (agent: Agent, problem: string, candidateA: string, candidateB: string, repeats: number, signal: AbortSignal, rubric: ResolvedCriteria, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit') => record('verifier_compare', agent, async (trace) => {
+  }, phase, observation)
+  const compareCandidates = async (agent: Agent, problem: string, candidateA: string, candidateB: string, repeats: number, signal: AbortSignal, rubric: ResolvedCriteria, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit', observation?: RouteObservation) => record('verifier_compare', agent, async (trace) => {
     const { verifier, selected } = await engine(agent)
     return { result: await verifier.compare({ problem, candidateA, candidateB, criteria: rubric.criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats, images: routedImages, ...(trace ? { trace } : {}) }, signal), selected }
-  }, phase)
-  const selectCandidates = async (agent: Agent, problem: string, candidates: readonly string[], repeats: number, signal: AbortSignal, rubric: ResolvedCriteria, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit') => record('verifier_select', agent, async (trace) => {
+  }, phase, observation)
+  const selectCandidates = async (agent: Agent, problem: string, candidates: readonly string[], repeats: number, signal: AbortSignal, rubric: ResolvedCriteria, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit', observation?: RouteObservation) => record('verifier_select', agent, async (trace) => {
     const { verifier, selected } = await engine(agent)
     return { result: await verifier.select({ problem, candidates, criteria: rubric.criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats, pivots: Math.min(2, candidates.length), seed: 0, images: routedImages, ...(trace ? { trace } : {}) }, signal), selected }
-  }, phase)
-  const trackProgress = async (agent: Agent, problem: string, steps: readonly string[], checkpoints: readonly number[], repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit') => record('verifier_track', agent, async (trace) => {
+  }, phase, observation)
+  const trackProgress = async (agent: Agent, problem: string, steps: readonly string[], checkpoints: readonly number[], repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit', observation?: RouteObservation) => record('verifier_track', agent, async (trace) => {
     const { verifier, selected } = await engine(agent)
     return { result: await verifier.track(problem, steps, checkpoints, repeats, signal, routedImages, trace), selected }
-  }, phase)
+  }, phase, observation)
   /**
    * Explicit best-of-N: draft N candidates with the session model, rank them with the
    * configured judges, then re-measure the winner against the gate's own baseline.
@@ -385,6 +424,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     stats.topLogprobScores += compared.stats.topLogprobScores
     stats.explicitTagScores += compared.stats.explicitTagScores
     for (const survivor of survivors) addUsage(stats, survivor.usage)
+    // A failed draft made a real request whose usage never came back. Its tokens are unknown,
+    // so the total is marked incomplete rather than presented as a complete measurement.
+    if (failures.length > 0) stats.usageIncomplete = true
     stats.estimatedCostUsd = ((stats.inputTokens + stats.cachedInputTokens) * selected.estimatedInputUsdPerMillion + stats.outputTokens * selected.estimatedOutputUsdPerMillion) / 1_000_000
     const result = {
       best: ranked.best,
@@ -427,13 +469,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     return { result, selected }
   })
-  const classifyRoute = async (agent: Agent, prompt: string, signal: AbortSignal, phase: string) => record('verifier_route_classify', agent, async (trace) => {
+  const classifyRoute = async (agent: Agent, prompt: string, signal: AbortSignal, phase: string, observation?: RouteObservation) => record('verifier_route_classify', agent, async (trace) => {
     const { verifier, selected } = await engine(agent)
     const completion = await callVerifierText(verifier.client, prompt, signal)
     trace?.({ label: 'route classify', channel: completion.scoringMode, prompt, output: completion.text })
     const stats: RunStats = { ...completion.usage, cacheHits: 0, cacheMisses: 0, estimatedCostUsd: ((completion.usage.inputTokens + completion.usage.cachedInputTokens) * selected.estimatedInputUsdPerMillion + completion.usage.outputTokens * selected.estimatedOutputUsdPerMillion) / 1_000_000, topLogprobScores: 0, explicitTagScores: 1 }
     return { result: { text: completion.text, stats }, selected }
-  }, phase)
+  }, phase, observation)
   const extractTask = async (agent: Agent, fromSeq: number, toSeq: number, maxChars: number, signal: AbortSignal) => extractSession(agent, async (ref: ImageAttachmentRef) => { const stored = await services.attachments.readImage(ref, signal); return { data: stored.data, mediaType: stored.ref.mediaType } }, { fromSeq, toSeq, includeAssistantText: true, maxChars })
   const routePolicy = (selected: ReturnType<typeof current>, minFinalModelCalls: number) => ({ mode: selected.autoVerifyMode, minConfidence: selected.autoRouteMinConfidence, maxCandidates: selected.autoRouteMaxCandidates, maxRoutePerTask: selected.autoRouteMaxPerTask, maxRoutePerSession: selected.autoRouteMaxPerSession, maxFinalPerTask: selected.autoVerifyMaxPerTask, maxFinalPerSession: selected.autoVerifyMaxPerSession, maxModelCallsPerTask: selected.autoMaxModelCallsPerTask, maxModelCallsPerSession: selected.autoMaxModelCallsPerSession, maxInputChars: selected.autoRouteMaxInputChars, maxItemChars: selected.autoRouteMaxItemChars, minFinalModelCalls })
   const routeFeedback = (decision: RouteDecision, detail: string) => createUserMessage({ content: [{ type: 'text' as const, text: '[Automatic verifier routing: ' + decision.kind + ']\n' + detail + '\nUse this independent result to continue the actual task. Do not merely restate the ranking or progress score; implement, correct, and verify the required work.' }], source: { kind: 'plugin' as const, plugin: 'dsh-llm-verifier', form: 'notice' as const, summary: 'Automatic verifier routed ' + decision.kind } })
@@ -617,7 +659,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     try {
       const toSeq = sessionEvents(agent.session).at(-1)?.seq ?? -1
       const extracted = await extractTask(agent, evidence.taskStartSeq, toSeq, selected.autoVerifyMaxChars, exec.signal)
-      const classified = await classifyRoute(agent, buildPlanPreReviewPrompt(extracted.problem, plan, selected.autoRouteMaxInputChars), exec.signal, 'plan_review')
+      const classified = await classifyRoute(agent, buildPlanPreReviewPrompt(extracted.problem, plan, selected.autoRouteMaxInputChars), exec.signal, 'plan_review', { cycleId: reservation.id, trigger: 'plan', stage: 'classification', destination: 'plan_review', attempt: reservation.attempt, reservedCalls: reservation.expectedCalls })
       const verdict = parseVerdictLetter(classified.text)
       if (verdict === undefined) {
         autoRouter.fail(agent, reservation, false)
@@ -676,7 +718,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         try {
           const extracted = await extractTask(agent, evidence.taskStartSeq, admittedLastSeq, selected.autoVerifyMaxChars, signal)
           const prompt = buildTeamTaskVerificationPrompt(task, extracted.trace, selected.autoRouteMaxInputChars)
-          const classified = await classifyRoute(agent, prompt, signal, 'team_task')
+          const classified = await classifyRoute(agent, prompt, signal, 'team_task', { cycleId: taskReservation.id, trigger: 'team', stage: 'classification', destination: 'team_task', attempt: taskReservation.attempt, reservedCalls: taskReservation.expectedCalls })
           if (!stillCurrent()) { autoRouter.fail(agent, taskReservation, false); return }
           const verdict = parseVerdictLetter(classified.text)
           if (verdict === undefined) {
@@ -721,9 +763,14 @@ export function apply(ctx: Context, config: Config = {}): void {
     let decision = finalPreferred ? undefined : boundDecision(structured, policy)
     if (structured !== undefined && decision === undefined) {
       ctx.logger.warn('llm-verifier automatic ' + structured.kind + ' route dropped: its evidence exceeds the per-item/total routing caps (' + selected.autoRouteMaxItemChars + '/' + selected.autoRouteMaxInputChars + ' characters)')
-      await recordSkippedRoute(agent, structured.kind, 'structured', 'dropped-over-budget')
+      await recordSkippedRoute(agent, structured.kind, 'structured', 'dropped-over-budget', { cycleId: nextCycleId(), trigger: 'turn-stopping', stage: 'skipped', destination: structured.kind, skipReason: 'dropped-over-budget' })
     }
 
+    // One logical routing cycle consumes exactly ONE route attempt. A classification that
+    // resolves to a decision is PROMOTED on its own reservation instead of committed and
+    // re-reserved: the commit-then-reserve pair spent two attempts per cycle, so the shipped
+    // default of two could never afford "plan pre-review → classify → compare".
+    let cycleReservation: Reservation | undefined
     if (!finalPreferred && decision === undefined && selected.autoRouteSemantic && (selected.autoVerifyMode === 'strict' || semanticRouteHint(snapshot))) {
       const fingerprint = stableHash({ phase: 'semantic', from: evidence.taskStartSeq, to: admittedLastSeq, model: selected.provider + '/' + selected.model })
       const reservation = autoRouter.reserve(agent, 'semantic', fingerprint, 1, policy)
@@ -734,19 +781,26 @@ export function apply(ctx: Context, config: Config = {}): void {
           // budget can omit artifacts/checkpoints, and citing a dropped one is an invalid
           // reference rather than a decision the classifier is allowed to make.
           const view = buildSemanticRouteView(extracted.problem, snapshot, selected.autoRouteMaxCandidates, selected.autoRouteMaxItemChars, selected.autoRouteMaxInputChars)
-          const classified = await classifyRoute(agent, view.prompt, signal, 'semantic')
-          if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return }
+          // Shared by every outcome of this cycle: a promoted execution row keeps the same id.
+          const cycle: RouteObservation = { cycleId: reservation.id, trigger: 'turn-stopping', stage: 'classification', destination: 'unresolved', attempt: reservation.attempt, reservedCalls: reservation.expectedCalls, ...viewObservation(view) }
+          const classified = await classifyRoute(agent, view.prompt, signal, 'semantic', cycle)
+          if (!stillCurrent()) {
+            await recordSkippedRoute(agent, 'none', 'semantic', 'canceled', { ...cycle, stage: 'skipped', destination: 'canceled', canceled: true })
+            autoRouter.fail(agent, reservation, false)
+            return
+          }
           const parsed = parseSemanticRoute(classified.text, selected.autoRouteMaxCandidates)
           if (!parsed) throw new Error('semantic router returned invalid strict JSON')
           if (parsed.kind === 'none' || parsed.confidence < selected.autoRouteMinConfidence) {
             // A "none" classification is a decision even at full confidence, and a
             // low-confidence one is too: record either so the dashboard can explain "not
             // routed" instead of showing only the classifier call.
-            await recordSkippedRoute(agent, 'none', 'semantic', parsed.kind === 'none' ? 'none' : 'low-confidence')
+            const skipReason = parsed.kind === 'none' ? 'none' : 'low-confidence'
+            await recordSkippedRoute(agent, 'none', 'semantic', skipReason, { ...cycle, stage: 'skipped', destination: parsed.kind, skipReason })
             autoRouter.commit(agent, reservation)
           } else if (!semanticReferencesVisible(parsed, view)) {
             ctx.logger.warn('llm-verifier semantic router returned ' + parsed.kind + ' but referenced evidence outside the rendered view')
-            await recordSkippedRoute(agent, parsed.kind, 'semantic', 'invalid-references')
+            await recordSkippedRoute(agent, parsed.kind, 'semantic', 'invalid-references', { ...cycle, stage: 'skipped', destination: parsed.kind, skipReason: 'invalid-references' })
             if (selected.autoVerifyMode === 'strict') {
               // Strict mode refuses to treat an out-of-view citation as a silent pass, but it
               // must NOT end the review: mark the task blocked, steer once, and fall through so
@@ -759,14 +813,37 @@ export function apply(ctx: Context, config: Config = {}): void {
             }
           } else {
             const resolved = semanticDecision(parsed, snapshot, selected.autoRouteMaxItemChars, selected.autoRouteMaxInputChars, view) as RouteDecision | undefined
-            if (resolved !== undefined) {
-              decision = boundDecision(resolved, policy)
-              if (decision === undefined) {
-                ctx.logger.warn('llm-verifier semantic ' + resolved.kind + ' route dropped: its evidence exceeds the per-item/total routing caps (' + selected.autoRouteMaxItemChars + '/' + selected.autoRouteMaxInputChars + ' characters)')
-                await recordSkippedRoute(agent, resolved.kind, 'semantic', 'dropped-over-budget')
+            const bounded = resolved === undefined ? undefined : boundDecision(resolved, policy)
+            if (resolved === undefined) {
+              // The classification was valid but produced nothing executable (the same
+              // candidate set was already reviewed, or a cited call is not evidence).
+              await recordSkippedRoute(agent, parsed.kind, 'semantic', 'no-executable-decision', { ...cycle, stage: 'skipped', destination: parsed.kind, skipReason: 'no-executable-decision' })
+              autoRouter.commit(agent, reservation)
+            } else if (bounded === undefined) {
+              ctx.logger.warn('llm-verifier semantic ' + resolved.kind + ' route dropped: its evidence exceeds the per-item/total routing caps (' + selected.autoRouteMaxItemChars + '/' + selected.autoRouteMaxInputChars + ' characters)')
+              await recordSkippedRoute(agent, resolved.kind, 'semantic', 'dropped-over-budget', { ...cycle, stage: 'skipped', destination: resolved.kind, skipReason: 'dropped-over-budget' })
+              autoRouter.commit(agent, reservation)
+            } else if (autoRouter.completedFingerprint(agent, bounded.fingerprint)) {
+              await recordSkippedRoute(agent, bounded.kind, 'semantic', 'already-routed', { ...cycle, stage: 'skipped', destination: bounded.kind, skipReason: 'already-routed' })
+              autoRouter.commit(agent, reservation)
+            } else {
+              // Promote the SAME cycle: the classification already consumed this cycle's route
+              // attempt, so its execution must not buy a second one. The extra model calls are
+              // checked atomically against the budget, including the final-acceptance floor.
+              const repeats = routedRepeats(bounded, selected.autoVerifyRepeats, selected.autoTrackRepeats)
+              const rubric = await configuredCriteria()
+              const expectedCalls = estimateRoutedCalls(bounded, repeats, rubric.criteria.length) * selected.judges.length
+              if (autoRouter.promote(agent, reservation, bounded.kind, bounded.fingerprint, expectedCalls, policy)) {
+                decision = bounded
+                cycleReservation = reservation
+              } else {
+                // Classification succeeded, scoring did not. Recorded as exactly that — never as
+                // "none" (nothing was decided about the work) and never as a completed review.
+                ctx.logger.warn('llm-verifier semantic ' + bounded.kind + ' route classified but not executed: the task/session budget cannot cover ' + expectedCalls + ' model calls')
+                await recordSkippedRoute(agent, bounded.kind, 'semantic', 'classification-only-budget', { ...cycle, stage: 'skipped', destination: bounded.kind, skipReason: 'classification-only-budget' })
+                autoRouter.commit(agent, reservation)
               }
             }
-            autoRouter.commit(agent, reservation)
           }
         } catch (error) {
           autoRouter.fail(agent, reservation, selected.autoVerifyMode === 'strict')
@@ -784,7 +861,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       const repeats = routedRepeats(decision, selected.autoVerifyRepeats, selected.autoTrackRepeats)
       const rubric = await configuredCriteria()
       const expectedCalls = estimateRoutedCalls(decision, repeats, rubric.criteria.length) * selected.judges.length
-      const reservation = autoRouter.reserve(agent, decision.kind, decision.fingerprint, expectedCalls, policy)
+      // A decision that came out of a classification cycle already owns its reservation, on
+      // the same cycle id; reserving again would be refused (that cycle is still in flight)
+      // and would spend a second route attempt on one logical cycle.
+      const reservation = cycleReservation ?? autoRouter.reserve(agent, decision.kind, decision.fingerprint, expectedCalls, policy)
       if (reservation === undefined) {
         // A refused reservation used to drop the whole routed decision silently.
         // Three different refusals used to share one misleading message.
@@ -794,7 +874,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           ? 'the task/session budget cannot cover ' + expectedCalls + ' model calls'
           : alreadyRan ? 'this exact evidence was already routed' : 'another verifier is active'
         ctx.logger.warn('llm-verifier automatic ' + decision.kind + ' route skipped: ' + refusal)
-        await recordSkippedRoute(agent, decision.kind, decision.source, exhausted ? 'budget-exhausted' : alreadyRan ? 'already-routed' : 'verifier-in-flight')
+        const skipReason = exhausted ? 'budget-exhausted' : alreadyRan ? 'already-routed' : 'verifier-in-flight'
+        await recordSkippedRoute(agent, decision.kind, decision.source, skipReason, { cycleId: nextCycleId(), trigger: 'turn-stopping', stage: 'skipped', destination: decision.kind, skipReason })
         if (exhausted && selected.autoVerifyMode === 'strict' && autoRouter.claimExhaustedNotice(agent)) {
           agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier routing]\nA routed ' + decision.kind + ' check was skipped because the task/session model-call budget is exhausted. Do not conclude until directly relevant verification succeeds.' }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
           return
@@ -803,24 +884,37 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (reservation) {
         try {
           const extracted = await extractTask(agent, evidence.taskStartSeq, admittedLastSeq, selected.autoVerifyMaxChars, signal)
+          const routedObservation: RouteObservation = { cycleId: reservation.id, trigger: 'turn-stopping', stage: 'execution', destination: decision.kind, attempt: reservation.attempt, reservedCalls: reservation.expectedCalls }
           if (decision.kind === 'compare') {
-            const result = await compareCandidates(agent, extracted.problem, decision.candidates[0].content, decision.candidates[1].content, repeats, signal, rubric, extracted.images, 'compare')
-            if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return }
+            const result = await compareCandidates(agent, extracted.problem, decision.candidates[0].content, decision.candidates[1].content, repeats, signal, rubric, extracted.images, 'compare', routedObservation)
+            if (!stillCurrent()) {
+              await recordSkippedRoute(agent, decision.kind, decision.source, 'canceled', { ...routedObservation, stage: 'skipped', canceled: true })
+              autoRouter.fail(agent, reservation, false)
+              return
+            }
             if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
             const winner = result.winner === 'A' ? decision.candidates[0].label : result.winner === 'B' ? decision.candidates[1].label : 'tie'
             agent.steer(routeFeedback(decision, 'Winner: ' + winner + '. Scores: ' + (result.scoreA * 100).toFixed(1) + '% / ' + (result.scoreB * 100).toFixed(1) + '%.'))
             return
           }
           if (decision.kind === 'select') {
-            const result = await selectCandidates(agent, extracted.problem, decision.candidates.map(candidate => candidate.content), repeats, signal, rubric, extracted.images, 'select')
-            if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return }
+            const result = await selectCandidates(agent, extracted.problem, decision.candidates.map(candidate => candidate.content), repeats, signal, rubric, extracted.images, 'select', routedObservation)
+            if (!stillCurrent()) {
+              await recordSkippedRoute(agent, decision.kind, decision.source, 'canceled', { ...routedObservation, stage: 'skipped', canceled: true })
+              autoRouter.fail(agent, reservation, false)
+              return
+            }
             if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
             const ranking = result.ranking.map((index, rank) => (rank + 1) + '. ' + decision.candidates[index]!.label).join('\n')
             agent.steer(routeFeedback(decision, 'Ranking:\n' + ranking + '\nProceed with ' + decision.candidates[result.index]!.label + '.'))
             return
           }
-          const result = await trackProgress(agent, extracted.problem, decision.steps, decision.checkpoints, repeats, signal, extracted.images, 'track')
-          if (!stillCurrent()) { autoRouter.fail(agent, reservation, false); return }
+          const result = await trackProgress(agent, extracted.problem, decision.steps, decision.checkpoints, repeats, signal, extracted.images, 'track', routedObservation)
+          if (!stillCurrent()) {
+            await recordSkippedRoute(agent, decision.kind, decision.source, 'canceled', { ...routedObservation, stage: 'skipped', canceled: true })
+            autoRouter.fail(agent, reservation, false)
+            return
+          }
           if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
           const detail = result.scores.map((score, index) => 'Checkpoint step ' + decision.checkpoints[index] + ': ' + (score * 100).toFixed(1) + '%').join('\n')
           // Judge the CURRENT state, not the whole history: the first checkpoint is the
@@ -870,9 +964,14 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
       return
     }
+    const finalObservation: RouteObservation = { cycleId: finalReservation.id, trigger: 'turn-stopping', stage: 'final', destination: 'final', attempt: finalReservation.attempt, reservedCalls: finalReservation.expectedCalls }
     try {
-      const result = await verifySession(agent, { fromSeq: finalFromSeq, toSeq: admittedLastSeq, includeAssistantText: true, maxChars: selected.autoVerifyMaxChars, repeats: selected.autoVerifyFinalRepeats }, signal, 'final', finalRubric)
-      if (!stillCurrent()) { autoRouter.fail(agent, finalReservation, false); return }
+      const result = await verifySession(agent, { fromSeq: finalFromSeq, toSeq: admittedLastSeq, includeAssistantText: true, maxChars: selected.autoVerifyMaxChars, repeats: selected.autoVerifyFinalRepeats }, signal, 'final', finalRubric, finalObservation)
+      if (!stillCurrent()) {
+        await recordSkippedRoute(agent, 'final', 'final', 'canceled', { ...finalObservation, stage: 'skipped', canceled: true })
+        autoRouter.fail(agent, finalReservation, false)
+        return
+      }
       // The mean over criteria used to hide a single failed requirement, and the fixed
       // empty-work baseline can never win on its own, so the gate is (a) the winner,
       // (b) the mean score and (c) every criterion on its own.

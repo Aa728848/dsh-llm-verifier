@@ -80,7 +80,28 @@ export interface RouterPolicy {
   minFinalModelCalls?: number
 }
 
-interface Reservation { id: string; phase: RoutePhase; fingerprint: string; taskStartSeq: number }
+/**
+ * One granted routing cycle.
+ *
+ * A cycle is the unit the route-attempt counter meters, not a model call: a semantic
+ * classification that resolves to a decision is promoted on the SAME reservation and
+ * still consumes exactly one attempt. The reservation therefore keeps its id across the
+ * promotion, and {@link Reservation.expectedCalls} grows with the execution budget the
+ * promotion reserved.
+ */
+export interface Reservation {
+  id: string
+  phase: RoutePhase
+  fingerprint: string
+  taskStartSeq: number
+  /**
+   * Conservative model-call count reserved for this cycle so far. A classification cycle
+   * starts at 1 and gains the decision's planned calls when it is promoted.
+   */
+  expectedCalls: number
+  /** 1-based attempt ordinal this cycle consumed on its task/session counter. */
+  attempt: number
+}
 interface RouterState {
   taskStartSeq: number
   routeAttempts: number
@@ -1111,7 +1132,7 @@ export class AutoVerifierRouter {
     const floor = final ? 0 : policy.minFinalModelCalls ?? 0
     if (state.taskModelCalls + expectedCalls + floor > policy.maxModelCallsPerTask) return undefined
     if (state.sessionModelCalls + expectedCalls + floor > policy.maxModelCallsPerSession) return undefined
-    const reservation = { id: String(++this.serial), phase, fingerprint, taskStartSeq: state.taskStartSeq }
+    const reservation: Reservation = { id: String(++this.serial), phase, fingerprint, taskStartSeq: state.taskStartSeq, expectedCalls, attempt: (final ? state.finalAttempts : state.routeAttempts) + 1 }
     state.inFlight = reservation
     if (final) {
       state.finalAttempts += 1; state.sessionFinalAttempts += 1
@@ -1124,6 +1145,53 @@ export class AutoVerifierRouter {
     state.taskModelCalls += expectedCalls
     state.sessionModelCalls += expectedCalls
     return reservation
+  }
+
+  /**
+   * Continue an in-flight classification cycle as the decision that classification resolved.
+   *
+   * A semantic cycle used to commit its classification reservation (releasing the lock) and
+   * then call {@link reserve} again for compare/select/track. The two reservations spent TWO
+   * route attempts for one logical cycle, so the shipped default of 2 attempts made
+   * "plan pre-review → classify → compare" impossible: the classification itself consumed
+   * the second attempt and the execution it produced could never be admitted.
+   *
+   * Promotion is the cycle's own reservation gaining the execution phase. It deliberately
+   * does NOT touch the attempt counters — that is the whole point — and it re-checks the
+   * budget for the extra calls atomically, so a cycle that can classify but not afford the
+   * scoring is refused here instead of after the model was already paid for.
+   *
+   * The classification fingerprint is recorded as completed on success: it was really spent,
+   * and re-classifying the same snapshot would be a duplicate purchase.
+   * @param agent - Agent whose classification reservation is in flight.
+   * @param reservation - the reservation returned by {@link reserve} for this cycle.
+   * @param phase - the decision phase the cycle now executes.
+   * @param fingerprint - the resolved decision's fingerprint (replaces the classification one).
+   * @param expectedCalls - model calls the execution adds on top of the classification call.
+   * @param policy - resolved routing policy.
+   * @returns True when the same reservation now owns the execution phase.
+   */
+  promote(agent: RoutedAgent, reservation: Reservation, phase: RoutePhase, fingerprint: string, expectedCalls: number, policy: RouterPolicy): boolean {
+    if (policy.mode === 'manual') return false
+    const state = this.state(agent)
+    if (!state || state.inFlight?.id !== reservation.id || state.taskStartSeq !== reservation.taskStartSeq) return false
+    // Only a classification may be continued, and only into a routable decision: the final
+    // gate and the plan/team phases have their own reservation rules and must never be
+    // smuggled into a semantic cycle.
+    if (reservation.phase !== 'semantic' || (phase !== 'compare' && phase !== 'select' && phase !== 'track')) return false
+    if (state.completed.has(fingerprint)) return false
+    // The floor for the mandatory final acceptance must survive the top-up, exactly as it
+    // does for a fresh reservation.
+    const floor = policy.minFinalModelCalls ?? 0
+    if (state.taskModelCalls + expectedCalls + floor > policy.maxModelCallsPerTask) return false
+    if (state.sessionModelCalls + expectedCalls + floor > policy.maxModelCallsPerSession) return false
+    state.completed.add(reservation.fingerprint)
+    reservation.phase = phase
+    reservation.fingerprint = fingerprint
+    reservation.expectedCalls += expectedCalls
+    state.taskModelCalls += expectedCalls
+    state.sessionModelCalls += expectedCalls
+    return true
   }
 
   commit(agent: RoutedAgent, reservation: Reservation, evidenceSeq?: number): boolean {

@@ -53,7 +53,32 @@ export interface UsageStats {
 }
 
 export type ScoringMode = 'top-logprobs' | 'explicit-tag'
-export interface VerifierCompletion extends CompletionLogprobs { usage: UsageStats; scoringMode: ScoringMode }
+export interface VerifierCompletion extends CompletionLogprobs {
+  usage: UsageStats
+  scoringMode: ScoringMode
+  /**
+   * The direct logprob transport was attempted and the provider rejected it, so this
+   * answer came from the explicit-tag fallback. Diagnostics only: it never changes the
+   * score, and it is recorded so a silent downgrade is visible in the statistics.
+   */
+  channelFallback?: boolean
+}
+
+/**
+ * Where a finally-failed request records how many attempts it already spent.
+ *
+ * A failure that never returned usage leaves the tokens UNKNOWN, not zero. The attempt
+ * count is the one fact the transport does know, so it is carried on the error itself
+ * (the engine catches per-judge errors) instead of being discarded.
+ */
+const REQUEST_ATTEMPTS = Symbol('llm-verifier.requestAttempts')
+
+/** Attempts one failed verifier request already spent; 0 when the error carries none. */
+export function requestAttempts(error: unknown): number {
+  if (typeof error !== 'object' || error === null) return 0
+  const value = (error as { [REQUEST_ATTEMPTS]?: unknown })[REQUEST_ATTEMPTS]
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : 0
+}
 
 function failureMessage(finish: FinishReason): string | undefined {
   if (finish.kind === 'error' || finish.kind === 'aborted') return finish.failure.message
@@ -105,7 +130,13 @@ async function retrying<T>(config: VerifierClientConfig, signal: AbortSignal | u
       // A deadline abort is retryable even when the adapter wraps the reason in
       // its own error type with an unrelated message.
       const retryable = timedOut || (error instanceof Error && RETRYABLE_MESSAGE.test(error.message))
-      if (attempt > config.maxRetries || !retryable) throw error
+      if (attempt > config.maxRetries || !retryable) {
+        // The tokens this request may have spent before failing are unknowable here; the
+        // attempt count is not. Keeping it lets the statistics report "known requests, unknown
+        // usage" instead of a confident zero.
+        if (typeof error === 'object' && error !== null) (error as { [REQUEST_ATTEMPTS]?: number })[REQUEST_ATTEMPTS] = attempt
+        throw error
+      }
       await delay(Math.min(30000, config.retryBaseDelayMs * 2 ** (attempt - 1) * (0.8 + Math.random() * 0.4)), signal)
     } finally {
       clearTimeout(timeout)
@@ -211,6 +242,7 @@ export async function predictScoringChannel(config: VerifierClientConfig): Promi
 
 async function callAutomatic(config: VerifierClientConfig, prompt: string, signal: AbortSignal | undefined, images: readonly VerifierImage[] | undefined, attempt: number): Promise<VerifierCompletion> {
   await config.topLogprobCapabilities.ensureLoaded()
+  let fellBack = false
   if (!config.topLogprobCapabilities.isUnsupported(config.provider, config.model)) {
     const route = await resolveTopLogprobRoute(config.ctx, config.provider)
     if (route !== undefined) {
@@ -221,10 +253,14 @@ async function callAutomatic(config: VerifierClientConfig, prompt: string, signa
         // the whole verification.
         if (!(error instanceof TopLogprobsUnsupportedError)) throw error
         config.topLogprobCapabilities.markUnsupported(config.provider, config.model)
+        // A runtime downgrade AFTER a live attempt, unlike the capability probe that
+        // finds no route at all: only this one is a fallback worth counting.
+        fellBack = true
       }
     } else config.topLogprobCapabilities.markUnsupported(config.provider, config.model)
   }
-  return callExplicitTag(config, prompt, signal, images, attempt)
+  const completion = await callExplicitTag(config, prompt, signal, images, attempt)
+  return fellBack ? { ...completion, channelFallback: true } : completion
 }
 
 export async function callVerifier(config: VerifierClientConfig, prompt: string, signal?: AbortSignal, images?: readonly VerifierImage[]): Promise<VerifierCompletion> {

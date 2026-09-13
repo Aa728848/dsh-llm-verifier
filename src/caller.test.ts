@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { RequestLimiter, callVerifier, generateCandidate, generationClient } from './caller.ts'
+import { RequestLimiter, callVerifier, generateCandidate, generationClient, requestAttempts } from './caller.ts'
 import { TopLogprobCapabilityCache } from './top-logprobs.ts'
 
 function chunks(text = '<score_A> A </score_A>') { return [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'text-delta', index: 0, text }, { type: 'block-end', index: 0, block: { type: 'text', text } }, { type: 'usage', usage: { inputTokens: 7, cacheReadTokens: 3, outputTokens: 4, reasoningTokens: 2 } }, { type: 'finish', reason: { kind: 'stop' } }] as any[] }
@@ -67,6 +67,37 @@ describe('automatic verifier scoring', () => {
     expect((await callVerifier(cfg, 'prompt')).scoringMode).toBe('explicit-tag')
     expect((await callVerifier(cfg, 'prompt2')).scoringMode).toBe('explicit-tag')
     expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
+  it('flags a channel that was downgraded after a live logprob attempt', async () => {
+    // A capability probe that finds no route is not a fallback; a provider that REJECTED a
+    // direct attempt and was then served by the DSH stream is. The statistics need the
+    // distinction, because only the second one is a downgrade of a request that was made.
+    const fetcher = vi.fn(async () => new Response('{"error":{"message":"max_tokens is too large"}}', { status: 400 }))
+    vi.stubGlobal('fetch', fetcher)
+    const context = ctx({ providers: { openai: { api: 'openai-completions', baseURL: 'https://example.test/v1' } } })
+    const downgraded = await callVerifier(config(async function* () { yield* streamOf(chunks()) }, vi.fn(), context), 'prompt')
+    expect(downgraded.scoringMode).toBe('explicit-tag')
+    expect(downgraded.channelFallback).toBe(true)
+    // No route at all: nothing was attempted, so nothing was downgraded.
+    const noRoute = await callVerifier(config(async function* () { yield* streamOf(chunks()) }), 'prompt')
+    expect(noRoute.channelFallback).toBeUndefined()
+  })
+
+  it('carries the spent attempt count on a finally-failed request', async () => {
+    // Unknown token usage must not read as a confident zero. The attempt count is the one
+    // fact the transport has when a request dies before its usage block arrives.
+    const cfg = config(async function* () { throw new Error('rate limited upstream') }, vi.fn(), ctx(), { maxRetries: 2, retryBaseDelayMs: 1 })
+    const error = await callVerifier(cfg, 'prompt').catch(reason => reason)
+    expect(error).toBeInstanceOf(Error)
+    expect(requestAttempts(error)).toBe(3)
+  })
+
+  it('reports no attempts for a request cancelled before it ran', async () => {
+    const controller = new AbortController()
+    controller.abort(new Error('cancelled by the host'))
+    const error = await callVerifier(config(async function* () { yield* streamOf(chunks()) }), 'prompt', controller.signal).catch(reason => reason)
+    expect(requestAttempts(error)).toBe(0)
   })
 })
 

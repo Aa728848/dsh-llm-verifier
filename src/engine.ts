@@ -1,4 +1,4 @@
-import { addUsage, callVerifier, emptyUsage, predictScoringChannel, type ScoringMode, type UsageStats, type VerifierClientConfig, type VerifierImage } from './caller.ts'
+import { addUsage, callVerifier, emptyUsage, predictScoringChannel, requestAttempts, type ScoringMode, type UsageStats, type VerifierClientConfig, type VerifierImage } from './caller.ts'
 import { ScoreCache, SingleFlight, stableHash, type CachedPairScore } from './cache.ts'
 import type { DecisionTrace } from './decisions.ts'
 import {
@@ -9,7 +9,20 @@ import {
 
 export interface CompareOptions { problem: string; candidateA: string; candidateB: string; criteria?: readonly Criterion[]; groundTruthNote?: string; repeats?: number; images?: readonly VerifierImage[]; trace?: DecisionTrace; /** Prefix for this comparison's decision-snapshot labels; one invocation that judges twice on the same criteria needs them distinguishable. */ traceLabelPrefix?: string }
 export interface CriterionResult { id: string; name: string; scoreA: number; scoreB: number }
-export interface RunStats extends UsageStats { cacheHits: number; cacheMisses: number; estimatedCostUsd: number; topLogprobScores: number; explicitTagScores: number }
+export interface RunStats extends UsageStats {
+  cacheHits: number
+  cacheMisses: number
+  estimatedCostUsd: number
+  topLogprobScores: number
+  explicitTagScores: number
+  /**
+   * At least one request failed before returning usage. The tokens it may have spent are
+   * UNKNOWN, not zero: a failed call must not make the invocation look free.
+   */
+  usageIncomplete?: boolean
+  /** Calls that were attempted on the direct logprob transport and downgraded to explicit tags. */
+  channelFallbacks?: number
+}
 
 export interface JudgeScore {
   provider: string
@@ -154,7 +167,7 @@ export class VerifierEngine {
     return stats
   }
 
-  private async scoreOne(client: VerifierClientConfig, options: CompareOptions, candidateA: string, candidateB: string, criterion: Criterion, repeat: number, signal?: AbortSignal): Promise<{ scores: readonly [number, number]; usage: UsageStats; scoringMode: 'top-logprobs' | 'explicit-tag'; hit: boolean }> {
+  private async scoreOne(client: VerifierClientConfig, options: CompareOptions, candidateA: string, candidateB: string, criterion: Criterion, repeat: number, signal?: AbortSignal): Promise<{ scores: readonly [number, number]; usage: UsageStats; scoringMode: 'top-logprobs' | 'explicit-tag'; hit: boolean; channelFallback: boolean }> {
     const ground = options.groundTruthNote ?? DEFAULT_GROUND_TRUTH_NOTE
     const prompt = buildPairwisePrompt(options.problem, candidateA, candidateB, criterion, ground)
     const imageKey = options.images?.map(image => stableHash([image.mediaType, Buffer.from(image.data).toString('base64')]))
@@ -166,17 +179,21 @@ export class VerifierEngine {
     // expectation. The channel stays OUT of the in-flight dedup key below.
     const identity = { version: 6, provider: client.provider, model: client.model, effort: client.reasoningEffort, maxTokens: client.maxTokens, temperature: client.temperature, repeat, promptHash: stableHash(prompt), imageKey }
     const keyForMode = (scoringMode: ScoringMode) => stableHash({ ...identity, scoringMode })
+    // Captured out of band: a fallback describes the REQUEST, not the score, so it must not
+    // enter the cached value (a cache hit later must not claim a downgrade that never happened).
+    let fellBack = false
     const create = async () => {
       const completion = await callVerifier(client, prompt, signal, options.images)
       const scoreA = extractScore(completion, '<score_A>')
       const scoreB = extractScore(completion, '<score_B>')
+      fellBack = completion.channelFallback === true
       // Traced here, not in scoreOne(): a cache hit or a merged in-flight call makes no
       // model call, and a snapshot that showed one anyway would be a fabrication.
       options.trace?.({ label: (options.traceLabelPrefix ?? '') + criterion.name + ' repeat ' + (repeat + 1), channel: completion.scoringMode, prompt, output: completion.text, score: scoreA })
       return { scoreA, scoreB, usage: completion.usage, scoringMode: completion.scoringMode, createdAt: Date.now() }
     }
     const cache = this.cache
-    if (cache === undefined) { const value = await create(); return { scores: [value.scoreA, value.scoreB], usage: value.usage, scoringMode: value.scoringMode, hit: false } }
+    if (cache === undefined) { const value = await create(); return { scores: [value.scoreA, value.scoreB], usage: value.usage, scoringMode: value.scoringMode, hit: false, channelFallback: fellBack } }
     // Registration happens in the synchronous segment before any await, so a request
     // that arrives while the first one is still resolving its channel prediction
     // still merges instead of duplicating the model call. The flight table is shared
@@ -185,7 +202,7 @@ export class VerifierEngine {
     const outcome = await this.flights.run(dedupeKey, async () => cache.getOrCreate(keyForMode(await predictScoringChannel(client)), create, value => keyForMode(value.scoringMode)))
     const landed = outcome.value
     const reused = outcome.joined || landed.hit
-    return { scores: [landed.value.scoreA, landed.value.scoreB], usage: reused ? emptyUsage() : landed.value.usage, scoringMode: landed.value.scoringMode, hit: reused }
+    return { scores: [landed.value.scoreA, landed.value.scoreB], usage: reused ? emptyUsage() : landed.value.usage, scoringMode: landed.value.scoringMode, hit: reused, channelFallback: reused ? false : fellBack }
   }
 
   private async mapLimited<T, R>(items: readonly T[], worker: (item: T) => Promise<R>): Promise<R[]> {
@@ -252,6 +269,7 @@ export class VerifierEngine {
               usage: res.usage,
               scoringMode: res.scoringMode,
               hit: res.hit,
+              channelFallback: res.channelFallback,
             }
           } catch (error) {
             return {
@@ -292,8 +310,14 @@ export class VerifierEngine {
           else stats.cacheMisses++
           if (r.scoringMode === 'top-logprobs') stats.topLogprobScores++
           else stats.explicitTagScores++
+          if (r.channelFallback) stats.channelFallbacks = (stats.channelFallbacks ?? 0) + 1
         } else {
           judgeOk[r.k] = false
+          // The failed request really happened even though its usage is unknown; the attempt
+          // count is kind-independent, so it is kept and the row is marked incomplete rather
+          // than reported as a confident zero-cost call.
+          stats.attempts += requestAttempts(r.error)
+          stats.usageIncomplete = true
           if (judgeErrors[r.k] === undefined) {
             judgeErrors[r.k] = r.error instanceof Error ? r.error.message : String(r.error)
           }
@@ -405,6 +429,8 @@ export class VerifierEngine {
       stats.cacheMisses += value.result.stats.cacheMisses
       stats.topLogprobScores += value.result.stats.topLogprobScores
       stats.explicitTagScores += value.result.stats.explicitTagScores
+      if (value.result.stats.usageIncomplete) stats.usageIncomplete = true
+      if (value.result.stats.channelFallbacks) stats.channelFallbacks = (stats.channelFallbacks ?? 0) + value.result.stats.channelFallbacks
 
       for (let k = 0; k < this.clients.length; k++) {
         const js = value.result.judges[k]!
@@ -472,8 +498,11 @@ export class VerifierEngine {
           addUsage(stats, r.completion.usage)
           if (r.completion.scoringMode === 'top-logprobs') stats.topLogprobScores++
           else stats.explicitTagScores++
+          if (r.completion.channelFallback) stats.channelFallbacks = (stats.channelFallbacks ?? 0) + 1
         } else {
           judgeOk[r.k] = false
+          stats.attempts += requestAttempts(r.error)
+          stats.usageIncomplete = true
           if (judgeErrors[r.k] === undefined) {
             judgeErrors[r.k] = r.error instanceof Error ? r.error.message : String(r.error)
           }
@@ -663,6 +692,8 @@ export class VerifierEngine {
       stats.cacheMisses += source.cacheMisses
       stats.topLogprobScores += source.topLogprobScores
       stats.explicitTagScores += source.explicitTagScores
+      if (source.usageIncomplete) stats.usageIncomplete = true
+      if (source.channelFallbacks) stats.channelFallbacks = (stats.channelFallbacks ?? 0) + source.channelFallbacks
     }
 
     const judges: JudgeScore[] = this.clients.map((client, k) => {

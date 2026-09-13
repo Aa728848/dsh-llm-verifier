@@ -25,6 +25,13 @@ export interface RunStats extends UsageStats {
     estimatedCostUsd: number;
     topLogprobScores: number;
     explicitTagScores: number;
+    /**
+     * At least one request failed before returning usage. The tokens it may have spent are
+     * UNKNOWN, not zero: a failed call must not make the invocation look free.
+     */
+    usageIncomplete?: boolean;
+    /** Calls that were attempted on the direct logprob transport and downgraded to explicit tags. */
+    channelFallbacks?: number;
 }
 export interface JudgeScore {
     provider: string;

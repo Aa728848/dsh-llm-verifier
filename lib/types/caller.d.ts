@@ -37,7 +37,15 @@ export type ScoringMode = 'top-logprobs' | 'explicit-tag';
 export interface VerifierCompletion extends CompletionLogprobs {
     usage: UsageStats;
     scoringMode: ScoringMode;
+    /**
+     * The direct logprob transport was attempted and the provider rejected it, so this
+     * answer came from the explicit-tag fallback. Diagnostics only: it never changes the
+     * score, and it is recorded so a silent downgrade is visible in the statistics.
+     */
+    channelFallback?: boolean;
 }
+/** Attempts one failed verifier request already spent; 0 when the error carries none. */
+export declare function requestAttempts(error: unknown): number;
 export declare class RequestLimiter {
     readonly limit: number;
     private active;

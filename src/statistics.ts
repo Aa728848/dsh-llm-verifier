@@ -141,6 +141,47 @@ function acceptanceVerdict(row: Record<string, unknown>, phase: string, threshol
   }
 }
 
+/** Host boundary that started an automatic routing cycle. */
+export type RouteTrigger = 'turn-stopping' | 'plan' | 'team' | 'pre-step'
+/** Stage of the cycle a statistics row describes. */
+export type RouteStage = 'classification' | 'execution' | 'final' | 'skipped'
+
+/**
+ * One automatic routing cycle, stored beside the invocation it produced.
+ *
+ * A cycle is NOT a model call and a diagnostic row is not a purchase, so these fields live
+ * in their own object: adding them up as judge calls (or reading a cycle count as a call
+ * count) is exactly the confusion the observation is meant to remove. The classification
+ * row and the execution row it was promoted into (S01) share one {@link cycleId}, so the
+ * dashboard can tell "classified but never executed" from "scored".
+ */
+export interface RouteObservation {
+  /** Stable id of the cycle; a promoted classification and its execution share it. */
+  cycleId: string
+  /** Which host boundary started the cycle. */
+  trigger: RouteTrigger
+  /** Which stage of the cycle this row reports. */
+  stage: RouteStage
+  /** Decision kind the cycle reached, or 'none' when it deliberately did not route. */
+  destination: string
+  /** 1-based route attempt the cycle consumed, when it reached a reservation. */
+  attempt?: number
+  /** Conservative model calls the cycle had reserved at the time of this row. */
+  reservedCalls?: number
+  /** Why the cycle ended without executing a decision. */
+  skipReason?: string
+  /** Evidence items the bounded routing view actually rendered. */
+  evidenceKept?: number
+  /** Evidence items the same view omitted for budget reasons. */
+  evidenceOmitted?: number
+  /** Exact characters of the rendered evidence payload. */
+  evidenceChars?: number
+  /** True when at least one request this row paid for failed before returning usage. */
+  usageIncomplete?: boolean
+  /** True when the task, snapshot or signal stopped being current mid-cycle. */
+  canceled?: boolean
+}
+
 export interface InvocationRecord {
   id: string
   toolName: VerifierToolName
@@ -155,6 +196,8 @@ export interface InvocationRecord {
   model: string
   stats: RunStats
   verdict?: VerdictSummary
+  /** Automatic routing-cycle observation; absent on explicit calls and on old records. */
+  route?: RouteObservation
 }
 
 interface StatisticsDocument {
@@ -259,6 +302,41 @@ export interface InvocationInput {
   model: string
   stats: RunStats
   verdict?: VerdictSummary
+  route?: RouteObservation
+}
+
+const ROUTE_TRIGGERS = new Set<RouteTrigger>(['turn-stopping', 'plan', 'team', 'pre-step'])
+const ROUTE_STAGES = new Set<RouteStage>(['classification', 'execution', 'final', 'skipped'])
+
+/**
+ * Bound and validate an observation before it is persisted.
+ *
+ * Optional by design: a record without one is a first-class shape (every explicit call, and
+ * every record written before this field existed). A malformed observation is DROPPED rather
+ * than allowed to fail the invocation that produced it — the observation is diagnostics, and
+ * losing it must never lose the call row it describes.
+ * @param input - candidate observation.
+ * @returns A bounded observation, or undefined when it is not usable.
+ */
+function cleanRoute(input: RouteObservation | undefined): RouteObservation | undefined {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return undefined
+  if (typeof input.cycleId !== 'string' || !input.cycleId || !ROUTE_TRIGGERS.has(input.trigger) || !ROUTE_STAGES.has(input.stage)) return undefined
+  if (typeof input.destination !== 'string' || !input.destination) return undefined
+  const route: RouteObservation = {
+    cycleId: input.cycleId.slice(0, 120),
+    trigger: input.trigger,
+    stage: input.stage,
+    destination: input.destination.slice(0, 60),
+  }
+  const counts = ['attempt', 'reservedCalls', 'evidenceKept', 'evidenceOmitted', 'evidenceChars'] as const
+  for (const key of counts) {
+    const value = input[key]
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) route[key] = Math.trunc(value)
+  }
+  if (typeof input.skipReason === 'string' && input.skipReason) route.skipReason = input.skipReason.slice(0, 120)
+  if (input.usageIncomplete === true) route.usageIncomplete = true
+  if (input.canceled === true) route.canceled = true
+  return route
 }
 
 function cleanVerdict(input: VerdictSummary | undefined): VerdictSummary | undefined {
@@ -345,6 +423,14 @@ function isRecord(value: unknown): value is InvocationRecord {
   }
   if (row.verdict !== undefined) {
     if (typeof row.verdict !== 'object' || row.verdict === null || Array.isArray(row.verdict)) {
+      return false
+    }
+  }
+  // Optional and NOT validated field-by-field on load: records written before this field
+  // existed (and every explicit invocation) have none, and a partially-shaped observation
+  // must not make an otherwise readable cost row disappear.
+  if (row.route !== undefined) {
+    if (typeof row.route !== 'object' || row.route === null || Array.isArray(row.route)) {
       return false
     }
   }
@@ -442,6 +528,7 @@ export class StatisticsStore {
   async record(input: InvocationInput): Promise<InvocationRecord> {
     const finishedAt = input.finishedAt ?? Date.now()
     const verdict = cleanVerdict(input.verdict)
+    const route = cleanRoute(input.route)
     const record: InvocationRecord = {
       id: randomUUID(),
       toolName: input.toolName,
@@ -456,6 +543,7 @@ export class StatisticsStore {
       model: input.model,
       stats: { ...input.stats },
       ...(verdict !== undefined ? { verdict } : {}),
+      ...(route !== undefined ? { route } : {}),
     }
     const operation = async () => {
       await this.load()

@@ -37,6 +37,45 @@ export interface VerdictThresholds {
  * @returns A verdict summary; score fields are omitted when the tool has none.
  */
 export declare function summarizeVerdict(toolName: VerifierToolName, value: unknown, phase: string, thresholds: VerdictThresholds): VerdictSummary;
+/** Host boundary that started an automatic routing cycle. */
+export type RouteTrigger = 'turn-stopping' | 'plan' | 'team' | 'pre-step';
+/** Stage of the cycle a statistics row describes. */
+export type RouteStage = 'classification' | 'execution' | 'final' | 'skipped';
+/**
+ * One automatic routing cycle, stored beside the invocation it produced.
+ *
+ * A cycle is NOT a model call and a diagnostic row is not a purchase, so these fields live
+ * in their own object: adding them up as judge calls (or reading a cycle count as a call
+ * count) is exactly the confusion the observation is meant to remove. The classification
+ * row and the execution row it was promoted into (S01) share one {@link cycleId}, so the
+ * dashboard can tell "classified but never executed" from "scored".
+ */
+export interface RouteObservation {
+    /** Stable id of the cycle; a promoted classification and its execution share it. */
+    cycleId: string;
+    /** Which host boundary started the cycle. */
+    trigger: RouteTrigger;
+    /** Which stage of the cycle this row reports. */
+    stage: RouteStage;
+    /** Decision kind the cycle reached, or 'none' when it deliberately did not route. */
+    destination: string;
+    /** 1-based route attempt the cycle consumed, when it reached a reservation. */
+    attempt?: number;
+    /** Conservative model calls the cycle had reserved at the time of this row. */
+    reservedCalls?: number;
+    /** Why the cycle ended without executing a decision. */
+    skipReason?: string;
+    /** Evidence items the bounded routing view actually rendered. */
+    evidenceKept?: number;
+    /** Evidence items the same view omitted for budget reasons. */
+    evidenceOmitted?: number;
+    /** Exact characters of the rendered evidence payload. */
+    evidenceChars?: number;
+    /** True when at least one request this row paid for failed before returning usage. */
+    usageIncomplete?: boolean;
+    /** True when the task, snapshot or signal stopped being current mid-cycle. */
+    canceled?: boolean;
+}
 export interface InvocationRecord {
     id: string;
     toolName: VerifierToolName;
@@ -51,6 +90,8 @@ export interface InvocationRecord {
     model: string;
     stats: RunStats;
     verdict?: VerdictSummary;
+    /** Automatic routing-cycle observation; absent on explicit calls and on old records. */
+    route?: RouteObservation;
 }
 export interface DailyStatistics {
     date: string;
@@ -143,6 +184,7 @@ export interface InvocationInput {
     model: string;
     stats: RunStats;
     verdict?: VerdictSummary;
+    route?: RouteObservation;
 }
 export declare function parseStatisticsQuery(payload: unknown): {
     ok: true;

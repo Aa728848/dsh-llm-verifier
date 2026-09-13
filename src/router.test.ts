@@ -980,3 +980,113 @@ describe('transactional router state', () => {
     expect(router.reserve(agent, 'select', 'expensive', 49, policy)).toBeUndefined()
   })
 })
+
+/**
+ * S01: a semantic classification and the decision it resolves are ONE routing cycle.
+ *
+ * Before promotion the classification committed (releasing the lock) and the execution
+ * reserved again, so "plan pre-review → classify → compare" needed three attempts under a
+ * default cap of two: the compare could never be admitted even though only two logical
+ * decisions had been made.
+ */
+describe('one cycle per classification and execution', () => {
+  it('spends a single route attempt when a classification is promoted into its decision', () => {
+    const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
+    const budget = { ...policy, maxRoutePerTask: 1, maxModelCallsPerTask: 48 }
+    const classification = router.reserve(agent, 'semantic', 'semantic-1', 1, budget)!
+    expect(classification.attempt).toBe(1)
+    expect(router.promote(agent, classification, 'compare', 'compare-1', 6, budget)).toBe(true)
+    // Same reservation, same cycle id, execution budget added on top of the classification call.
+    expect(classification.phase).toBe('compare')
+    expect(classification.fingerprint).toBe('compare-1')
+    expect(classification.expectedCalls).toBe(7)
+    // The spent classification is remembered so the same snapshot is not classified twice.
+    expect(router.completedFingerprint(agent, 'semantic-1')).toBe(true)
+    expect(router.commit(agent, classification, 9)).toBe(true)
+    expect(router.finalRequired(agent)).toBe(9)
+    // The single allowed attempt is gone: promotion did not buy a second one.
+    expect(router.reserve(agent, 'track', 'second-cycle', 3, budget)).toBeUndefined()
+  })
+
+  it('runs a plan pre-review and then a classify+compare cycle under the shipped two-attempt default', () => {
+    const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
+    const budget = { ...policy, maxRoutePerTask: 2, maxModelCallsPerTask: 96, minFinalModelCalls: 6 }
+    const plan = router.reserve(agent, 'plan_review', 'plan', 1, budget)!
+    expect(router.commit(agent, plan)).toBe(true)
+    const classification = router.reserve(agent, 'semantic', 'semantic', 1, budget)!
+    expect(router.promote(agent, classification, 'compare', 'compare', 6, budget)).toBe(true)
+    expect(router.commit(agent, classification, 9)).toBe(true)
+    // Both attempts are now spent, so no third cycle exists — the plan's own acceptance
+    // must fall through to the final gate instead of expecting more stage budget.
+    expect(router.reserve(agent, 'track', 'track', 3, budget)).toBeUndefined()
+  })
+
+  it('leaves the second attempt for a genuine second cycle', () => {
+    const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
+    const budget = { ...policy, maxRoutePerTask: 2, maxModelCallsPerTask: 96, minFinalModelCalls: 6 }
+    const classification = router.reserve(agent, 'semantic', 'semantic', 1, budget)!
+    expect(router.promote(agent, classification, 'compare', 'compare', 6, budget)).toBe(true)
+    expect(router.commit(agent, classification, 9)).toBe(true)
+    // classify+compare used one cycle; an independent track still gets the remaining one.
+    const track = router.reserve(agent, 'track', 'track', 3, budget)
+    expect(track).toBeDefined()
+    expect(track!.attempt).toBe(2)
+  })
+
+  it('consumes the attempt even when the classification ends without executing', () => {
+    const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
+    const budget = { ...policy, maxRoutePerTask: 1, maxModelCallsPerTask: 96, minFinalModelCalls: 6 }
+    const classification = router.reserve(agent, 'semantic', 'semantic', 1, budget)!
+    // kind=none / low confidence / invalid references all commit the cycle without executing.
+    expect(router.commit(agent, classification)).toBe(true)
+    expect(router.reserve(agent, 'track', 'track', 3, budget)).toBeUndefined()
+  })
+
+  it('refuses a promotion that would spend the reserved final-acceptance quota', () => {
+    const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
+    // 1 classification call + execution + 6 reserved for the final gate must fit 20.
+    const exact = { ...policy, maxRoutePerTask: 2, maxModelCallsPerTask: 20, minFinalModelCalls: 6 }
+    const fits = router.reserve(agent, 'semantic', 's-fit', 1, exact)!
+    expect(router.promote(agent, fits, 'compare', 'c-fit', 13, exact)).toBe(true)
+    expect(fits.expectedCalls).toBe(14)
+
+    const value2 = session(); const other = { id: value2.id, session: value2 }; const router2 = new AutoVerifierRouter()
+    const over = { ...policy, maxRoutePerTask: 2, maxModelCallsPerTask: 20, minFinalModelCalls: 6 }
+    const refused = router2.reserve(other, 'semantic', 's-over', 1, over)!
+    // One call more breaks the floor, and the refusal must not consume or release the cycle.
+    expect(router2.promote(other, refused, 'compare', 'c-over', 14, over)).toBe(false)
+    expect(refused.phase).toBe('semantic')
+    expect(refused.fingerprint).toBe('s-over')
+    expect(router2.commit(other, refused)).toBe(true)
+  })
+
+  it('refuses promotion from outside a held classification cycle', () => {
+    const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
+    const classification = router.reserve(agent, 'semantic', 'semantic', 1, policy)!
+    expect(router.promote(agent, classification, 'compare', 'compare', 6, policy)).toBe(true)
+    // A cycle is promoted once: a second promotion would silently double its cost.
+    expect(router.promote(agent, classification, 'select', 'select', 6, policy)).toBe(false)
+    expect(router.commit(agent, classification, 4)).toBe(true)
+    // A released reservation is no longer promotable.
+    expect(router.promote(agent, classification, 'track', 'track', 3, policy)).toBe(false)
+    // Nor is a fresh reservation belonging to another agent.
+    const other = { id: 'another-agent', session: value }
+    const foreign = router.reserve(agent, 'semantic', 'foreign', 1, policy)!
+    expect(router.promote(other, foreign, 'compare', 'x', 6, policy)).toBe(false)
+  })
+
+  it('refuses to promote a classification whose task is no longer current', () => {
+    const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
+    const classification = router.reserve(agent, 'semantic', 'semantic', 1, policy)!
+    // A new direct user message starts a new task: the old classification must not deliver
+    // a winner into work it never reviewed.
+    value.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'next task' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+    expect(router.promote(agent, classification, 'compare', 'compare', 6, policy)).toBe(false)
+  })
+
+  it('does not promote in manual mode', () => {
+    const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
+    const manual = { ...policy, mode: 'manual' as const }
+    expect(router.reserve(agent, 'semantic', 'semantic', 1, manual)).toBeUndefined()
+  })
+})

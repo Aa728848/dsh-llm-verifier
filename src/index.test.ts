@@ -427,6 +427,33 @@ describe('identical-candidate verdicts', () => {
 })
 
 /**
+ * The optional usage diagnostics must be DECLARED on every tool's stats schema: the host
+ * rejects the whole call with INVALID_TOOL_OUTPUT for an undeclared key, so a partial judge
+ * failure that correctly set one would otherwise turn a usable verdict into a tool error.
+ */
+describe('usage diagnostics in tool outputs', () => {
+  it('declares the optional usage-completeness and channel-fallback stats fields', () => {
+    const definition = assemble().tools.get('verifier_compare')!
+    const statsSchema = definition.output.schema.properties.stats as Record<string, any>
+    expect(statsSchema.properties.usageIncomplete).toBeDefined()
+    expect(statsSchema.properties.channelFallbacks).toBeDefined()
+    // Optional: a normal call reports neither.
+    expect(statsSchema.properties.usageIncomplete.required).toBeUndefined()
+    expect(statsSchema.properties.channelFallbacks.required).toBeUndefined()
+  })
+
+  it('marks a partial generation failure incomplete and still satisfies the output schema', async () => {
+    // Draft 1 dies, drafts 2 and 3 survive: the invocation succeeds, but the failed request
+    // really happened. The REAL return value must carry the flag AND satisfy the schema.
+    const definition = assemble(JUDGE, { stream: scriptedStream(1, [1], []) }).tools.get('verifier_best_of_n')!
+    const result = await definition.execute({ task: 'do the thing' }, exec) as Record<string, any>
+    expect(result.failed).toBe(1)
+    expect(result.stats.usageIncomplete).toBe(true)
+    assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'best_of_n')
+  })
+})
+
+/**
  * The turn-stopping gate is the one place a manual pass would previously be honoured even
  * when it reviewed only an older slice of the task. These drive the REAL registered hook
  * through the assembly seam instead of asserting the pure rule twice.
@@ -518,5 +545,126 @@ describe('automatic gate lifecycle', () => {
     await handlers.get('agent/turn-stopping')!({ agent: agent(workingEvents(6), steered), signal: new AbortController().signal })
     expect(calls).toHaveLength(0)
     expect(steered).toHaveLength(0)
+  })
+})
+
+/**
+ * S01/S05-A through the REGISTERED hooks.
+ *
+ * The router's own counters are not the contract: what matters is that the configured
+ * attempt budget survives a real plan pre-review and that the classification row and the
+ * execution it produced are observable as one cycle.
+ */
+describe('routing-cycle budget through the real hooks', () => {
+  const user = (seq: number, text: string) => ({ type: 'user/message', seq, data: { source: { kind: 'user' }, content: [{ type: 'text', text }] } })
+  const call = (seq: number, id: string, name: string) => ({ type: 'tool/call', seq, data: { turn: 1, step: 1, callId: id, name, arguments: '{}' } })
+  const result = (seq: number, id: string, text: string) => ({ type: 'tool/result', seq, data: { turn: 1, step: 1, message: { source: { callId: id }, content: [{ type: 'text', text }] } } })
+  function agent(events: readonly unknown[], steered: unknown[]) {
+    return {
+      id: 'agent-cycle',
+      session: { header: { id: 'agent-cycle' }, snapshotEvents: () => events, requestHeader: () => ({ config: { provider: 'session-provider', model: 'session-model' } }) },
+      steer(message: unknown) { steered.push(message) },
+    }
+  }
+  /** Two competing subagent results plus a write: enough for the semantic route to classify compare. */
+  const alternatives = [
+    user(0, 'Pick the best implementation and build it'),
+    call(1, 's1', 'subagent'), result(2, 's1', 'frontend analysis'),
+    call(3, 's2', 'subagent'), result(4, 's2', 'backend analysis'),
+    call(5, 'e', 'edit'), result(6, 'e', 'edited the file'),
+  ]
+  /** Plan review, router classification and judge scoring, told apart by their own prompts. */
+  function cycleStream(calls: Array<Record<string, unknown>>) {
+    return (options: { messages: readonly unknown[] }) => {
+      const prompt = promptText(options)
+      calls.push({ prompt })
+      if (prompt.includes('expert independent technical plan verifier')) return textStream('Verdict: A\nSummary: sound plan.')
+      if (prompt.includes('conservative verifier router')) return textStream(JSON.stringify({ kind: 'compare', confidence: 1, reason: 'two alternatives', candidateCallIds: ['s1', 's2'], checkpointSeqs: [] }))
+      return textStream('reasoning\n<score_A> ' + verdictLetter(section(prompt, 'TRAJECTORY_A')) + ' </score_A>\n<score_B> ' + verdictLetter(section(prompt, 'TRAJECTORY_B')) + ' </score_B>')
+    }
+  }
+  const isPlan = (prompt: string) => prompt.includes('expert independent technical plan verifier')
+  const isRouter = (prompt: string) => prompt.includes('conservative verifier router')
+  const isJudge = (prompt: string) => prompt.includes('TRAJECTORY_A')
+
+  it('lets a plan pre-review be followed by a classify+compare cycle under the shipped two attempts', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble({ ...JUDGE, autoRouteMaxPerTask: 2, autoVerifyPlanMode: true }, { stream: cycleStream(calls), sessions: [{ id: 'agent-cycle', createdAt: 1 }] })
+    const steered: unknown[] = []
+    const signal = new AbortController().signal
+    await handlers.get('tools/pre-execute')!({ name: 'exit_plan_mode', arguments: { plan: 'Split the work and verify each part.' }, agent: agent(alternatives, steered), signal }, () => ({ kind: 'allow' }))
+    await handlers.get('agent/turn-stopping')!({ agent: agent(alternatives, steered), signal })
+    const prompts = calls.map(call => String(call.prompt))
+    expect(prompts.filter(isPlan)).toHaveLength(1)
+    expect(prompts.filter(isRouter)).toHaveLength(1)
+    // The compare really executed: six judge calls (three criteria x two rounds).
+    expect(prompts.filter(isJudge)).toHaveLength(6)
+    expect(JSON.stringify(steered)).toContain('Automatic verifier routing: compare')
+  })
+
+  it('falls through to the eligible final gate when the attempt budget is already spent', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble({ ...JUDGE, autoRouteMaxPerTask: 1, autoVerifyPlanMode: true }, { stream: cycleStream(calls), sessions: [{ id: 'agent-cycle', createdAt: 1 }] })
+    const steered: unknown[] = []
+    const signal = new AbortController().signal
+    await handlers.get('tools/pre-execute')!({ name: 'exit_plan_mode', arguments: { plan: 'Split the work.' }, agent: agent(alternatives, steered), signal }, () => ({ kind: 'allow' }))
+    await handlers.get('agent/turn-stopping')!({ agent: agent(alternatives, steered), signal })
+    const prompts = calls.map(call => String(call.prompt))
+    // The plan used the only route attempt, so no classification and no routed compare.
+    expect(prompts.filter(isRouter)).toHaveLength(0)
+    expect(JSON.stringify(steered)).not.toContain('Automatic verifier routing: compare')
+    // Work is still eligible, so the mandatory final acceptance runs.
+    expect(prompts.filter(isJudge).length).toBeGreaterThan(0)
+  })
+
+  it('stores a classification and its promoted execution under one cycle id', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers, rpc } = assemble({ ...JUDGE, autoRouteMaxPerTask: 2 }, { stream: cycleStream(calls), sessions: [{ id: 'agent-cycle', createdAt: 1 }] })
+    const steered: unknown[] = []
+    await handlers.get('agent/turn-stopping')!({ agent: agent(alternatives, steered), signal: new AbortController().signal })
+    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { ok: boolean; value: { recent: Array<{ toolName: string; route?: { cycleId: string; trigger: string; stage: string; destination: string; attempt?: number; reservedCalls?: number } }> } }
+    expect(overview.ok).toBe(true)
+    const routed = overview.value.recent.filter(row => row.route !== undefined)
+    const classification = routed.find(row => row.route!.stage === 'classification')
+    const execution = routed.find(row => row.route!.stage === 'execution')
+    expect(classification).toBeDefined()
+    expect(execution).toBeDefined()
+    expect(execution!.route!.cycleId).toBe(classification!.route!.cycleId)
+    expect(classification!.route!.trigger).toBe('turn-stopping')
+    expect(execution!.route!.destination).toBe('compare')
+    // One cycle, one attempt: the classification call and the six compare calls are one reservation.
+    expect(execution!.route!.attempt).toBe(1)
+    expect(execution!.route!.reservedCalls).toBe(7)
+  })
+
+  it('records a successful classification whose execution the budget refused as exactly that', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    // The classification (1 call) fits with the 6-call final-acceptance floor reserved out of
+    // an 8-call task budget, but its 6-call compare does not (1 + 6 + 6 > 8).
+    const { handlers, rpc } = assemble({ ...JUDGE, autoRouteMaxPerTask: 3, autoMaxModelCallsPerTask: 8 }, { stream: cycleStream(calls), sessions: [{ id: 'agent-cycle', createdAt: 1 }] })
+    const steered: unknown[] = []
+    await handlers.get('agent/turn-stopping')!({ agent: agent(alternatives, steered), signal: new AbortController().signal })
+    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ toolName: string; verdict?: { outcome?: string }; route?: { skipReason?: string; stage?: string } }> } }
+    const skipped = overview.value.recent.find(row => row.toolName === 'verifier_compare' && row.verdict?.outcome === 'classification-only-budget')
+    expect(skipped).toBeDefined()
+    expect(skipped!.route).toMatchObject({ stage: 'skipped', skipReason: 'classification-only-budget' })
+    // It must never be described as a scoreless "none" or as a completed review.
+    expect(JSON.stringify(steered)).not.toContain('Automatic verifier routing: compare')
+  })
+
+  it('classifies one snapshot once even when the stop boundary is reached repeatedly', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const stream = (options: { messages: readonly unknown[] }) => {
+      const prompt = promptText(options)
+      calls.push({ prompt })
+      if (isRouter(prompt)) return textStream(JSON.stringify({ kind: 'none', confidence: 1, reason: 'same subtask', candidateCallIds: [], checkpointSeqs: [] }))
+      return textStream('reasoning\n<score_A> A </score_A>\n<score_B> T </score_B>')
+    }
+    const { handlers } = assemble(JUDGE, { stream, sessions: [{ id: 'agent-cycle', createdAt: 1 }] })
+    const events = [user(0, 'Do it'), call(1, 's1', 'subagent'), result(2, 's1', 'analysis'), call(3, 'e', 'edit'), result(4, 'e', 'edited')]
+    const handle = handlers.get('agent/turn-stopping')!
+    await handle({ agent: agent(events, []), signal: new AbortController().signal })
+    await handle({ agent: agent(events, []), signal: new AbortController().signal })
+    expect(calls.map(entry => String(entry.prompt)).filter(isRouter)).toHaveLength(1)
   })
 })
