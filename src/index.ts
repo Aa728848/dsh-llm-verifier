@@ -6,10 +6,10 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import { Config, installVerifierSettings, resolveConfig } from './config.ts'
-import { RequestLimiter, addUsage, callVerifier, callVerifierText, generateCandidate, requestAttempts, type UsageStats, type VerifierClientConfig } from './caller.ts'
+import { RequestLimiter, addUsage, attachUsage, callVerifier, callVerifierText, generateCandidate, requestAttempts, type UsageStats, type VerifierClientConfig } from './caller.ts'
 import { TopLogprobCapabilityCache, resolveCapabilityFile } from './top-logprobs.ts'
 import { ScoreCache, SingleFlight, resolveCacheFile, stableHash, type CachedPairScore } from './cache.ts'
-import { VerifierEngine, normalizeCriteria, partialStats, type JudgeScore, type RunStats } from './engine.ts'
+import { VerifierEngine, mergeRunStats, normalizeCriteria, partialStats, type JudgeScore, type RunStats } from './engine.ts'
 import { loadVerifierImages } from './images.ts'
 import { extractSession, sanitizeVerifierText, sessionEvents } from './session.ts'
 import { CriteriaResolver, type ResolvedCriteria } from './criteria.ts'
@@ -392,6 +392,18 @@ export function apply(ctx: Context, config: Config = {}): void {
     const problem = explicitEvidence([task], explicitItemChars(selected), explicitBudget(selected), 'task')[0]!
     // N independent drafts, in parallel. A failure is captured per draft so the error below can
     // name it; a draft that fails is never substituted with another one.
+    // Accumulated from the first generation call onward, so a failure in ANY phase (a draft, the
+    // tournament, the baseline comparison) carries everything already spent instead of zero.
+    const generation = emptyRunStats()
+    let unknownDrafts = 0
+    const finishGeneration = (): RunStats => {
+      generation.estimatedCostUsd = ((generation.inputTokens + generation.cachedInputTokens) * selected.estimatedInputUsdPerMillion + generation.outputTokens * selected.estimatedOutputUsdPerMillion) / 1_000_000
+      return generation
+    }
+    const failWithUsage = (error: Error): never => {
+      attachUsage(error, finishGeneration())
+      throw error
+    }
     const attempts = await Promise.all(Array.from({ length: count }, async (_unused, index) => {
       const prompt = buildGenerationPrompt(problem, index, count)
       try {
@@ -399,39 +411,57 @@ export function apply(ctx: Context, config: Config = {}): void {
         trace?.({ label: 'draft ' + (index + 1), channel: completion.scoringMode, prompt, output: completion.text })
         return { ok: true as const, text: completion.text, usage: completion.usage, truncated: completion.truncated }
       } catch (error) {
-        return { ok: false as const, error: error instanceof Error ? error.message : String(error) }
+        // Carry the error OBJECT (not just its message): a failed draft may already have paid for
+        // a response, and that usage rides on the error.
+        return { ok: false as const, message: error instanceof Error ? error.message : String(error), billed: partialStats(error) }
       }
     }))
     const survivors: Array<{ attempt: number; text: string; usage: UsageStats; truncated: boolean }> = []
     const failures: string[] = []
     attempts.forEach((attempt, index) => {
-      if (attempt.ok) survivors.push({ attempt: index + 1, text: attempt.text, usage: attempt.usage, truncated: attempt.truncated })
-      else failures.push('draft ' + (index + 1) + ': ' + attempt.error)
+      if (attempt.ok) {
+        survivors.push({ attempt: index + 1, text: attempt.text, usage: attempt.usage, truncated: attempt.truncated })
+        addUsage(generation, attempt.usage)
+      } else {
+        failures.push('draft ' + (index + 1) + ': ' + attempt.message)
+        // A draft whose tokens never came back makes the total a floor, not a measurement.
+        if (attempt.billed === undefined) unknownDrafts += 1
+        else mergeRunStats(generation, attempt.billed)
+      }
     })
-    if (survivors.length < MIN_BEST_OF_N) throw new Error('llm-verifier: best-of-n produced ' + survivors.length + ' usable draft(s) out of ' + count + '; at least ' + MIN_BEST_OF_N + ' are required to choose between them' + (failures.length === 0 ? '' : ' — ' + failures.join('; ')))
-    const ranked = await verifier.select({ problem, candidates: survivors.map(survivor => survivor.text), criteria: rubric.criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats: rounds, pivots: Math.min(2, survivors.length), seed: 0, ...(trace ? { trace } : {}) }, signal)
+    if (survivors.length < MIN_BEST_OF_N) failWithUsage(new Error('llm-verifier: best-of-n produced ' + survivors.length + ' usable draft(s) out of ' + count + '; at least ' + MIN_BEST_OF_N + ' are required to choose between them' + (failures.length === 0 ? '' : ' — ' + failures.join('; '))))
+    let ranked: Awaited<ReturnType<typeof verifier.select>>
+    try {
+      ranked = await verifier.select({ problem, candidates: survivors.map(survivor => survivor.text), criteria: rubric.criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats: rounds, pivots: Math.min(2, survivors.length), seed: 0, ...(trace ? { trace } : {}) }, signal)
+    } catch (error) {
+      // The drafts are already paid for; a tournament failure must not hide them.
+      mergeRunStats(generation, partialStats(error))
+      attachUsage(error, finishGeneration())
+      throw error
+    }
+    mergeRunStats(generation, ranked.stats)
     // The absolute, gate-comparable measurement. Same fixed baseline, same threshold rule as the
     // automatic final acceptance, so "passes" here means the same thing it means at the gate.
     // The label prefix keeps the snapshot readable: this compare reuses the same criteria as the
     // tournament above, so without it two different comparisons share one set of labels.
-    const compared = await verifier.compare({ problem, candidateA: ranked.best, candidateB: EMPTY_WORK_BASELINE, criteria: rubric.criteria, traceLabelPrefix: 'baseline: ', ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats: rounds, ...(trace ? { trace } : {}) }, signal)
+    let compared: Awaited<ReturnType<typeof verifier.compare>>
+    try {
+      compared = await verifier.compare({ problem, candidateA: ranked.best, candidateB: EMPTY_WORK_BASELINE, criteria: rubric.criteria, traceLabelPrefix: 'baseline: ', ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats: rounds, ...(trace ? { trace } : {}) }, signal)
+    } catch (error) {
+      // Baseline scoring failed: keep the generation AND tournament usage that preceded it.
+      mergeRunStats(generation, partialStats(error))
+      attachUsage(error, finishGeneration())
+      throw error
+    }
+    mergeRunStats(generation, compared.stats)
     const criteria: AcceptanceCriterion[] = compared.criteria.map(row => ({ id: row.id, name: row.name, score: row.scoreA }))
     const threshold = selected.autoVerifyThreshold
     const passesThreshold = sessionAccepted({ score: compared.scoreA, winner: compared.winner, criteria }, threshold)
     // One cost line for the whole invocation, generation included: the drafts are real tokens the
     // operator paid for even though no judge scored them. Their price is estimated with the
     // configured verifier table (the only one the plugin has), which the README states.
-    const stats: RunStats = { ...ranked.stats }
-    addUsage(stats, compared.stats)
-    stats.cacheHits += compared.stats.cacheHits
-    stats.cacheMisses += compared.stats.cacheMisses
-    stats.topLogprobScores += compared.stats.topLogprobScores
-    stats.explicitTagScores += compared.stats.explicitTagScores
-    for (const survivor of survivors) addUsage(stats, survivor.usage)
-    // A failed draft made a real request whose usage never came back. Its tokens are unknown,
-    // so the total is marked incomplete rather than presented as a complete measurement.
-    if (failures.length > 0) stats.usageIncomplete = true
-    stats.estimatedCostUsd = ((stats.inputTokens + stats.cachedInputTokens) * selected.estimatedInputUsdPerMillion + stats.outputTokens * selected.estimatedOutputUsdPerMillion) / 1_000_000
+    const stats = finishGeneration()
+    if (unknownDrafts > 0) stats.usageIncomplete = true
     const result = {
       best: ranked.best,
       index: ranked.index,

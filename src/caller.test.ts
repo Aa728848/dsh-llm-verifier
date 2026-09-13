@@ -114,6 +114,56 @@ describe('automatic verifier scoring', () => {
     expect(requestAttempts(error)).toBe(0)
   })
 
+  it('gives each cancelled call its own error so accumulators cannot collide', async () => {
+    // Concurrent requests share one signal.reason. Annotating and rethrowing that shared object
+    // let the engine attach several accumulators to it and merge them repeatedly.
+    const controller = new AbortController()
+    const cfg = config(async function* (options: any) {
+      await new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }))
+      yield* streamOf(chunks())
+    }, vi.fn(), ctx(), { timeoutMs: 5_000 })
+    const first = callVerifier(cfg, 'a', controller.signal).catch(reason => reason)
+    const second = callVerifier(cfg, 'b', controller.signal).catch(reason => reason)
+    await new Promise(resolve => setTimeout(resolve, 1))
+    controller.abort(new Error('shared cancel'))
+    const [firstError, secondError] = await Promise.all([first, second])
+    expect(firstError).not.toBe(secondError)
+    expect(firstError.message).toBe('shared cancel')
+    expect(secondError.message).toBe('shared cancel')
+    expect(requestAttempts(firstError)).toBe(1)
+    expect(requestAttempts(secondError)).toBe(1)
+  })
+
+  it('counts the attempts already made when cancelled while waiting to retry', async () => {
+    const controller = new AbortController()
+    const cfg = config(async function* () { throw new Error('rate limited upstream') }, vi.fn(), ctx(), { maxRetries: 3, retryBaseDelayMs: 5_000 })
+    const pending = callVerifier(cfg, 'prompt', controller.signal).catch(reason => reason)
+    await new Promise(resolve => setTimeout(resolve, 2))
+    controller.abort(new Error('cancelled during backoff'))
+    const error = await pending
+    expect(requestAttempts(error)).toBe(1)
+  })
+
+  it('keeps the billed usage of a failed attempt when a later one succeeds', async () => {
+    let attempt = 0
+    const cfg = config(async function* () {
+      attempt += 1
+      if (attempt === 1) {
+        // A response that was billed, then failed with a retryable error.
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'partial' }
+        yield { type: 'usage', usage: { inputTokens: 7, cacheReadTokens: 3, outputTokens: 4 } }
+        yield { type: 'finish', reason: { kind: 'error', failure: { message: 'rate limited upstream' } } }
+        return
+      }
+      yield* streamOf(chunks())
+    }, vi.fn(), ctx(), { maxRetries: 2, retryBaseDelayMs: 1 })
+    const result = await callVerifier(cfg, 'prompt')
+    // 7 input tokens from the failed attempt plus 7 from the successful one.
+    expect(result.usage.inputTokens).toBe(14)
+    expect(result.usage.usageIncomplete).toBeUndefined()
+  })
+
   it('keeps the attempt count when a request is cancelled while it runs', async () => {
     const controller = new AbortController()
     const cfg = config(async function* (options: any) {

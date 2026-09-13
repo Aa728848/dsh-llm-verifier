@@ -150,11 +150,41 @@ const RETRYABLE_MESSAGE = /rate|quota|timeout|timed out|temporar|network|fetch|s
  * @param run - one attempt; receives its own deadline signal and 1-based attempt number.
  * @returns The first successful completion.
  */
+function attachAttempts(error: unknown, attempt: number): void {
+  if (typeof error === 'object' && error !== null) (error as { [REQUEST_ATTEMPTS]?: number })[REQUEST_ATTEMPTS] = attempt
+}
+
+/**
+ * A fresh error for one aborted call.
+ *
+ * Never annotate and rethrow the shared `signal.reason`: several concurrent requests share it,
+ * and the engine attaches its accumulator to the thrown error, so one object carries several
+ * accumulators and they get merged repeatedly. The wrapper preserves the message and name.
+ */
+function abortFailure(reason: unknown, attempt: number): Error {
+  const source = reason instanceof Error ? reason : new Error(reason === undefined ? 'llm-verifier: request aborted' : String(reason))
+  const error = new Error(source.message)
+  error.name = source.name
+  attachAttempts(error, attempt)
+  return error
+}
+
+/** Token-only addition: call/attempt counters already describe the logical request. */
+function addTokens(target: Pick<UsageStats, 'inputTokens' | 'cachedInputTokens' | 'outputTokens' | 'reasoningTokens'>, source: Pick<UsageStats, 'inputTokens' | 'cachedInputTokens' | 'outputTokens' | 'reasoningTokens'>): void {
+  target.inputTokens += source.inputTokens
+  target.cachedInputTokens += source.cachedInputTokens
+  target.outputTokens += source.outputTokens
+  target.reasoningTokens += source.reasoningTokens
+}
+
 async function retrying<T>(config: VerifierClientConfig, signal: AbortSignal | undefined, run: (signal: AbortSignal, attempt: number) => Promise<T>): Promise<T> {
   let attempt = 0
-  let failedAttempts = 0
+  // Tokens an earlier attempt already paid for but never delivered a usable result. They are
+  // real cost, so a later successful attempt inherits them instead of discarding them.
+  const carried = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningTokens: 0 }
+  let unknownFailure = false
   while (true) {
-    if (signal?.aborted) throw signal.reason
+    if (signal?.aborted) throw abortFailure(signal.reason, attempt)
     attempt += 1
     const controller = new AbortController()
     let timedOut = false
@@ -163,20 +193,17 @@ async function retrying<T>(config: VerifierClientConfig, signal: AbortSignal | u
     signal?.addEventListener('abort', abort, { once: true })
     try {
       const value = await run(controller.signal, attempt)
-      // An earlier attempt burned tokens whose usage never came back, so the successful
-      // attempt's usage is a floor: flag the call instead of presenting it as complete.
-      if (failedAttempts > 0 && typeof value === 'object' && value !== null) {
+      if (typeof value === 'object' && value !== null) {
         const usage = (value as { usage?: UsageStats }).usage
-        if (usage !== undefined) usage.usageIncomplete = true
+        if (usage !== undefined) {
+          addTokens(usage, carried)
+          // Only a failed attempt whose tokens never came back makes the total a floor.
+          if (unknownFailure) usage.usageIncomplete = true
+        }
       }
       return value
     } catch (error) {
-      if (signal?.aborted) {
-        // A cancelled request still made the attempts it made, and the thrown reason is what
-        // the caller inspects for them.
-        if (typeof signal.reason === 'object' && signal.reason !== null) (signal.reason as { [REQUEST_ATTEMPTS]?: number })[REQUEST_ATTEMPTS] = attempt
-        throw signal.reason
-      }
+      if (signal?.aborted) throw abortFailure(signal.reason ?? error, attempt)
       // A deadline abort is retryable even when the adapter wraps the reason in
       // its own error type with an unrelated message.
       const retryable = timedOut || (error instanceof Error && RETRYABLE_MESSAGE.test(error.message))
@@ -184,11 +211,18 @@ async function retrying<T>(config: VerifierClientConfig, signal: AbortSignal | u
         // The tokens this request may have spent before failing are unknowable here; the
         // attempt count is not. Keeping it lets the statistics report "known requests, unknown
         // usage" instead of a confident zero.
-        if (typeof error === 'object' && error !== null) (error as { [REQUEST_ATTEMPTS]?: number })[REQUEST_ATTEMPTS] = attempt
+        attachAttempts(error, attempt)
         throw error
       }
-      failedAttempts += 1
-      await delay(Math.min(30000, config.retryBaseDelayMs * 2 ** (attempt - 1) * (0.8 + Math.random() * 0.4)), signal)
+      const billed = partialUsage<UsageStats>(error)
+      if (billed === undefined) unknownFailure = true
+      else addTokens(carried, billed)
+      try {
+        await delay(Math.min(30000, config.retryBaseDelayMs * 2 ** (attempt - 1) * (0.8 + Math.random() * 0.4)), signal)
+      } catch (waitError) {
+        // Cancelled while waiting to retry: the attempts already made really happened.
+        throw abortFailure(signal?.reason ?? waitError, attempt)
+      }
     } finally {
       clearTimeout(timeout)
       signal?.removeEventListener('abort', abort)
@@ -417,5 +451,5 @@ export async function callVerifierText(config: VerifierClientConfig, prompt: str
   const invoke = () => retrying(config, signal, (attemptSignal, attempt) => callExplicitTag(config, prompt, attemptSignal, undefined, attempt))
   return config.limiter === undefined ? invoke() : config.limiter.run(invoke, signal)
 }
-export function addUsage(target: UsageStats, source: UsageStats): void { for (const key of ['calls', 'attempts', 'retries', 'inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningTokens'] as const) target[key] += source[key] }
+export function addUsage(target: UsageStats, source: UsageStats): void { for (const key of ['calls', 'attempts', 'retries', 'inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningTokens'] as const) target[key] += source[key] ?? 0 }
 export function emptyUsage(): UsageStats { return { calls: 0, attempts: 0, retries: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningTokens: 0 } }

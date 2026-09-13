@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { apply } from './index.ts'
+import { partialStats } from './engine.ts'
 
 const tempDirs: string[] = []
 function tempDir(): string { const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-assembly-')); tempDirs.push(dir); return dir }
@@ -233,6 +234,31 @@ function assertMatchesSchema(value: unknown, schema: Record<string, any>, path: 
 }
 
 describe('verifier_best_of_n', () => {
+  it('records generation usage when too few drafts survive', async () => {
+    const definition = assemble(JUDGE, { stream: scriptedStream(1, [2, 3], []), sessions: [{ id: 'session-1', createdAt: 1 }] }).tools.get('verifier_best_of_n')!
+    const error = await definition.execute({ task: 'do the thing', n: 3 }, exec).catch(reason => reason)
+    const partial = partialStats(error)
+    // Draft 1 was generated and billed; the failure must not erase it.
+    expect(partial?.calls ?? 0).toBeGreaterThanOrEqual(1)
+    expect(partial?.inputTokens ?? 0).toBeGreaterThan(0)
+  })
+
+  it('keeps generation and tournament usage when the baseline comparison fails', async () => {
+    const stream = (options: { messages: readonly unknown[] }) => {
+      const prompt = promptText(options)
+      const draft = /Draft (\d+) of \d+\./.exec(prompt)
+      if (draft !== null) return textStream('draft ' + draft[1] + ' body')
+      if (prompt.includes(BASELINE)) return (async function* () { throw new Error('baseline judge exploded') })()
+      return textStream('reasoning\n<score_A> A </score_A>\n<score_B> T </score_B>')
+    }
+    const definition = assemble(JUDGE, { stream, sessions: [{ id: 'session-1', createdAt: 1 }] }).tools.get('verifier_best_of_n')!
+    const error = await definition.execute({ task: 'do the thing', n: 2 }, exec).catch(reason => reason)
+    const partial = partialStats(error)
+    // Drafts were generated and the tournament ran before the baseline blew up.
+    expect(partial?.calls ?? 0).toBeGreaterThan(0)
+    expect(partial?.inputTokens ?? 0).toBeGreaterThan(0)
+  })
+
   it('registers a gate-shaped output schema', () => {
     const definition = assemble().tools.get('verifier_best_of_n')!
     const properties = definition.output.schema.properties
@@ -466,6 +492,21 @@ describe('usage diagnostics in tool outputs', () => {
     expect(failed?.stats.calls).toBe(2)
     expect(failed?.stats.attempts).toBe(3)
     expect(failed?.stats.usageIncomplete).toBe(true)
+  })
+
+  it('keeps a partial judge failure schema-valid instead of null counters', async () => {
+    // One judge succeeds, one truncates. Merging the failed judge's bare UsageStats used to
+    // produce NaN for the RunStats-only counters, which the host serializes as null and rejects.
+    const stream = (options: { model?: string }) => textStream(
+      '<score_A> A </score_A>\n<score_B> T </score_B>',
+      options.model === 'bad-model' ? 'max-tokens' : 'stop',
+    )
+    const { tools } = assemble({ ...JUDGE, extraJudges: [{ provider: 'bad-provider', model: 'bad-model' }] }, { stream, sessions: [{ id: 'session-1', createdAt: 1 }] })
+    const definition = tools.get('verifier_compare')!
+    const result = await definition.execute({ problem: 'pick', candidate_a: 'AAA', candidate_b: 'BBB' }, exec) as Record<string, any>
+    const roundTripped = JSON.parse(JSON.stringify(result))
+    expect(roundTripped.stats.cacheMisses).not.toBeNull()
+    assertMatchesSchema(roundTripped, definition.output.schema as Record<string, any>, 'compare')
   })
 
   it('marks a partial generation failure incomplete and still satisfies the output schema', async () => {

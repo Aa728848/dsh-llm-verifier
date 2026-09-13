@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { VerifierClientConfig } from './caller.ts'
 import { ScoreCache, SingleFlight, type CachedPairScore } from './cache.ts'
-import { VerifierEngine, orientRoundPairs, partialStats } from './engine.ts'
+import { VerifierEngine, mergeRunStats, orientRoundPairs, partialStats } from './engine.ts'
+import { emptyUsage } from './caller.ts'
 import { pivotRoundPairs } from './core.ts'
 import { TopLogprobCapabilityCache } from './top-logprobs.ts'
 
@@ -502,6 +503,42 @@ describe('VerifierEngine N-judge ensemble', () => {
     expect(partial?.inputTokens).toBe(28)
     expect(partial?.attempts).toBe(5)
     expect(partial?.usageIncomplete).toBe(true)
+  })
+
+  it('keeps every RunStats counter finite when one judge reports no usage', async () => {
+    // One judge succeeds, one answers with an unusable (truncated) response. The failed judge's
+    // carrier is a bare UsageStats; merging it must not turn the RunStats-only counters into NaN
+    // (which serializes to null and the host rejects).
+    function truncated(text: string) { const value = chunks(text); value[value.length - 1] = { type: 'finish', reason: { kind: 'max-tokens' } }; return value }
+    const good = clientConfig({ llm: { stream: () => streamOf(chunks('<score_A> A </score_A>\n<score_B> T </score_B>')) } as any })
+    const bad = clientConfig({ provider: 'openai-bad', model: 'bad-model', llm: { stream: () => streamOf(truncated('<score_A> A </score_A>')) } as any })
+    const engine = new VerifierEngine([good, bad], 4)
+    const result = await engine.compare({ problem: 'task', candidateA: 'AA', candidateB: 'BB', criteria: threeCriteria.slice(0, 1), repeats: 1 })
+    const counters = ['calls', 'attempts', 'retries', 'inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningTokens', 'cacheHits', 'cacheMisses', 'estimatedCostUsd', 'topLogprobScores', 'explicitTagScores'] as const
+    for (const key of counters) expect(Number.isFinite(result.stats[key]), key).toBe(true)
+    // A JSON round-trip is what the host does; NaN becomes null there.
+    const roundTripped = JSON.parse(JSON.stringify(result.stats)) as Record<string, unknown>
+    for (const key of counters) expect(roundTripped[key], key).not.toBeNull()
+    expect(result.stats.usageIncomplete).toBe(true)
+  })
+
+  it('keeps the usage of a progress response that failed to parse', async () => {
+    let call = 0
+    const llm = { stream: () => { call += 1; return streamOf(chunks(call <= 1 ? '<c1> T </c1>\n<c2> T </c2>' : 'no checkpoint tags')) } }
+    const engine = new VerifierEngine(clientConfig({ llm } as any), 1)
+    const error = await engine.track('task', ['a', 'b'], [1, 2], 2).catch(reason => reason)
+    const partial = partialStats(error)
+    // Two billable responses; the second produced no checkpoint but still cost its tokens.
+    expect(partial?.calls).toBe(2)
+    expect(partial?.inputTokens).toBe(14)
+  })
+
+  it('never folds a stats accumulator into itself', () => {
+    const stats = { ...emptyUsage(), cacheHits: 2, cacheMisses: 1, estimatedCostUsd: 0, topLogprobScores: 0, explicitTagScores: 0 }
+    mergeRunStats(stats, stats)
+    expect(stats.calls).toBe(0)
+    expect(stats.cacheHits).toBe(2)
+    expect(stats.cacheMisses).toBe(1)
   })
 
   it('All judges fail: compare rejects with the first error', async () => {

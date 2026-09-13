@@ -90,8 +90,22 @@ export interface SelectResult {
  * successful calls then one failure was persisted as one attempt and zero tokens. Attaching
  * the live stats object to the error keeps every known request and token.
  */
-/** Usage accumulated before an invocation failed; undefined when the error carries none. */
+/**
+ * Usage accumulated before an invocation failed; undefined when the error carries none.
+ *
+ * The carrier may be a bare UsageStats (a caller-level response) or a full RunStats (an engine
+ * accumulator). It is normalized here so no caller can merge a partial shape and turn the
+ * RunStats-only counters into NaN (which the host serializes as null and rejects).
+ */
 export declare function partialStats(error: unknown): RunStats | undefined;
+/**
+ * Fold one nested run's counters into an accumulator (usage, cache, channel, incompleteness).
+ *
+ * Shared with index.ts so a multi-phase tool (best-of-N) accumulates generation, tournament and
+ * baseline usage the same way. Never folds a value into itself, and zero-fills the RunStats-only
+ * counters so a partial source cannot poison the totals with NaN.
+ */
+export declare function mergeRunStats(target: RunStats, source: (UsageStats & Partial<RunStats>) | undefined): void;
 /**
  * Deterministic A/B slot for one pivot-round pair, balanced by construction.
  *
