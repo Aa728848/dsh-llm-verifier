@@ -7,7 +7,7 @@ import {
   topPivots, type Criterion,
 } from './core.ts'
 
-export interface CompareOptions { problem: string; candidateA: string; candidateB: string; criteria?: readonly Criterion[]; groundTruthNote?: string; repeats?: number; images?: readonly VerifierImage[]; trace?: DecisionTrace }
+export interface CompareOptions { problem: string; candidateA: string; candidateB: string; criteria?: readonly Criterion[]; groundTruthNote?: string; repeats?: number; images?: readonly VerifierImage[]; trace?: DecisionTrace; /** Prefix for this comparison's decision-snapshot labels; one invocation that judges twice on the same criteria needs them distinguishable. */ traceLabelPrefix?: string }
 export interface CriterionResult { id: string; name: string; scoreA: number; scoreB: number }
 export interface RunStats extends UsageStats { cacheHits: number; cacheMisses: number; estimatedCostUsd: number; topLogprobScores: number; explicitTagScores: number }
 
@@ -172,7 +172,7 @@ export class VerifierEngine {
       const scoreB = extractScore(completion, '<score_B>')
       // Traced here, not in scoreOne(): a cache hit or a merged in-flight call makes no
       // model call, and a snapshot that showed one anyway would be a fabrication.
-      options.trace?.({ label: criterion.name + ' repeat ' + (repeat + 1), channel: completion.scoringMode, prompt, output: completion.text, score: scoreA })
+      options.trace?.({ label: (options.traceLabelPrefix ?? '') + criterion.name + ' repeat ' + (repeat + 1), channel: completion.scoringMode, prompt, output: completion.text, score: scoreA })
       return { scoreA, scoreB, usage: completion.usage, scoringMode: completion.scoringMode, createdAt: Date.now() }
     }
     const cache = this.cache

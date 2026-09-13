@@ -10,7 +10,8 @@ export interface CompareOptions {
     groundTruthNote?: string;
     repeats?: number;
     images?: readonly VerifierImage[];
-    trace?: DecisionTrace;
+    trace?: DecisionTrace; /** Prefix for this comparison's decision-snapshot labels; one invocation that judges twice on the same criteria needs them distinguishable. */
+    traceLabelPrefix?: string;
 }
 export interface CriterionResult {
     id: string;

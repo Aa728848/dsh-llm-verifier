@@ -144,7 +144,7 @@ task(参数, 经脱敏+单项/总量上限)
 
 已实现：`core.ts`（`EMPTY_WORK_BASELINE` + `buildGenerationPrompt`）、`caller.ts`（`generationClient` / `generateCandidate` / `callTextCompletion`）、`index.ts`（`bestOfN` + `verifier_best_of_n` 注册）、`statistics.ts` / `auto.ts` / `router.ts` / `client.tsx` / `client-i18n.ts` / `decisions.ts`，以及 `caller.test.ts` / `core.test.ts` / `index.test.ts` / `statistics.test.ts` / `client.test.ts` / `decisions.test.ts` 的新用例（`pnpm run verify:release` 绿，317 passed / 2 skipped；含 schema 一致性校验与成本包线回归）。
 
-实施时对计划做了六处调整，都是落地后才暴露的真实约束：
+实施时对计划做了若干处调整，都是落地后才暴露的真实约束：
 
 1. **统计判定走"验收分支"而不是 select 分支**。计划里写的是复用 select 分支，但那会把相对份额（`scores[index]`）渲染成看板上的"分数"，正好是本工具要消除的歧义。改为让 `verifier_best_of_n` 与 `verifier_current_session` 共用 `acceptanceVerdict()`：看板显示"通过 / 未达标 + 分数 / 基线 / 逐项判据"，与门控完全同形。
 2. **`decisions.ts` 的 `MAX_CALLS` 12 → 32，并把"取前 N 条"改成均匀间隔取样**。n=4 的 best-of-N 约 46 次调用，而判官标签排在 `draft N` 之前——按前缀截断会把**每一份草稿都丢掉**，恰好是这个工具最需要留下的东西。同时修正了 per-call 字符分配：原先 80/20 分配在 `perCall` 变小后会被两个下限顶穿，触发安全网按尾部截断（还是丢草稿）。
@@ -152,7 +152,7 @@ task(参数, 经脱敏+单项/总量上限)
 4. **成本表按实测修正**（见 §2.3）。工具描述里的数字同步改了，并有回归测试锁定。
 5. **生成侧「被上限截断」从错误改成结果**。第一次真机端到端验收（长任务、n=3）**三份草稿全部失败**，报的是判官的 `max-tokens` 错误：`callExplicitTag` 把「没写完」当硬错误，这对判官是对的（判决标签可能还没输出），但生成侧照搬就成了「一份都拿不到」。现在 `callTextCompletion(..., tolerateTruncation)` 把两条语义分开：判官仍然 fail closed，草稿保留文本并带 `truncated` 标记、由工具在返回值里列出（判官看得到文本没写完，自会扣分；直接丢弃等于白付一次生成）。
 6. **生成上限 4096 → 16384，且不做「截断后加倍重试」**。真正原因写在返回值的 `stats.reasoningTokens` 里：一次只有两份短草稿的运行，会话模型（`deepseek-official/deepseek-flash`）输出 17254 token，其中 **16363 是推理 token**（约 8k/份）——4096 在答案开始前就被推理吃光。16384 是实测值的约 2 倍，同时是「两份草稿 + 任务」仍留在 24 万字符证据上限内的最大值（再往上，32768/份的草稿对会让单次比较的提示词越过该上限，而这个上限本身就是为不撑爆判官上下文设的）；`maxTokens` 是上限而非预留，加大它对短草稿零成本，所以不需要「失败再重试」那份双倍开销。
-7. **`judges[].calls` 改为覆盖整次调用**（锦标赛 + 基线比较），`ok` 同理。真机输出暴露了不一致：顶层 `calls: 6` 而 `judges[0].calls: 2`——只报锦标赛会低估每个判官的真实工作量。
+7. **`judges[].calls` 改为覆盖整次调用**（锦标赛 + 基线比较），`ok` 同理。真机输出暴露了不一致：顶层 `calls: 6` 而 `judges[0].calls: 2`——只报锦标赛会低估每个判官的真实工作量。同一轮检查还发现决策快照的标签无法区分这两次比较（判据相同 → 标签一字不差，作者本人就因此误读成「判官自相矛盾」），因此 `CompareOptions.traceLabelPrefix` 让基线比较的标签带 `baseline: ` 前缀，拼写与既有路径无关（默认 undefined，标签保持原样）。
 
 ### 9.1 真机验收结果（已跑）
 

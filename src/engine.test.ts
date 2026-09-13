@@ -166,6 +166,18 @@ describe('VerifierEngine cache identity', () => {
     expect(result.index).toBe(0)
     expect(result.pivots).toEqual([])
   })
+  it('prefixes snapshot labels so two comparisons on the same criteria stay distinguishable', async () => {
+    const engine = new VerifierEngine(clientConfig({ llm: { stream: scriptedStream([]) } as any }), 4)
+    const labels: string[] = []
+    const trace = (call: { label: string }) => { labels.push(call.label) }
+    await engine.compare({ problem: 'task', candidateA: 'STRONG', candidateB: 'WEAK', repeats: 1, trace })
+    // Regression: without the prefix, a best-of-N baseline comparison was indistinguishable from
+    // the tournament it followed, and the snapshot read as if the judge had contradicted itself.
+    await engine.compare({ problem: 'task', candidateA: 'STRONG', candidateB: 'WEAK', repeats: 1, trace, traceLabelPrefix: 'baseline: ' })
+    expect(labels.filter(label => label.startsWith('baseline: '))).toHaveLength(3)
+    expect(labels.filter(label => !label.startsWith('baseline: '))).toHaveLength(3)
+  })
+
   it('uses version 6 in scoreOne cache identity with temperature (regression FIX 1)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-engine-v6-'))
     try {
