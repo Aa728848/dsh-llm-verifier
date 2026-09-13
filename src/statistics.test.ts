@@ -44,6 +44,12 @@ describe('StatisticsStore', () => {
     expect(all.totals).toMatchObject({ invocations: 2, successes: 1, failures: 1, calls: 3, attempts: 4, retries: 1, tokens: 185, cacheHits: 1, cacheMisses: 2 })
     expect(all.totals.successRate).toBe(0.5)
     expect(all.totals.averageDurationMs).toBe(500)
+    // Provider prefix cache: 20 of 170 input tokens came from cache. DSH reports cached and
+    // uncached input as DISJOINT counts, so the denominator is their sum (that is also how
+    // tokens() totals them). This is a different quantity from the score-cache hit rate
+    // (1 of 3 lookups) and the two must never be conflated.
+    expect(all.totals.prefixCacheHitRate).toBeCloseTo(20 / 170, 10)
+    expect(all.totals.cacheHitRate).toBeCloseTo(1 / 3, 10)
     expect(all.daily).toHaveLength(1)
     expect(all.daily[0]).toMatchObject({ date: '2026-08-20', invocations: 2, calls: 3, tokens: 185 })
     expect(all.tools.map(row => [row.toolName, row.invocations])).toEqual([['verifier_compare', 1], ['verifier_track', 1]])
@@ -53,6 +59,14 @@ describe('StatisticsStore', () => {
     expect(one.totals.invocations).toBe(1)
     expect(one.recent[0]?.sessionId).toBe('one')
     expect(JSON.parse(await readFile(file, 'utf8')).version).toBe(1)
+  })
+
+  it('reports a zero prefix cache rate for an empty range instead of NaN', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const store = new StatisticsStore(join(root, 'statistics.json'), 100)
+    const empty = await store.overview({ fromMs: 0, toMs: 1 })
+    expect(empty.totals.prefixCacheHitRate).toBe(0)
+    expect(empty.totals.cacheHitRate).toBe(0)
   })
 
   it('serializes concurrent writes and keeps only the configured tail', async () => {
@@ -196,6 +210,9 @@ describe('StatisticsStore', () => {
     expect(summarizeVerdict('verifier_route_classify', { kind: 'none' }, 'semantic', thresholds)).toEqual({ phase: 'semantic', outcome: 'classified' })
     // Select reports the ranked winner's score.
     expect(summarizeVerdict('verifier_select', { index: 1, scores: [0.2, 0.9], ranking: [1, 0] }, 'select', thresholds)).toEqual({ phase: 'select', outcome: 'ranked', score: 0.9 })
+    // A candidate list whose entries were all byte-identical was never judged: say so instead
+    // of reporting index 0's 0.5 as if the tournament had ranked it.
+    expect(summarizeVerdict('verifier_select', { index: 0, scores: [0.5, 0.5], identical: true }, 'select', thresholds)).toEqual({ phase: 'select', outcome: 'identical-candidates' })
     // Track reports the newest checkpoint (not the historical minimum) plus the curve.
     expect(summarizeVerdict('verifier_track', { scores: [0, 0.10526315789473684, 0.7894736842105262] }, 'track', thresholds)).toEqual({
       phase: 'track',
@@ -214,6 +231,8 @@ describe('StatisticsStore', () => {
     expect(summarizeVerdict('verifier_compare', { scoreA: 0.2, scoreB: 0.9, winner: 'B' }, 'compare', thresholds)).toEqual({ phase: 'compare', outcome: 'compared', score: 0.9, scoreB: 0.9, winner: 'B' })
     expect(summarizeVerdict('verifier_compare', { scoreA: 0.9, scoreB: 0.2, winner: 'A' }, 'compare', thresholds)).toEqual({ phase: 'compare', outcome: 'compared', score: 0.9, scoreB: 0.2, winner: 'A' })
     expect(summarizeVerdict('verifier_compare', { scoreA: 0.5, scoreB: 0.5, winner: 'tie' }, 'compare', thresholds)).toEqual({ phase: 'compare', outcome: 'tie', score: 0.5, scoreB: 0.5, winner: 'tie' })
+    // Byte-identical sides: distinguishable from a judged tie, because no call was made.
+    expect(summarizeVerdict('verifier_compare', { scoreA: 0.5, scoreB: 0.5, winner: 'tie', identical: true }, 'compare', thresholds)).toEqual({ phase: 'compare', outcome: 'identical', score: 0.5, scoreB: 0.5, winner: 'tie' })
     // Session acceptance keeps A = the session and B = the empty-work baseline.
     expect(summarizeVerdict('verifier_current_session', { score: 0.4, baselineScore: 0, winner: 'A' }, 'final', thresholds)).toEqual({
       phase: 'final', outcome: 'below-threshold', score: 0.4, baselineScore: 0, winner: 'A', threshold: 0.65,

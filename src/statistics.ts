@@ -53,6 +53,7 @@ export function summarizeVerdict(toolName: VerifierToolName, value: unknown, pha
   const winner = row.winner === 'A' || row.winner === 'B' || row.winner === 'tie' ? row.winner : undefined
   if (toolName === 'verifier_route_classify') return { phase, outcome: 'classified' }
   if (toolName === 'verifier_select') {
+    if (row.identical === true) return { phase, outcome: 'identical-candidates' }
     const index = numberAt('index')
     const best = index === undefined ? undefined : scores[index]
     return { phase, outcome: 'ranked', ...(best !== undefined ? { score: best } : {}) }
@@ -80,7 +81,7 @@ export function summarizeVerdict(toolName: VerifierToolName, value: unknown, pha
     const score = winner === 'B' ? scoreB : scoreA
     return {
       phase,
-      outcome: winner === 'tie' ? 'tie' : 'compared',
+      outcome: row.identical === true ? 'identical' : winner === 'tie' ? 'tie' : 'compared',
       ...(score !== undefined ? { score } : {}),
       ...(scoreB !== undefined ? { scoreB } : {}),
       ...(winner !== undefined ? { winner } : {}),
@@ -186,7 +187,16 @@ export interface StatisticsTotals {
   tokens: number
   cacheHits: number
   cacheMisses: number
+  /** Share of score-cache lookups answered locally (no model call). */
   cacheHitRate: number
+  /**
+   * Share of verifier input tokens served by the PROVIDER's prefix cache.
+   *
+   * A different thing from {@link cacheHitRate}: that one counts local score-cache lookups,
+   * this one counts tokens the backend billed as cache hits. It is the metric a warm-up or
+   * prompt-ordering change moves, and leaving the two merged hid a 30%-hit-rate prefix cache.
+   */
+  prefixCacheHitRate: number
   estimatedCostUsd: number
   topLogprobScores: number
   explicitTagScores: number
@@ -256,7 +266,7 @@ function tokens(stats: RunStats): number { return stats.inputTokens + stats.cach
 function cleanError(value: string | undefined): string | undefined { return value === undefined ? undefined : value.slice(0, 500) }
 
 function blankTotals(): StatisticsTotals {
-  return { invocations: 0, successes: 0, failures: 0, successRate: 0, averageDurationMs: 0, calls: 0, attempts: 0, retries: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningTokens: 0, tokens: 0, cacheHits: 0, cacheMisses: 0, cacheHitRate: 0, estimatedCostUsd: 0, topLogprobScores: 0, explicitTagScores: 0 }
+  return { invocations: 0, successes: 0, failures: 0, successRate: 0, averageDurationMs: 0, calls: 0, attempts: 0, retries: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningTokens: 0, tokens: 0, cacheHits: 0, cacheMisses: 0, cacheHitRate: 0, prefixCacheHitRate: 0, estimatedCostUsd: 0, topLogprobScores: 0, explicitTagScores: 0 }
 }
 
 function addRecord(target: StatisticsTotals, record: InvocationRecord): void {
@@ -283,6 +293,7 @@ function finishTotals(target: StatisticsTotals): StatisticsTotals {
   target.averageDurationMs = target.invocations > 0 ? target.averageDurationMs / target.invocations : 0
   target.successRate = ratio(target.successes, target.invocations)
   target.cacheHitRate = ratio(target.cacheHits, target.cacheHits + target.cacheMisses)
+  target.prefixCacheHitRate = ratio(target.cachedInputTokens, target.inputTokens + target.cachedInputTokens)
   return target
 }
 
@@ -381,6 +392,7 @@ export function mergeStatisticsOverviews(overviews: readonly StatisticsOverview[
   totals.averageDurationMs = ratio(weightedDuration, totals.invocations)
   totals.successRate = ratio(totals.successes, totals.invocations)
   totals.cacheHitRate = ratio(totals.cacheHits, totals.cacheHits + totals.cacheMisses)
+  totals.prefixCacheHitRate = ratio(totals.cachedInputTokens, totals.inputTokens + totals.cachedInputTokens)
   const limit = Math.min(200, Math.max(1, Math.trunc(query.recentLimit ?? 40)))
   return {
     generatedAt: Date.now(), fromMs: query.fromMs, toMs: query.toMs,

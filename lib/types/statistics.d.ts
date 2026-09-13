@@ -99,7 +99,16 @@ export interface StatisticsTotals {
     tokens: number;
     cacheHits: number;
     cacheMisses: number;
+    /** Share of score-cache lookups answered locally (no model call). */
     cacheHitRate: number;
+    /**
+     * Share of verifier input tokens served by the PROVIDER's prefix cache.
+     *
+     * A different thing from {@link cacheHitRate}: that one counts local score-cache lookups,
+     * this one counts tokens the backend billed as cache hits. It is the metric a warm-up or
+     * prompt-ordering change moves, and leaving the two merged hid a 30%-hit-rate prefix cache.
+     */
+    prefixCacheHitRate: number;
     estimatedCostUsd: number;
     topLogprobScores: number;
     explicitTagScores: number;

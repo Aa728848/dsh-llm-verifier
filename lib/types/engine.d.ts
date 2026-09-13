@@ -47,6 +47,8 @@ export interface CompareResult {
     stats: RunStats;
     judges: JudgeScore[];
     agreement: number;
+    /** Set when both sides were byte-identical: no model call was made and both sides score 0.5. */
+    identical?: true;
 }
 export interface SelectOptions {
     problem: string;
@@ -69,6 +71,8 @@ export interface SelectResult {
     calls: number;
     stats: RunStats;
     judges: JudgeScore[];
+    /** Set when every candidate was byte-identical: no pair was judged and every score is 0.5. */
+    identical?: true;
 }
 /**
  * Deterministic A/B slot for one pivot-round pair, balanced by construction.
@@ -107,6 +111,17 @@ export declare class VerifierEngine {
     private finishStats;
     private scoreOne;
     private mapLimited;
+    /**
+     * Verdict for a comparison whose two sides are byte-identical.
+     *
+     * Deliberately uninformative: no model call is made, both sides score 0.5 and the winner is
+     * a tie. Judging identical text would ask the model to break a tie it cannot break, and any
+     * confident score would let the acceptance gate pass a session indistinguishable from the
+     * empty-work baseline. Callers that need "these are the same" read {@link CompareResult.identical}.
+     * @param criteria - the criteria the comparison would have scored.
+     * @returns A tie carrying 0.5 per criterion, zero calls and one agreeing judge per client.
+     */
+    private informationalTie;
     compare(options: CompareOptions, signal?: AbortSignal): Promise<CompareResult>;
     private scorePairs;
     track(problem: string, steps: readonly string[], checkpoints: readonly number[], repeats?: number, signal?: AbortSignal, images?: readonly VerifierImage[], trace?: DecisionTrace): Promise<{
@@ -116,6 +131,29 @@ export declare class VerifierEngine {
         stats: RunStats;
         judges: JudgeScore[];
     }>;
+    /**
+     * Verdict for a candidate list whose entries are all byte-identical.
+     *
+     * Ranking identical text is a coin flip, so the result is deliberately uninformative
+     * (0.5 everywhere) rather than a confident 1.0. No model call is made. This is the
+     * cost-saving half of upstream's majority-vote shortcut without its semantics: we never
+     * declare an unjudged candidate the winner, we only decline to spend calls on a tie.
+     * @param candidates - the identical candidates (length >= 2).
+     * @returns A ranking with every score at 0.5 and zero calls.
+     */
+    private identicalCandidates;
+    /**
+     * Judge only the DISTINCT candidates, then expand the verdict back onto the caller's list.
+     *
+     * Duplicated candidates are the common case when an agent pastes several drafts of the same
+     * artifact: every pair that touches a duplicate is a comparison that cannot change the
+     * ranking but still costs model calls. The tournament runs on the distinct list and every
+     * duplicate inherits its representative's score, so no index, score or ranking entry shifts.
+     * @param options - the original select options, duplicates included.
+     * @param signal - caller's abort signal.
+     * @returns The tournament verdict mapped back onto the original candidate list.
+     */
+    private selectUnique;
     select(options: SelectOptions, signal?: AbortSignal): Promise<SelectResult>;
 }
 export declare function normalizeCriteria(input: unknown): Criterion[];

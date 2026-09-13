@@ -143,6 +143,8 @@ export declare const zh: {
     'stats.verdict.criteria': string;
     'metric.cacheHitRate': string;
     'metric.cacheHitNote': string;
+    'metric.prefixCacheHitRate': string;
+    'metric.prefixCacheHitNote': string;
     'metric.tokens': string;
     'metric.tokensNote': string;
     'metric.avgModelCalls': string;
@@ -341,6 +343,8 @@ export declare const dictionaries: {
         'stats.verdict.criteria': string;
         'metric.cacheHitRate': string;
         'metric.cacheHitNote': string;
+        'metric.prefixCacheHitRate': string;
+        'metric.prefixCacheHitNote': string;
         'metric.tokens': string;
         'metric.tokensNote': string;
         'metric.avgModelCalls': string;
@@ -536,6 +540,8 @@ export declare const dictionaries: {
         'stats.verdict.criteria': string;
         'metric.cacheHitRate': string;
         'metric.cacheHitNote': string;
+        'metric.prefixCacheHitRate': string;
+        'metric.prefixCacheHitNote': string;
         'metric.tokens': string;
         'metric.tokensNote': string;
         'metric.avgModelCalls': string;

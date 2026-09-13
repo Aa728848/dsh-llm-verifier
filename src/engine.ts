@@ -33,6 +33,8 @@ export interface CompareResult {
   stats: RunStats
   judges: JudgeScore[]
   agreement: number
+  /** Set when both sides were byte-identical: no model call was made and both sides score 0.5. */
+  identical?: true
 }
 
 export interface SelectOptions { problem: string; candidates: readonly string[]; criteria?: readonly Criterion[]; groundTruthNote?: string; repeats?: number; pivots?: number; seed?: number; images?: readonly VerifierImage[]; trace?: DecisionTrace }
@@ -47,6 +49,8 @@ export interface SelectResult {
   calls: number
   stats: RunStats
   judges: JudgeScore[]
+  /** Set when every candidate was byte-identical: no pair was judged and every score is 0.5. */
+  identical?: true
 }
 
 function average(values: readonly number[]): number { return values.reduce((sum, value) => sum + value, 0) / (values.length || 1) }
@@ -59,6 +63,8 @@ function median(values: readonly number[]): number {
 }
 
 function blankStats(): RunStats { return { ...emptyUsage(), cacheHits: 0, cacheMisses: 0, estimatedCostUsd: 0, topLogprobScores: 0, explicitTagScores: 0 } }
+/** Candidate indices best-first by score, ties broken by index. */
+function rankByScore(scores: readonly number[]): number[] { return Array.from({ length: scores.length }, (_, index) => index).sort((a, b) => (scores[b] ?? 0) - (scores[a] ?? 0) || a - b) }
 function unorderedPair(a: number, b: number): string { return a < b ? a + ',' + b : b + ',' + a }
 
 /**
@@ -187,12 +193,48 @@ export class VerifierEngine {
     await Promise.all(runners); return results
   }
 
+  /**
+   * Verdict for a comparison whose two sides are byte-identical.
+   *
+   * Deliberately uninformative: no model call is made, both sides score 0.5 and the winner is
+   * a tie. Judging identical text would ask the model to break a tie it cannot break, and any
+   * confident score would let the acceptance gate pass a session indistinguishable from the
+   * empty-work baseline. Callers that need "these are the same" read {@link CompareResult.identical}.
+   * @param criteria - the criteria the comparison would have scored.
+   * @returns A tie carrying 0.5 per criterion, zero calls and one agreeing judge per client.
+   */
+  private informationalTie(criteria: readonly Criterion[]): CompareResult {
+    const judges: JudgeScore[] = this.clients.map(client => ({ provider: client.provider, model: client.model, label: judgeLabel(client), ok: true, calls: 0, scoreA: 0.5, scoreB: 0.5, winner: 'tie' as const }))
+    return {
+      scoreA: 0.5,
+      scoreB: 0.5,
+      winner: 'tie',
+      criteria: criteria.map(criterion => ({ id: criterion.id, name: criterion.name, scoreA: 0.5, scoreB: 0.5 })),
+      calls: 0,
+      stats: this.finishStats(blankStats()),
+      judges,
+      agreement: 1,
+      identical: true,
+    }
+  }
+
   async compare(options: CompareOptions, signal?: AbortSignal): Promise<CompareResult> {
     const criteria = options.criteria?.length ? options.criteria : DEFAULT_CRITERIA
+    if (options.candidateA === options.candidateB) return this.informationalTie(criteria)
     const repeats = options.repeats ?? 2
     const jobs = criteria.flatMap(criterion => Array.from({ length: repeats }, (_, repeat) => ({ criterion, repeat })))
-    // Prefix warm-up: one criterion/repeat runs first, then the shared-prefix fan-out.
-    const warm = jobs.slice(0, 1); const rest = jobs.slice(1)
+    // Prefix warm-up: one job per DISTINCT prompt prefix runs first, then the rest fan out.
+    // Only the A/B slot order changes the prompt prefix (the criterion sits at the tail, see
+    // core.buildPairwisePrompt) and odd repeats swap the slots, so each orientation needs its own
+    // warm call: warming a single job left every swapped-slot call cold, which is where half the
+    // input tokens of a session acceptance went. The warm jobs are calls that had to happen anyway.
+    const warm: typeof jobs = []; const rest: typeof jobs = []
+    const warmedOrientations = new Set<number>()
+    for (const job of jobs) {
+      const orientation = job.repeat % 2
+      if (warmedOrientations.has(orientation)) rest.push(job)
+      else { warmedOrientations.add(orientation); warm.push(job) }
+    }
     const run = async (batch: typeof jobs) => this.mapLimited(batch, async ({ criterion, repeat }) => {
       const swapped = repeat % 2 === 1
       const candA = swapped ? options.candidateB : options.candidateA
@@ -390,7 +432,7 @@ export class VerifierEngine {
     const judgePerRepeatScores: Array<number[][]> = Array.from({ length: this.clients.length }, () => [])
 
     const repeatIndices = Array.from({ length: repeats }, (_, index) => index)
-    const runs = await this.mapLimited(repeatIndices, async (repeatIndex) => {
+    const runRepeat = async (repeatIndex: number) => {
       const judgeResults = await Promise.all(
         this.clients.map(async (client, k) => {
           try {
@@ -438,7 +480,13 @@ export class VerifierEngine {
       }
 
       return checkpoints.map((_, cIndex) => median(successful.map(r => r.scores[cIndex]!)))
-    })
+    }
+    // Every repeat sends the SAME prompt, so the first repeat warms the provider prefix cache for
+    // the others; fanning all repeats out at once left every call cold. The repeat count is
+    // unchanged — only the order, and therefore the cache hits, change.
+    const runs: number[][] = []
+    if (repeatIndices.length > 0) runs.push(...await this.mapLimited(repeatIndices.slice(0, 1), runRepeat))
+    runs.push(...await this.mapLimited(repeatIndices.slice(1), runRepeat))
 
     const scores = checkpoints.map((_, index) => average(runs.map(run => run[index]!)))
     const judges: JudgeScore[] = this.clients.map((client, k) => {
@@ -468,8 +516,79 @@ export class VerifierEngine {
     return { scores, perRepeat: runs, calls: stats.calls, stats: this.finishStats(stats), judges }
   }
 
+  /**
+   * Verdict for a candidate list whose entries are all byte-identical.
+   *
+   * Ranking identical text is a coin flip, so the result is deliberately uninformative
+   * (0.5 everywhere) rather than a confident 1.0. No model call is made. This is the
+   * cost-saving half of upstream's majority-vote shortcut without its semantics: we never
+   * declare an unjudged candidate the winner, we only decline to spend calls on a tie.
+   * @param candidates - the identical candidates (length >= 2).
+   * @returns A ranking with every score at 0.5 and zero calls.
+   */
+  private identicalCandidates(candidates: readonly string[]): SelectResult {
+    const scores = candidates.map(() => 0.5)
+    const ranking = candidates.map((_, index) => index)
+    return {
+      index: 0,
+      best: candidates[0]!,
+      scores,
+      ranking,
+      pivots: [],
+      comparisons: 0,
+      calls: 0,
+      stats: blankStats(),
+      judges: this.clients.map(client => ({ provider: client.provider, model: client.model, label: judgeLabel(client), ok: true, calls: 0, scores: [...scores], ranking: [...ranking] })),
+      identical: true,
+    }
+  }
+
+  /**
+   * Judge only the DISTINCT candidates, then expand the verdict back onto the caller's list.
+   *
+   * Duplicated candidates are the common case when an agent pastes several drafts of the same
+   * artifact: every pair that touches a duplicate is a comparison that cannot change the
+   * ranking but still costs model calls. The tournament runs on the distinct list and every
+   * duplicate inherits its representative's score, so no index, score or ranking entry shifts.
+   * @param options - the original select options, duplicates included.
+   * @param signal - caller's abort signal.
+   * @returns The tournament verdict mapped back onto the original candidate list.
+   */
+  private async selectUnique(options: SelectOptions, signal?: AbortSignal): Promise<SelectResult> {
+    const unique: string[] = []
+    const representative: number[] = []
+    const seen = new Map<string, number>()
+    for (const candidate of options.candidates) {
+      let index = seen.get(candidate)
+      if (index === undefined) { index = unique.length; unique.push(candidate); seen.set(candidate, index) }
+      representative.push(index)
+    }
+    const result = await this.select({ ...options, candidates: unique }, signal)
+    const expand = (values: readonly number[]): number[] => representative.map(index => values[index] ?? 0)
+    const scores = expand(result.scores)
+    const judges = result.judges.map(judge => {
+      if (!judge.ok || judge.scores === undefined) return judge
+      const judgeScores = expand(judge.scores)
+      return { ...judge, scores: judgeScores, ...(judge.ranking === undefined ? {} : { ranking: rankByScore(judgeScores) }) }
+    })
+    return {
+      index: options.candidates.indexOf(result.best),
+      best: result.best,
+      scores,
+      ranking: rankByScore(scores),
+      pivots: result.pivots,
+      comparisons: result.comparisons,
+      calls: result.calls,
+      stats: result.stats,
+      judges,
+    }
+  }
+
   async select(options: SelectOptions, signal?: AbortSignal): Promise<SelectResult> {
     if (!options.candidates.length) throw new Error('llm-verifier: candidates must not be empty')
+    if (options.candidates.some(candidate => candidate.trim() === '')) throw new Error('llm-verifier: candidates must not contain blank entries')
+    if (options.candidates.length > 1 && options.candidates.every(candidate => candidate === options.candidates[0])) return this.identicalCandidates(options.candidates)
+    if (options.candidates.length > 1 && new Set(options.candidates).size !== options.candidates.length) return this.selectUnique(options, signal)
     if (options.candidates.length === 1) {
       const judges: JudgeScore[] = this.clients.map(client => ({
         provider: client.provider,

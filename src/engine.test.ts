@@ -599,3 +599,122 @@ describe('VerifierEngine N-judge ensemble', () => {
     await expect(engine.track('Test problem', ['step 1'], [1], 1)).rejects.toThrow('track failed completely 1')
   })
 })
+
+/** Records start/end of every model call, tagged with the A/B slot orientation of its prompt. */
+function recordingStream(events: string[]): (options: any) => AsyncIterable<any[]> {
+  return function (options: any) {
+    const message = options.messages[0]
+    const prompt = typeof message.content === 'string' ? message.content : message.content.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('')
+    const orientation = prompt.indexOf('ALPHA') < prompt.indexOf('BRAVO') ? 'AB' : 'BA'
+    return (async function* () {
+      events.push('start:' + orientation)
+      await new Promise(resolve => setTimeout(resolve, 1))
+      events.push('end:' + orientation)
+      yield* streamOf(chunks('<score_A> A </score_A>\n<score_B> T </score_B>'))
+    })()
+  }
+}
+
+/** Drops any call that is not already covered by the score cache. */
+function failIfCalled(): (options: any) => AsyncIterable<any[]> {
+  return function () {
+    throw new Error('unexpected model call')
+  }
+}
+
+describe('prefix warm-up', () => {
+  it('warms one call per distinct A/B slot orientation before fanning out, without extra calls', async () => {
+    const events: string[] = []
+    const engine = new VerifierEngine(clientConfig({ llm: { stream: recordingStream(events) } as any }), 8)
+    const result = await engine.compare({ problem: 'task', candidateA: 'ALPHA', candidateB: 'BRAVO', repeats: 2 })
+
+    // Three default criteria x two repeats = six calls. The warm-up only reorders them, and
+    // odd repeats swap the slots, so each of the two prompt prefixes needs its own warm call.
+    expect(result.stats.calls).toBe(6)
+    // Indices, not values: the two orientations repeat, so looking a start up by its text would
+    // find the earlier warm call instead of the later fan-out one.
+    const startIndices = events.map((entry, index) => (entry.startsWith('start:') ? index : -1)).filter(index => index >= 0)
+    expect(startIndices).toHaveLength(6)
+    expect(new Set(startIndices.slice(0, 2).map(index => events[index])).size).toBe(2)
+    // Nothing else starts until BOTH warm calls (one per orientation) have finished: with a
+    // single warm job the whole swapped-slot half of the fan-out was a cold cache miss.
+    expect(events.slice(0, startIndices[2]!).filter(entry => entry.startsWith('end:'))).toHaveLength(2)
+  })
+
+  it('warms the identical track prompt once before the repeated calls', async () => {
+    const events: string[] = []
+    const stream = () => (async function* () {
+      events.push('start')
+      await new Promise(resolve => setTimeout(resolve, 1))
+      events.push('end')
+      yield* streamOf(chunks('<c1> T </c1>'))
+    })()
+    const engine = new VerifierEngine(clientConfig({ llm: { stream } as any }), 8)
+    const result = await engine.track('problem', ['step 1'], [1], 3)
+
+    // Every repeat sends the same prompt, so repeats 2 and 3 must not start before repeat 1
+    // has returned and populated the provider prefix cache.
+    expect(result.stats.calls).toBe(3)
+    const starts = events.map((entry, index) => (entry === 'start' ? index : -1)).filter(index => index >= 0)
+    expect(starts).toHaveLength(3)
+    expect(events.slice(0, starts[1]!).filter(entry => entry === 'end')).toHaveLength(1)
+  })
+})
+
+describe('byte-identical candidates', () => {
+  it('compares identical sides as an uninformative tie without calling the model', async () => {
+    const judged: string[] = []
+    const engine = new VerifierEngine(clientConfig({ llm: { stream: scriptedStream(judged) } as any }), 4)
+    const result = await engine.compare({ problem: 'task', candidateA: 'SAME', candidateB: 'SAME', repeats: 2 })
+
+    expect(judged).toHaveLength(0)
+    expect(result.calls).toBe(0)
+    expect(result.identical).toBe(true)
+    expect(result.winner).toBe('tie')
+    // 0.5 on both sides, not a confident 1.0: the acceptance gate must stay closed.
+    expect(result.scoreA).toBe(0.5)
+    expect(result.scoreB).toBe(0.5)
+    expect(result.criteria.map(row => row.scoreA)).toEqual([0.5, 0.5, 0.5])
+    expect(result.judges[0]).toMatchObject({ ok: true, calls: 0, winner: 'tie' })
+  })
+
+  it('ranks all-identical candidates without a single model call', async () => {
+    const judged: string[] = []
+    const engine = new VerifierEngine(clientConfig({ llm: { stream: scriptedStream(judged) } as any }), 4)
+    const result = await engine.select({ problem: 'task', candidates: ['SAME', 'SAME', 'SAME'], repeats: 1 })
+
+    expect(judged).toHaveLength(0)
+    expect(result.calls).toBe(0)
+    expect(result.comparisons).toBe(0)
+    expect(result.identical).toBe(true)
+    expect(result.best).toBe('SAME')
+    expect(result.scores).toEqual([0.5, 0.5, 0.5])
+    expect(result.ranking).toEqual([0, 1, 2])
+    expect(result.judges[0]).toMatchObject({ ok: true, calls: 0, scores: [0.5, 0.5, 0.5] })
+  })
+
+  it('judges duplicated candidates once and maps the verdict back onto every index', async () => {
+    const judged: string[] = []
+    const engine = new VerifierEngine(clientConfig({ llm: { stream: scriptedStream(judged) } as any }), 4)
+    const result = await engine.select({ problem: 'task', candidates: ['STRONG-0', 'WEAK-1', 'STRONG-0'], repeats: 1 })
+
+    // One compared pair (two distinct candidates) x three default criteria = three calls,
+    // where the duplicate would otherwise have doubled the tournament.
+    expect(result.comparisons).toBe(1)
+    expect(result.stats.calls).toBe(3)
+    expect(judged).toHaveLength(3)
+    expect(result.best).toBe('STRONG-0')
+    expect(result.index).toBe(0)
+    expect(result.ranking[0]).toBe(0)
+    expect(result.scores).toHaveLength(3)
+    // The duplicate inherits its representative's score, so no index is left undefined.
+    expect(result.scores[2]).toBe(result.scores[0])
+    expect(result.scores[0]).toBeGreaterThan(result.scores[1]!)
+  })
+
+  it('rejects a blank candidate instead of spending calls on it', async () => {
+    const engine = new VerifierEngine(clientConfig({ llm: { stream: failIfCalled() } as any }), 4)
+    await expect(engine.select({ problem: 'task', candidates: ['real work', '   '] })).rejects.toThrow(/blank/u)
+    await expect(engine.select({ problem: 'task', candidates: [] })).rejects.toThrow(/must not be empty/u)
+  })
+})
