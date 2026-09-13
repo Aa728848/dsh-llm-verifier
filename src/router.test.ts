@@ -187,6 +187,73 @@ describe('production structured routing', () => {
     expect(decision.steps[1]).not.toContain('presented: 1')
   })
 
+  it('shows the newest verification run when the newest output is not one', () => {
+    // Regression (live session): the full suite passed, then 88 tool calls closed issues
+    // and printed a status summary. The newest checkpoint carried only that summary, so
+    // the judge applied its own "no real verification" ceiling — exactly K = 52.6%
+    // against a 0.8 threshold — and the route steered "continue" for finished work.
+    const value = session()
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    tool(value, 'pwsh', 'verify', 'Test Files  10 passed (10)\n     Tests  86 passed (86)')
+    tool(value, 'pwsh', 'close', '1517 closed completed')
+    tool(value, 'pwsh', 'status', '--- ahead/behind origin/dev ---\n0\t0\nlib-artifact-check: OK')
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind !== 'track') return
+    const step = decision.steps[1]!
+    // The newest output stays the primary evidence...
+    expect(step).toContain('lib-artifact-check: OK')
+    // ...and the run it was hiding comes back, with how much happened after it.
+    expect(step).toContain('Latest observed verification run')
+    expect(step).toContain('86 passed')
+    expect(step).toContain('tool result(s) since')
+    // Historical checkpoints never grow this block: they describe past states.
+    expect(decision.steps[0]).not.toContain('Latest observed verification run')
+  })
+
+  it('does not repeat a verification run that is already the newest output', () => {
+    const value = session()
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    tool(value, 'pwsh', 'verify', 'Test Files  1 passed (1)\n     Tests  9 passed (9)')
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind !== 'track') return
+    expect(decision.steps[1]).toContain('Latest observed tool output at routing time')
+    expect(decision.steps[1]).not.toContain('Latest observed verification run')
+  })
+
+  it('leaves the checkpoints alone when the task never verified anything', () => {
+    const value = session()
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    tool(value, 'pwsh', 'edit', 'The file has been updated successfully.')
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind !== 'track') return
+    expect(decision.steps[1]).toContain('The file has been updated successfully.')
+    expect(decision.steps[1]).not.toContain('Latest observed verification run')
+  })
+
+  it('keeps the extra verification block inside the checkpoint caps', () => {
+    const value = session()
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    tool(value, 'pwsh', 'verify', 'Test Files  10 passed (10)\n' + 'T'.repeat(4000))
+    tool(value, 'pwsh', 'tail', 'Z'.repeat(4000))
+    assistant(value, 'Q'.repeat(4000))
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    for (const maxItemChars of [128, 200, 500, 2000, 20000]) {
+      const maxInputChars = Math.max(60000, maxItemChars * 2)
+      const decision = analyzeStructuredRoute(value.events, 8, maxItemChars, maxInputChars)
+      expect(decision, 'maxItemChars=' + maxItemChars).toMatchObject({ kind: 'track' })
+      if (decision?.kind !== 'track') continue
+      for (const step of decision.steps) expect(step.length, 'maxItemChars=' + maxItemChars).toBeLessThanOrEqual(maxItemChars)
+      expect(decision.steps.reduce((sum, step) => sum + step.length, 0), 'maxItemChars=' + maxItemChars).toBeLessThanOrEqual(maxInputChars)
+      expect(boundDecision(decision, { ...policy, maxItemChars, maxInputChars }), 'maxItemChars=' + maxItemChars).toBeDefined()
+    }
+  })
+
   it('never attaches coordination output as checkpoint evidence', () => {
     // The same rule as `present`, applied to the rest of the agent's own control
     // surface: every one of these runs AFTER the work, so as the newest result it hides

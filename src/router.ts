@@ -328,6 +328,89 @@ function isEvidenceOutput(name: string, text: string): boolean {
   return !(SUBAGENT_TOOLS.has(name) && CHILD_START_ACKNOWLEDGEMENT.test(body))
 }
 
+/** Signatures of an output that reports verification results. */
+const VERIFICATION_SIGNATURES: readonly RegExp[] = [
+  /\bTest Files\s+\d+/u,
+  /\bTests?\s*:?\s*\d+\s+(?:passed|failed|skipped|todo)/iu,
+  /\bTest Suites?:\s*\d+/u,
+  /\b\d+\s+passed\b/u,
+  /\b(?:all\s+)?tests?\s+passed\b/iu,
+  /^\s*(?:ok|FAIL|PASS)\s+\S+/mu,
+  /\b(?:TEST|TYPECHECK|BUILD|LINT|CHECK|GATE)_EXIT\s*[:=]\s*0\b/u,
+]
+
+/**
+ * Whether an output looks like a test/typecheck/build run reporting its result.
+ *
+ * Only decides whether one extra evidence block is worth rendering. A miss degrades to
+ * the single-output rendering the checkpoints always had, and a false positive shows the
+ * judge one more observed result — neither can invent evidence.
+ * @param text - rendered tool result.
+ * @returns True when the text carries a runner-shaped summary.
+ */
+function looksLikeVerificationRun(text: string): boolean {
+  return VERIFICATION_SIGNATURES.some(pattern => pattern.test(text))
+}
+
+/**
+ * How much settled tool work followed one call, as a short histogram.
+ *
+ * Lets the judge decide whether a verification run still covers the current state
+ * ("nothing but issue replies since" versus "12 writes since") instead of guessing.
+ * Counts come from the evidence index, so a wrapper and its dispatches are each counted
+ * as the results they produced.
+ * @param index - evidence index of the current task.
+ * @param call - the call to measure from.
+ * @param maxChars - hard cap for the summary.
+ * @returns The summary text, or '' when nothing followed.
+ */
+function trailingSummary(index: EvidenceIndex, call: EvidenceCall, maxChars: number): string {
+  const counts = new Map<string, number>()
+  let total = 0
+  for (const other of index.calls.values()) {
+    if (other.resultSeq <= call.resultSeq) continue
+    total += 1
+    counts.set(other.name, (counts.get(other.name) ?? 0) + 1)
+  }
+  if (total === 0) return ''
+  const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+  const summary = total + ' tool result(s) since, ' + ranked.slice(0, 4).map(([name, count]) => name + ' ×' + count).join(', ') + (ranked.length > 4 ? ', …' : '')
+  return summary.length <= maxChars ? summary : summary.slice(0, Math.max(1, maxChars - 1)) + '…'
+}
+
+/**
+ * One extra block for the newest verification run in the task.
+ *
+ * The judge's own rule caps a state whose evidence carries no verification (see
+ * {@link BOOKKEEPING_TOOLS}), but only ONE output fits per checkpoint — and the last
+ * call of a task is rarely the test run. A live session ran the full suite and then
+ * spent 88 tool calls closing issues and printing a status summary: the newest
+ * checkpoint showed only that summary, the judge answered exactly K = 52.6% against a
+ * 0.8 threshold, and the route steered "continue the unfinished work" for work that was
+ * finished and verified. Putting the newest verification run back in front of the judge
+ * restores evidence the session really produced; it does not loosen the threshold.
+ * @param index - evidence index of the current task.
+ * @param newest - the call already rendered as the newest output, if any.
+ * @param budget - maximum characters this block may occupy.
+ * @returns The labelled block, or '' when it would add nothing.
+ */
+function verificationEvidence(index: EvidenceIndex, newest: EvidenceCall | undefined, budget: number): string {
+  if (budget < 128) return ''
+  // A freshly observed run already sits in the newest block; showing an older one as
+  // well would only add noise (and could read as two independent verifications).
+  if (newest !== undefined && looksLikeVerificationRun(newest.text)) return ''
+  let run: EvidenceCall | undefined
+  for (const pair of index.calls.values()) {
+    if (!isEvidenceOutput(pair.name, pair.text) || !looksLikeVerificationRun(pair.text)) continue
+    if (run === undefined || pair.resultSeq > run.resultSeq) run = pair
+  }
+  if (run === undefined) return ''
+  const trailing = trailingSummary(index, run, 200)
+  const prefix = '\n\nLatest observed verification run (' + run.name + (trailing === '' ? '' : ' — ' + trailing) + '):\n'
+  if (prefix.length >= budget) return ''
+  return prefix + sanitizeVerifierText(run.text, budget - prefix.length)
+}
+
 /**
  * Observed tool evidence available at one checkpoint.
  *
@@ -346,24 +429,25 @@ function isEvidenceOutput(name: string, text: string): boolean {
  * @param seq - checkpoint sequence number, or `Infinity` for the current state.
  * @param budget - maximum characters the evidence may occupy.
  * @param current - render the newest output in the task instead of the newest one before `seq`.
- * @returns Evidence block, or '' when the task produced none yet.
+ * @returns The rendered block and the call it came from, or an empty block.
  */
-function checkpointEvidence(index: EvidenceIndex, seq: number, budget: number, current = false): string {
-  if (budget < 64) return ''
+function checkpointEvidence(index: EvidenceIndex, seq: number, budget: number, current = false): { text: string; call: EvidenceCall | undefined } {
+  const empty = { text: '', call: undefined }
+  if (budget < 64) return empty
   let latest: EvidenceCall | undefined
   for (const pair of index.calls.values()) {
     if (!isEvidenceOutput(pair.name, pair.text)) continue
     if (pair.resultSeq <= seq && (latest === undefined || pair.resultSeq > latest.resultSeq)) latest = pair
   }
-  if (latest === undefined) return ''
+  if (latest === undefined) return empty
   // The prefix length depends on the tool name, so measure it instead of assuming a
   // fixed overhead: with a long tool name the old "- 60" let the rendered step exceed
   // maxItemChars, and boundDecision() then dropped the whole track decision silently.
   const prefix = current
     ? '\n\nLatest observed tool output at routing time (' + latest.name + '):\n'
     : '\n\nLatest observed tool output before this checkpoint (' + latest.name + '):\n'
-  if (prefix.length >= budget) return ''
-  return prefix + sanitizeVerifierText(latest.text, budget - prefix.length)
+  if (prefix.length >= budget) return empty
+  return { text: prefix + sanitizeVerifierText(latest.text, budget - prefix.length), call: latest }
 }
 
 /**
@@ -406,7 +490,10 @@ interface CheckpointSource { seq: number; label: string; body: string }
  * the CURRENT state: its evidence is the newest observed output in the task rather
  * than the newest one before the last todo snapshot (which is often several tool calls
  * stale), and it carries the agent's latest prose as an explicitly labelled claim (see
- * {@link currentNarration}), because prose deliverables never reach a tool.
+ * {@link currentNarration}), because prose deliverables never reach a tool. It gets one
+ * extra slot as well — the newest verification run in the task
+ * ({@link verificationEvidence}) — because a single output slot cannot show both the
+ * tail of the task and the test run that tail is hiding.
  * @param index - evidence index of the current task.
  * @param sources - checkpoints in chronological order.
  * @param maxItemChars - hard per-item cap enforced by boundDecision().
@@ -428,8 +515,11 @@ function renderCheckpointSteps(index: EvidenceIndex, sources: readonly Checkpoin
     // never reaches a tool.
     const isCurrent = position === kept.length - 1
     const observed = checkpointEvidence(index, isCurrent ? Number.POSITIVE_INFINITY : source.seq, isCurrent ? Math.floor(evidenceBudget / 2) : evidenceBudget, isCurrent)
-    const narration = isCurrent ? currentNarration(index, evidenceBudget - observed.length) : ''
-    return sanitizeVerifierText(note + source.label + source.body, Math.max(1, stepCap - observed.length - narration.length)) + observed + narration
+    // Only the newest checkpoint can be short of verification: the older ones describe
+    // past states, and their single output is what was current for them then.
+    const verification = isCurrent ? verificationEvidence(index, observed.call, Math.floor(evidenceBudget / 2) - observed.text.length) : ''
+    const narration = isCurrent ? currentNarration(index, evidenceBudget - observed.text.length - verification.length) : ''
+    return sanitizeVerifierText(note + source.label + source.body, Math.max(1, stepCap - observed.text.length - verification.length - narration.length)) + observed.text + verification + narration
   })
   return { steps, evidenceSeqs: kept.map(source => source.seq), omitted }
 }
