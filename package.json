@@ -108,7 +108,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && tsdown",
+    "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && tsdown && node scripts/sync-installed-profiles.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.build.json",
     "typecheck:local": "tsc --noEmit -p tsconfig.local.json",
     "test": "vitest run",
