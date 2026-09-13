@@ -91,6 +91,8 @@ pnpm run typecheck:local   # 依据 tsconfig.local.json，把 @deepseek-ai/dsh-*
 
 两套类型定义可能不同步：例如 `Session.events` 在 DSH 0.1.5 已被 `snapshotEvents()` 取代，`tool/code-dispatch` 也已改名 `tool/ptc-dispatch`。插件内部的 `sessionEvents()` 同时兼容两种会话形态，两类派发事件都会计入证据，因此 0.1.1 与 0.1.5 宿主都可以运行。
 
+其中一处更隐蔽的差异是 `deepFreeze`：0.1.1 的 `@deepseek-ai/dsh-llm` 会重新导出它，0.1.5 已把它移到 `@deepseek-ai/dsh-util-values`。插件因此自带一份等价的兜底实现，并同样**放过 `AbortSignal`**——冻结那个还在重试循环里使用、尚未被订阅的信号，会让传输层首次 `addEventListener`（Node ≥26.5）或超时/取消时的 `controller.abort()`（所有 Node 版本）抛 `Cannot assign to read only property`。
+
 ### 发布到 npm
 
 `pnpm publish`（或 `npm publish`）会先触发 `prepublishOnly` → `pnpm run verify:release`，即**按 npm 锁定版本**执行 typecheck、单元测试并重新构建 `lib/`，确保发出去的产物来自 npm 依赖而非本地 checkout 的类型；`typecheck:local` 只在本机核对，不参与发布。

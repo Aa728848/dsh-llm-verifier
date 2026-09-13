@@ -1,4 +1,10 @@
 import { type LlmRuntime } from '@deepseek-ai/dsh-llm';
+/**
+ * The graph walk used when the host exports no `deepFreeze`; exported for tests.
+ * @param value - value to freeze.
+ * @returns The same value, with every reachable enumerable child frozen except live AbortSignals.
+ */
+export declare function fallbackDeepFreeze<T>(value: T): T;
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment';
 import type { CompletionLogprobs } from './core.ts';
 import { TopLogprobCapabilityCache } from './top-logprobs.ts';

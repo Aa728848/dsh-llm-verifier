@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { RequestLimiter, callVerifier, generateCandidate, generationClient, partialUsage, requestAttempts } from './caller.ts'
+import { RequestLimiter, callVerifier, fallbackDeepFreeze, generateCandidate, generationClient, partialUsage, requestAttempts } from './caller.ts'
 import { TopLogprobCapabilityCache } from './top-logprobs.ts'
 
 function chunks(text = '<score_A> A </score_A>') { return [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'text-delta', index: 0, text }, { type: 'block-end', index: 0, block: { type: 'text', text } }, { type: 'usage', usage: { inputTokens: 7, cacheReadTokens: 3, outputTokens: 4, reasoningTokens: 2 } }, { type: 'finish', reason: { kind: 'stop' } }] as any[] }
@@ -452,3 +452,48 @@ describe('best-of-N generation seam', () => {
     expect(partialUsage(error)?.calls).toBe(1)
   })
 })
+
+describe('call-option freezing', () => {
+  it('leaves a live AbortSignal mutable while freezing the rest of the graph', () => {
+    // The 0.1.5 host line moved deepFreeze to @deepseek-ai/dsh-util-values and stops re-exporting
+    // it from @deepseek-ai/dsh-llm, so this fallback is what actually runs in production there.
+    // Freezing the signal breaks the transport twice over: Node >= 26.5 initializes the signal's
+    // internal event map lazily, so the first addEventListener throws "Cannot assign to read only
+    // property 'Symbol(kEvents)'", and on every Node version the timeout's controller.abort()
+    // throws on 'Symbol(kAborted)'.
+    const controller = new AbortController()
+    const options = fallbackDeepFreeze({ provider: 'openai', nested: { model: 'gpt-5' }, signal: controller.signal })
+    expect(Object.isFrozen(options)).toBe(true)
+    expect(Object.isFrozen(options.nested)).toBe(true)
+    expect(Object.isFrozen(options.signal)).toBe(false)
+    const aborted: string[] = []
+    options.signal.addEventListener('abort', () => aborted.push('abort'))
+    controller.abort(new Error('llm-verifier: request timed out'))
+    expect(aborted).toEqual(['abort'])
+    expect(options.signal.aborted).toBe(true)
+  })
+
+  it('hands llm.stream a frozen option object whose signal is still mutable', async () => {
+    let seen: any
+    await callVerifier(config(async function* (options) { seen = options; yield* streamOf(chunks()) }), 'prompt')
+    expect(Object.isFrozen(seen)).toBe(true)
+    expect(Object.isFrozen(seen.signal)).toBe(false)
+    // The transport subscribes to this signal, which is exactly what a frozen one breaks.
+    expect(() => seen.signal.addEventListener('abort', () => {})).not.toThrow()
+  })
+
+  it('keeps the provider machine code and status when a stream fails', async () => {
+    // FinishReason.failure is the host's serializable facts record: normalizeLlmFailure strips the
+    // stack and the cause at the adapter boundary, so message + code + status is everything the
+    // caller can report. Dropping the code leaves the board unable to tell auth from transport.
+    const failed = chunks()
+    failed[failed.length - 1] = { type: 'finish', reason: { kind: 'error', failure: { message: 'provider said no', code: 'AUTH', status: 401, requestId: 'req-7' } } }
+    const error = await callVerifier(config(async function* () { yield* streamOf(failed) }, vi.fn(), ctx(), { maxRetries: 0 }), 'prompt').catch(reason => reason)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toMatch(/provider said no/u)
+    expect(error.message).toMatch(/AUTH/u)
+    expect(error.message).toMatch(/401/u)
+    expect(error.message).toMatch(/req-7/u)
+  })
+})
+
