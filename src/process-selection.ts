@@ -664,6 +664,19 @@ export class ProcessCycleStore {
  * re-entrancy guard are per-plugin-instance state; every decision point reads settings and budget
  * fresh, so a settings change or a spent budget is honoured without restarting anything.
  */
+/** A cycle whose reservation, purchase record and generation dispatch are already in flight. */
+interface StartedCycle {
+  reservation: Reservation
+  observation: RouteObservation
+  phase: AbortController
+  /** The alternative reply; a rejection is a generation failure and counts as one added call. */
+  generated: Promise<BufferedCandidate>
+  /** Chunks the dispatch reported, owned by the caller so a failure keeps its usage. */
+  chunks: StreamChunk[]
+  /** Idempotent: release the deadline, the parent-signal listener and the in-flight registration. */
+  cleanup(): void
+}
+
 export class ProcessSelector {
   private readonly intents = new Map<string, ProcessIntent>()
   /** Requests this plugin dispatched itself (the alternative reply): never a selection subject. */
@@ -743,6 +756,130 @@ export class ProcessSelector {
     return intent
   }
 
+
+  /**
+   * Buy the cycle and dispatch the alternative WITHOUT waiting for the original reply.
+   *
+   * Everything here used to run after the original had been buffered, so the host waited for the
+   * original, then for the alternative, then for the judge. The intent is registered before the
+   * request is dispatched, so the decision to buy is already known when this runs: the added
+   * generation now overlaps the original reply and only the comparison stays serial.
+   *
+   * The ordering rule is unchanged — policy, reservation and `store.begin()` all complete before the
+   * first added model call — but the price of the rare declines changes: a purchase that is later
+   * thrown away (original over the cap, incomplete, empty, or a cycle that went stale mid-stream) is
+   * now a purchased row with one generation, where it used to skip without buying. That is the
+   * honest count, because the dispatch really happened.
+   * @param options - the matched main request.
+   * @param intent - the consumed intent.
+   * @param settings - settings snapshot taken when the request entered the waterfall.
+   * @param startedAt - wall clock the cycle began at.
+   * @returns The started cycle, or undefined when it was declined (its single row is already written).
+   */
+  private async beginCycle(options: GenerateOptions, intent: ProcessIntent, settings: ProcessSelectionSettings, startedAt: number): Promise<StartedCycle | undefined> {
+    if (!this.live()) {
+      await this.skip(startedAt, intent, 'switch-off', 'the process-selection switch or the smart mode was turned off before the request was dispatched')
+      return undefined
+    }
+    if (options.signal?.aborted) {
+      await this.skip(startedAt, intent, 'canceled', 'the request was already aborted before the process cycle started')
+      return undefined
+    }
+    if (!this.deps.current(intent)) {
+      await this.skip(startedAt, intent, 'task-changed', 'the intent no longer belongs to the current task')
+      return undefined
+    }
+    const policy = await this.deps.policy()
+    const router = this.deps.router()
+    const criteria = PROCESS_CRITERIA
+    const expected = 1 + criteria.length * PROCESS_REPEATS * Math.max(1, this.deps.judges())
+    const fingerprint = stableHash({ phase: 'process', sessionId: intent.sessionId, taskStartSeq: intent.taskStartSeq, signal: intent.signal })
+    const reservation = router.reserve(intent.agent as RoutedAgent, 'process', fingerprint, expected, policy)
+    if (reservation === undefined) {
+      await this.skip(startedAt, intent, 'no-process-budget', 'the task/session budget or the one-per-task process allowance refused the cycle')
+      return undefined
+    }
+    const alternativeTarget = resolveAlternativeTarget(settings.alternativeModel)
+    const observation: RouteObservation = { cycleId: reservation.id, trigger: 'llm-stream', stage: 'process', destination: 'process', attempt: reservation.attempt, reservedCalls: reservation.expectedCalls, replayed: 'original', generatedCalls: 0, judgeCalls: 0, sameCandidate: false, ...(intent.failureContext === undefined ? {} : { alternativeAugmented: true }), ...(alternativeTarget === undefined ? {} : { alternativeModel: alternativeTarget.provider + '/' + alternativeTarget.model }) }
+    const started = await this.deps.store(intent.agent).begin({ cycleId: reservation.id, sessionId: intent.sessionId, taskStartSeq: intent.taskStartSeq, signal: intent.signal, startedAt: this.deps.now() })
+    if (!started) {
+      // The purchase record could not be written: buying anyway would make the cycle unaccountable.
+      router.fail(intent.agent as RoutedAgent, reservation, false)
+      await this.report({ intent, reservation, observation, startedAt, outcome: 'store-unavailable', replayed: 'original', generatedCalls: 0, judgeCalls: 0, sameCandidate: false, usage: blankProcessStats(), error: 'the process cycle log could not be written' })
+      return undefined
+    }
+    // One deadline for generation AND comparison. Because the generation now starts before the
+    // original finishes, this deadline also bounds the overlapped window: a very slow original can
+    // consume it and abort the alternative. A retry inside either phase cannot extend it.
+    const phase = new AbortController()
+    // Registered so a settings change or a disposal cancels this cycle mid-flight, and linked to the
+    // turn's own signal — including when that signal was ALREADY aborted before the listener could
+    // attach, because an already-dispatched event never fires again.
+    this.cycles.set(intent.sessionId, phase)
+    const timer = setTimeout(() => phase.abort(new Error('llm-verifier: process-selection phase timed out')), settings.timeoutMs)
+    const linkAbort = () => phase.abort(options.signal?.reason)
+    if (options.signal?.aborted) linkAbort()
+    options.signal?.addEventListener('abort', linkAbort, { once: true })
+    let released = false
+    const cleanup = () => {
+      if (released) return
+      released = true
+      clearTimeout(timer)
+      options.signal?.removeEventListener('abort', linkAbort)
+      if (this.cycles.get(intent.sessionId) === phase) this.cycles.delete(intent.sessionId)
+    }
+    // The policy read and the cycle-log write are BOTH async: the switch may have been turned off,
+    // the turn cancelled or the task replaced while they were in flight. Check again before the first
+    // added model call, because the check that admitted the reservation is already stale.
+    const stale = this.staleReason(intent, phase)
+    if (stale !== undefined) {
+      cleanup()
+      router.fail(intent.agent as RoutedAgent, reservation, false)
+      await this.report({ intent, reservation, observation, startedAt, outcome: stale, replayed: 'original', generatedCalls: 0, judgeCalls: 0, sameCandidate: false, usage: blankProcessStats(), ...(stale === 'canceled' ? { error: 'the process-selection phase was cancelled' } : {}) })
+      return undefined
+    }
+    const request = buildAlternativeRequest(options, phase.signal, intent.failureContext, alternativeTarget)
+    this.internal.add(request as object)
+    const chunks: StreamChunk[] = []
+    const generated = drainAlternative(this.deps.stream(request), PROCESS_CANDIDATE_CAP_CHARS, chunks)
+    // A discarded cycle must never surface as an unhandled rejection; the awaiting paths still see it.
+    generated.catch(() => {})
+    return { reservation, observation, phase, generated, chunks, cleanup }
+  }
+
+  /**
+   * Throw away whatever the cycle became, replaying the original.
+   *
+   * A cycle that was never bought owns no row of its own: `beginCycle` already wrote exactly one for
+   * this request ("why was it declined"), and a second row would inflate the skip distribution. A
+   * BOUGHT cycle does own one, and it is a purchased row: the dispatch really happened, so the usage
+   * it already reported is booked rather than dropped.
+   * @param cycle - the started cycle, or undefined when the buy was declined.
+   * @param intent - the consumed intent.
+   * @param startedAt - wall clock the cycle began at.
+   * @param outcome - terminal outcome to record.
+   * @param reason - human-readable reason for the log and the row.
+   * @param error - error text to store instead of the reason, when there is one.
+   */
+  private async abandon(cycle: StartedCycle | undefined, intent: ProcessIntent, startedAt: number, outcome: string, reason: string, error?: string): Promise<void> {
+    if (cycle === undefined) return
+    cycle.cleanup()
+    this.deps.router().fail(intent.agent as RoutedAgent, cycle.reservation, false)
+    cycle.phase.abort(new Error('llm-verifier: process-selection cycle discarded (' + reason + ')'))
+    await this.report({ intent, reservation: cycle.reservation, observation: cycle.observation, startedAt, outcome, replayed: 'original', generatedCalls: 1, judgeCalls: 0, sameCandidate: false, usage: await this.settledUsage(cycle), error: error ?? reason })
+  }
+
+  /** Usage a discarded dispatch already reported, best effort, never zero when tokens were seen. */
+  private async settledUsage(cycle: StartedCycle): Promise<RunStats> {
+    try {
+      return statsWith((await cycle.generated).usage)
+    } catch {
+      const usage = statsWith(usageFromChunks(cycle.chunks))
+      usage.usageIncomplete = true
+      return usage
+    }
+  }
+
   /**
    * The waterfall body.
    *
@@ -761,6 +898,11 @@ export class ProcessSelector {
   async *handle(options: GenerateOptions, next: () => AsyncIterable<StreamChunk>, intent: ProcessIntent): AsyncGenerator<StreamChunk> {
     const startedAt = this.deps.now()
     const settings = this.deps.settings()
+    // The intent was registered BEFORE this request was dispatched, so whether it may be selected is
+    // already known here. Buying the cycle and generating the alternative is the dominant wall-clock
+    // cost, so it starts now and overlaps the original reply instead of waiting for it to finish;
+    // only the comparison stays serial. A declined or discarded cycle replays the original verbatim.
+    const pendingCycle = this.beginCycle(options, intent, settings, startedAt)
     const original: StreamChunk[] = []
     let heldChars = 0
     let overflow = false
@@ -776,8 +918,11 @@ export class ProcessSelector {
         original.length = 0
       }
     }
+    // Join the overlapped purchase before judging the original: a bought cycle must be accounted for
+    // even when its candidate is thrown away.
+    const cycle = await pendingCycle
     if (overflow) {
-      await this.skip(startedAt, intent, 'original-over-cap', 'the original reply exceeded the process-selection buffer cap')
+      await this.abandon(cycle, intent, startedAt, 'original-over-cap', 'the original reply exceeded the process-selection buffer cap')
       return
     }
     const rendered = renderCandidate(original)
@@ -785,12 +930,12 @@ export class ProcessSelector {
     const upstreamUsage = usageFromChunks(original)
     if (finish !== 'stop' && finish !== 'tool-calls') {
       for (const chunk of original) yield chunk
-      await this.skip(startedAt, intent, 'original-incomplete', 'the original reply did not finish normally (' + String(finish) + ')')
+      await this.abandon(cycle, intent, startedAt, 'original-incomplete', 'the original reply did not finish normally (' + String(finish) + ')')
       return
     }
     if (!rendered.text && rendered.actions.length === 0 && upstreamUsage.calls === 0) {
       for (const chunk of original) yield chunk
-      await this.skip(startedAt, intent, 'original-empty', 'the original reply carried neither prose nor a tool call')
+      await this.abandon(cycle, intent, startedAt, 'original-empty', 'the original reply carried neither prose nor a tool call')
       return
     }
 
@@ -799,75 +944,45 @@ export class ProcessSelector {
     // anything is reserved, written to the cycle log or sent to a model.
     if (!this.live()) {
       for (const chunk of original) yield chunk
-      await this.skip(startedAt, intent, 'switch-off', 'the process-selection switch or the smart mode was turned off while the original reply was streaming')
+      await this.abandon(cycle, intent, startedAt, 'switch-off', 'the process-selection switch or the smart mode was turned off while the original reply was streaming')
       return
     }
     if (options.signal?.aborted) {
       for (const chunk of original) yield chunk
-      await this.skip(startedAt, intent, 'canceled', 'the request was already aborted before the process cycle started')
+      await this.abandon(cycle, intent, startedAt, 'canceled', 'the request was already aborted before the process cycle started')
       return
     }
     if (!this.deps.current(intent)) {
       for (const chunk of original) yield chunk
-      await this.skip(startedAt, intent, 'task-changed', 'the intent no longer belongs to the current task')
+      await this.abandon(cycle, intent, startedAt, 'task-changed', 'the intent no longer belongs to the current task')
       return
     }
 
-    const policy = await this.deps.policy()
+    // A declined cycle already wrote exactly one row for this request; replay untouched.
+    if (cycle === undefined) {
+      for (const chunk of original) yield chunk
+      return
+    }
+    const { reservation, observation, phase } = cycle
     const router = this.deps.router()
     const criteria = PROCESS_CRITERIA
-    const expected = 1 + criteria.length * PROCESS_REPEATS * Math.max(1, this.deps.judges())
-    const fingerprint = stableHash({ phase: 'process', sessionId: intent.sessionId, taskStartSeq: intent.taskStartSeq, signal: intent.signal })
-    const reservation = router.reserve(intent.agent as RoutedAgent, 'process', fingerprint, expected, policy)
-    if (reservation === undefined) {
-      for (const chunk of original) yield chunk
-      await this.skip(startedAt, intent, 'no-process-budget', 'the task/session budget or the one-per-task process allowance refused the cycle')
-      return
-    }
-    const alternativeTarget = resolveAlternativeTarget(settings.alternativeModel)
-    const observation: RouteObservation = { cycleId: reservation.id, trigger: 'llm-stream', stage: 'process', destination: 'process', attempt: reservation.attempt, reservedCalls: reservation.expectedCalls, replayed: 'original', generatedCalls: 0, judgeCalls: 0, sameCandidate: false, ...(intent.failureContext === undefined ? {} : { alternativeAugmented: true }), ...(alternativeTarget === undefined ? {} : { alternativeModel: alternativeTarget.provider + '/' + alternativeTarget.model }) }
-    const store = this.deps.store(intent.agent)
-    const started = await store.begin({ cycleId: reservation.id, sessionId: intent.sessionId, taskStartSeq: intent.taskStartSeq, signal: intent.signal, startedAt: this.deps.now() })
-    if (!started) {
-      // The purchase record could not be written: buying anyway would make the cycle unaccountable.
-      router.fail(intent.agent as RoutedAgent, reservation, false)
-      for (const chunk of original) yield chunk
-      await this.report({ intent, reservation, observation, startedAt, outcome: 'store-unavailable', replayed: 'original', generatedCalls: 0, judgeCalls: 0, sameCandidate: false, usage: blankProcessStats(), error: 'the process cycle log could not be written' })
-      return
-    }
-
-    // One deadline for generation AND comparison. It never shortens the original request's own
-    // timeout (that already elapsed), and a retry inside either phase cannot extend it.
-    const phase = new AbortController()
-    // Registered so a settings change or a disposal cancels this cycle mid-flight, and linked to
-    // the turn's own signal — including when that signal was ALREADY aborted before the listener
-    // could attach, because an already-dispatched event never fires again.
-    this.cycles.set(intent.sessionId, phase)
-    const timer = setTimeout(() => phase.abort(new Error('llm-verifier: process-selection phase timed out')), settings.timeoutMs)
-    const linkAbort = () => phase.abort(options.signal?.reason)
-    if (options.signal?.aborted) linkAbort()
-    options.signal?.addEventListener('abort', linkAbort, { once: true })
     try {
-      // The policy read and the cycle-log write are BOTH async: the switch may have been turned off,
-      // the turn cancelled or the task replaced while they were in flight. Check again here — before
-      // the first added model call — because the check that admitted the reservation is already stale.
+      // The generation is already in flight by the time this runs, so a cycle that went stale here is
+      // DISPATCHED and discarded: abandon() stops it and books what it already reported.
       const staleBeforeGeneration = this.staleReason(intent, phase)
       if (staleBeforeGeneration !== undefined) {
-        router.fail(intent.agent as RoutedAgent, reservation, false)
         for (const chunk of original) yield chunk
-        await this.report({ intent, reservation, observation, startedAt, outcome: staleBeforeGeneration, replayed: 'original', generatedCalls: 0, judgeCalls: 0, sameCandidate: false, usage: blankProcessStats(), ...(staleBeforeGeneration === 'canceled' ? { error: 'the process-selection phase was cancelled' } : {}) })
+        await this.abandon(cycle, intent, startedAt, staleBeforeGeneration, 'the cycle became stale before its first added model call', staleBeforeGeneration === 'canceled' ? 'the process-selection phase was cancelled' : undefined)
         return
       }
       let alternative: BufferedCandidate
-      const request = buildAlternativeRequest(options, phase.signal, intent.failureContext, alternativeTarget)
-      this.internal.add(request as object)
-      // The alternative's chunks are collected HERE so the usage a stream already reported before
-      // throwing survives: reporting the failed generation as zero tokens hid real spend.
-      const generatedChunks: StreamChunk[] = []
+      // The dispatch happened in beginCycle, overlapping the original reply. Its chunks are owned by
+      // the cycle, so the usage a stream already reported before throwing survives: reporting the
+      // failed generation as zero tokens hid real spend.
       try {
-        alternative = await drainAlternative(this.deps.stream(request), PROCESS_CANDIDATE_CAP_CHARS, generatedChunks)
+        alternative = await cycle.generated
       } catch (error) {
-        const generationUsage = statsWith(usageFromChunks(generatedChunks))
+        const generationUsage = statsWith(usageFromChunks(cycle.chunks))
         // The dispatch really happened and never finished: what it already reported is known, what
         // it would have reported next is not.
         generationUsage.usageIncomplete = true
@@ -1015,9 +1130,7 @@ export class ProcessSelector {
       }
       for (const chunk of original) yield chunk
     } finally {
-      clearTimeout(timer)
-      options.signal?.removeEventListener('abort', linkAbort)
-      if (this.cycles.get(intent.sessionId) === phase) this.cycles.delete(intent.sessionId)
+      cycle.cleanup()
     }
   }
 

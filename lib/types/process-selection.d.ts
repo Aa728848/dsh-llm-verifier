@@ -396,13 +396,6 @@ export declare class ProcessCycleStore {
     finish(cycleId: string, outcome: string, replayed: string): Promise<void>;
     private persist;
 }
-/**
- * The selector itself: intent bookkeeping plus the \`llm/stream\` body.
- *
- * Kept as one class rather than free functions because the intent map and the request-local
- * re-entrancy guard are per-plugin-instance state; every decision point reads settings and budget
- * fresh, so a settings change or a spent budget is honoured without restarting anything.
- */
 export declare class ProcessSelector {
     private readonly deps;
     private readonly intents;
@@ -440,6 +433,43 @@ export declare class ProcessSelector {
      * @returns The consumed intent, or undefined to delegate untouched.
      */
     take(options: GenerateOptions): ProcessIntent | undefined;
+    /**
+     * Buy the cycle and dispatch the alternative WITHOUT waiting for the original reply.
+     *
+     * Everything here used to run after the original had been buffered, so the host waited for the
+     * original, then for the alternative, then for the judge. The intent is registered before the
+     * request is dispatched, so the decision to buy is already known when this runs: the added
+     * generation now overlaps the original reply and only the comparison stays serial.
+     *
+     * The ordering rule is unchanged — policy, reservation and `store.begin()` all complete before the
+     * first added model call — but the price of the rare declines changes: a purchase that is later
+     * thrown away (original over the cap, incomplete, empty, or a cycle that went stale mid-stream) is
+     * now a purchased row with one generation, where it used to skip without buying. That is the
+     * honest count, because the dispatch really happened.
+     * @param options - the matched main request.
+     * @param intent - the consumed intent.
+     * @param settings - settings snapshot taken when the request entered the waterfall.
+     * @param startedAt - wall clock the cycle began at.
+     * @returns The started cycle, or undefined when it was declined (its single row is already written).
+     */
+    private beginCycle;
+    /**
+     * Throw away whatever the cycle became, replaying the original.
+     *
+     * A cycle that was never bought owns no row of its own: `beginCycle` already wrote exactly one for
+     * this request ("why was it declined"), and a second row would inflate the skip distribution. A
+     * BOUGHT cycle does own one, and it is a purchased row: the dispatch really happened, so the usage
+     * it already reported is booked rather than dropped.
+     * @param cycle - the started cycle, or undefined when the buy was declined.
+     * @param intent - the consumed intent.
+     * @param startedAt - wall clock the cycle began at.
+     * @param outcome - terminal outcome to record.
+     * @param reason - human-readable reason for the log and the row.
+     * @param error - error text to store instead of the reason, when there is one.
+     */
+    private abandon;
+    /** Usage a discarded dispatch already reported, best effort, never zero when tokens were seen. */
+    private settledUsage;
     /**
      * The waterfall body.
      *

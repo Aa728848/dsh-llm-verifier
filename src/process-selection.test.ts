@@ -472,8 +472,35 @@ describe('process cycle execution', () => {
     const { chunks, report } = await run(h, { original })
     expect(chunks).toEqual(original)
     expect(report?.outcome).toBe('original-incomplete')
-    expect(report?.purchased).toBe(false)
-    expect(h.reserved).toHaveLength(0)
+    // The alternative is dispatched speculatively, before the original's shape is known, so a
+    // discarded cycle is a PURCHASED row: the dispatch really happened, and the usage it reported is
+    // booked rather than dropped.
+    expect(report?.purchased).toBe(true)
+    expect(report?.generatedCalls).toBe(1)
+    expect(h.reserved).toHaveLength(1)
+    expect(h.failed).toBe(1)
+  })
+
+  it('dispatches the alternative before the original reply finishes', async () => {
+    const order: string[] = []
+    // The overlap is a property of the selector, not of the purchase's IO latency: the store is
+    // stubbed here so the assertion measures dispatch ordering, not how fast a file write lands.
+    const h = harness({
+      stream: () => { order.push('generation'); return streamOf(textChunks('ALTERNATIVE')) },
+      store: () => ({ lookup: async () => ({ ok: true, purchased: false }), begin: async () => true, finish: async () => {} }) as never,
+    })
+    const source = (async function* () {
+      for (let index = 0; index < 5; index += 1) {
+        yield { type: 'text-delta', index: 0, text: 'ORIGINAL' } as StreamChunk
+        await new Promise(resolve => setImmediate(resolve))
+      }
+      // Overlapping the two dispatches is the whole point: the extra generation must already be in
+      // flight when the original reply finishes, instead of queued behind it.
+      order.push('before-finish:' + String(order.includes('generation')))
+      yield { type: 'finish', reason: { kind: 'stop' } } as StreamChunk
+    })()
+    await run(h, { original: textChunks('ORIGINAL'), next: () => source })
+    expect(order).toContain('before-finish:true')
   })
 
   it('passes the original through untouched once it exceeds the buffer cap', async () => {
@@ -487,9 +514,13 @@ describe('process cycle execution', () => {
     const h = harness({ stream: () => { streamed = true; return streamOf(textChunks('alternative')) } })
     const { chunks, report } = await run(h, { original })
     expect(chunks).toEqual(original)
-    expect(streamed).toBe(false)
+    // Speculation costs one generation here: the dispatch happens before the cap can be observed.
+    expect(streamed).toBe(true)
     expect(report?.outcome).toBe('original-over-cap')
-    expect(h.reserved).toHaveLength(0)
+    expect(report?.purchased).toBe(true)
+    expect(report?.generatedCalls).toBe(1)
+    expect(h.reserved).toHaveLength(1)
+    expect(h.failed).toBe(1)
   })
 
   it('discards an overflowing alternative and replays the original', async () => {
