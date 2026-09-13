@@ -222,6 +222,7 @@ export declare const zh: {
     'recent.detail.replayNone': string;
     'recent.detail.routeSameCandidate': string;
     'recent.detail.routeAugmented': string;
+    'recent.detail.routeAlternativeModel': string;
     'recent.detail.channelFallback': string;
     'models.title': string;
     'models.calls': string;
@@ -240,6 +241,8 @@ export declare const zh: {
     'field.autoProcessSelection.title': string;
     'field.autoProcessSelection.help': string;
     'field.autoProcessFailureContext.title': string;
+    'field.autoProcessAlternativeModel.title': string;
+    'field.autoProcessAlternativeModel.help': string;
     'field.autoProcessFailureContext.help': string;
     'field.captureDecisions.title': string;
     'field.captureDecisions.help': string;
@@ -515,6 +518,7 @@ export declare const dictionaries: {
         'recent.detail.replayNone': string;
         'recent.detail.routeSameCandidate': string;
         'recent.detail.routeAugmented': string;
+        'recent.detail.routeAlternativeModel': string;
         'recent.detail.channelFallback': string;
         'models.title': string;
         'models.calls': string;
@@ -533,6 +537,8 @@ export declare const dictionaries: {
         'field.autoProcessSelection.title': string;
         'field.autoProcessSelection.help': string;
         'field.autoProcessFailureContext.title': string;
+        'field.autoProcessAlternativeModel.title': string;
+        'field.autoProcessAlternativeModel.help': string;
         'field.autoProcessFailureContext.help': string;
         'field.captureDecisions.title': string;
         'field.captureDecisions.help': string;
@@ -805,6 +811,7 @@ export declare const dictionaries: {
         'recent.detail.replayNone': string;
         'recent.detail.routeSameCandidate': string;
         'recent.detail.routeAugmented': string;
+        'recent.detail.routeAlternativeModel': string;
         'recent.detail.channelFallback': string;
         'models.title': string;
         'models.calls': string;
@@ -823,6 +830,8 @@ export declare const dictionaries: {
         'field.autoProcessSelection.title': string;
         'field.autoProcessSelection.help': string;
         'field.autoProcessFailureContext.title': string;
+        'field.autoProcessAlternativeModel.title': string;
+        'field.autoProcessAlternativeModel.help': string;
         'field.autoProcessFailureContext.help': string;
         'field.captureDecisions.title': string;
         'field.captureDecisions.help': string;

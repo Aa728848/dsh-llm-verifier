@@ -19,6 +19,7 @@ export interface Values {
   captureDecisions: boolean
   autoProcessSelection: boolean
   autoProcessFailureContext: boolean
+  autoProcessAlternativeModel: string
   autoVerifyMode: 'manual' | 'smart' | 'strict'
   autoVerifyThreshold: number
   autoVerifyRepeats: number
@@ -73,6 +74,7 @@ export const CONFIG_DEFAULTS: Values = {
   captureDecisions: true,
   autoProcessSelection: false,
   autoProcessFailureContext: true,
+  autoProcessAlternativeModel: '',
   autoVerifyMode: 'smart',
   autoVerifyThreshold: 0.65,
   autoVerifyRepeats: 1,
@@ -209,6 +211,7 @@ export const FIELDS: readonly FieldSpec[] = [
   toggle('autoVerifySubagents', 'routing'),
   toggle('autoProcessSelection', 'routing'),
   toggle('autoProcessFailureContext', 'routing'),
+  text('autoProcessAlternativeModel', 'routing'),
 
   select('provider', 'model', 'provider', false),
   select('model', 'model', 'model', false),
@@ -291,6 +294,7 @@ export function valuesFromView(view: Record<string, unknown> | undefined): Value
     captureDecisions: v.captureDecisions !== false,
     autoProcessSelection: v.autoProcessSelection === true,
     autoProcessFailureContext: v.autoProcessFailureContext !== false,
+    autoProcessAlternativeModel: typeof v.autoProcessAlternativeModel === 'string' ? v.autoProcessAlternativeModel.trim() : '',
     autoVerifyMode: mode,
     autoVerifyThreshold: numberOr('autoVerifyThreshold'),
     autoVerifyRepeats: numberOr('autoVerifyRepeats'),
@@ -409,7 +413,10 @@ export function validateValues(values: Values): FieldIssue[] {
       }
       continue
     }
-    if (field.kind === 'text' && field.key !== 'criteriaFile' && field.key !== 'label') {
+    // Empty is a legal value for the two identity-ish text fields: the custom criteria file falls
+    // back to `coding`, and the alternative model falls back to the request's own route. Requiring
+    // text here would reject a save the host accepts.
+    if (field.kind === 'text' && field.key !== 'criteriaFile' && field.key !== 'label' && field.key !== 'autoProcessAlternativeModel') {
       const value = typeof raw === 'string' ? raw.trim() : ''
       if (!value) {
         issues.push({ key: field.key, code: 'required' })

@@ -247,6 +247,7 @@ export const zh = {
   'recent.detail.replayNone': '未回放',
   'recent.detail.routeSameCandidate': '两份候选相同（未请裁判）',
   'recent.detail.routeAugmented': '备选已注入失败证据',
+  'recent.detail.routeAlternativeModel': '备选模型 {model}',
   'recent.detail.channelFallback': '通道降级 {count}',
 
   // Model summary
@@ -269,6 +270,8 @@ export const zh = {
   'field.autoProcessSelection.title': '过程选优（受控）',
   'field.autoProcessSelection.help': '默认关闭。开启后，仅 smart 模式、且同一任务最近两次已完成的验证运行都失败时（失败从输出文本判定：非零退出码、N failed、error TS、test result: FAILED，工具级报错也算），才为下一次主模型请求额外生成一份备选回复，用 process 判据（失败靶向 / 与已失败尝试不同 / 可验证的一步）比较后只回放胜者。每任务最多购买 1 个周期，并同时消耗现有任务/会话路由额度、受模型调用预算与最终验收保留额度共同限制（同一会话的第二个任务仍可购买自己的周期）。备选采样温度不低于生成档位，避免低温会话买到原回复的副本。裁判看到的是重建并限长过的视图：任务、约束、最近失败证据、工具定义与两份候选，全部先脱敏；工具动作无法完整容纳时回退原回复。选优不等于验收，之后的最终验收照常执行。关闭时完全不进入该路径：不生成候选、不调用裁判、不缓冲响应。',
   'field.autoProcessFailureContext.title': '备选带上失败证据',
+  'field.autoProcessAlternativeModel.title': '备选用另一个模型',
+  'field.autoProcessAlternativeModel.help': '默认留空：备选由当前会话模型再采样一份。填入 provider/model（例如 deepseek-official/deepseek-v4-flash）则改用该模型生成备选，候选之间因此是真正的不同假设，而不是同一模型的两次采样；代价是这次比较同时也在比「哪个模型更好」，无法与任务本身的质量分开，所以统计行的 route.alternativeModel 会记下用的是哪个模型，供对照读取。跨 provider 时不再继承原请求的推理强度（适配器可能不认识该 id），maxTokens 与生成温度下限照旧。',
   'field.autoProcessFailureContext.help': '默认开启。把触发本周期的那两次失败验证运行（先脱敏、按单项与总量双层限长）作为一条插件消息附在备选请求之后，让额外生成的候选是针对真实失败的一次不同尝试，而不是同一提示词的再抽样；关闭即对照组（两份候选掌握的信息完全相同，周期照买）。裁判并不知道哪份候选带了证据，避免按来源而不是按内容打分；统计数据里的 alternativeAugmented 记录该差异。',
   'field.captureDecisions.title': '保存决策快照',
   'field.captureDecisions.help': '把每次裁判调用的提示词与原始回答脱敏后限量存进本话题的 verifier/decisions-v1.json（每次调用 ≤ 32 次模型调用、单条记录 ≤ 3 万字符、按话题保留最近 40 条）。用于在统计看板里回答"裁判为什么这么判"，不参与任何判定。',
@@ -569,6 +572,7 @@ export const en: I18nDict = {
   'recent.detail.replayNone': 'not replayed',
   'recent.detail.routeSameCandidate': 'identical candidates (no judge called)',
   'recent.detail.routeAugmented': 'alternative generated with the failure evidence',
+  'recent.detail.routeAlternativeModel': 'alternative model {model}',
   'recent.detail.channelFallback': 'channel fallbacks {count}',
 
   // Model summary
@@ -591,6 +595,8 @@ export const en: I18nDict = {
   'field.autoProcessSelection.title': 'Process Selection (Controlled)',
   'field.autoProcessSelection.help': 'Off by default. When on, smart mode only: if the two most recent completed verification runs of the task BOTH failed (failure is read from the output text — a non-zero exit marker, N failed, error TS, test result: FAILED, and a tool-level error all count), the next main-model request gets one alternative reply, compared with the process rubric (failure target / different from what failed / verifiable next step), and only the winner is replayed. At most one cycle per task — it also draws on the existing task/session route allowance and is bounded by the model-call budget and the final-acceptance floor, so a second task in the same session can still buy its own cycle. The alternative is sampled at no less than the generation temperature, so a near-deterministic session cannot buy a copy of the original reply. The judge sees a rebuilt, length-bounded view (task, constraints, recent failure evidence, tool definitions and both candidates), redacted first; a tool action that cannot fit in full falls back to the original reply. Selection is never acceptance, so the final gate still runs afterwards. While off the path is never entered: no candidate generation, no judge calls, no response buffering.',
   'field.autoProcessFailureContext.title': 'Give the alternative the failure evidence',
+  'field.autoProcessAlternativeModel.title': 'Generate the alternative with another model',
+  'field.autoProcessAlternativeModel.help': 'Empty by default: the alternative is a resample of the session model. A provider/model entry (for example deepseek-official/deepseek-v4-flash) generates it with that model instead, so the candidates are genuinely different hypotheses rather than two samples of one model. The cost is that the comparison then also measures which model is better, which cannot be separated from the task outcome - hence route.alternativeModel records which model was used. Across providers the request reasoning effort is not inherited (the adapter may not know that id); maxTokens and the generation temperature floor still apply.',
   'field.autoProcessFailureContext.help': 'On by default. The two failing verification runs that triggered the cycle (redacted first, bounded per item and in total) are appended to the alternative request as one plugin message, so the extra candidate is a differently informed attempt rather than a resample of the same prompt; turning it off is the control arm (both candidates see exactly the same information, the cycle is still bought). The judge is not told which candidate carried the evidence, so it scores content rather than provenance; the alternativeAugmented flag in the statistics records the difference.',
   'field.captureDecisions.title': 'Keep decision snapshots',
   'field.captureDecisions.help': 'Store the redacted prompt and raw answer of every judge call in this topic (verifier/decisions-v1.json): at most 32 model calls per invocation, 30k characters per record, the newest 40 records per topic. It answers "why did the judge decide that" in the dashboard and never affects a verdict.',

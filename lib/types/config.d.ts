@@ -68,6 +68,15 @@ export interface Config {
      * OFF is the control arm of the A/B comparison, not a supported end state.
      */
     autoProcessFailureContext?: boolean;
+    /**
+     * P06: generate the alternative reply with this `provider/model` instead of the request's own.
+     *
+     * Empty (the default) resamples the session model. A second model is the upstream ensemble idea
+     * without the proxy: the candidates are then genuinely different hypotheses rather than two
+     * samples of one model. It turns the comparison into "which model's next step is better", which is
+     * a different question — hence the arm is recorded on the row (`route.alternativeModel`).
+     */
+    autoProcessAlternativeModel?: string;
     autoRouteMaxItemChars?: number;
     autoRouteMaxInputChars?: number;
     autoMaxModelCallsPerTask?: number;
@@ -126,6 +135,7 @@ export interface ResolvedConfig {
     autoTrackCompletionThreshold: number;
     autoProcessSelection: boolean;
     autoProcessFailureContext: boolean;
+    autoProcessAlternativeModel: string;
     autoRouteMaxItemChars: number;
     autoRouteMaxInputChars: number;
     autoMaxModelCallsPerTask: number;

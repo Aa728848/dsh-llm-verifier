@@ -75,6 +75,15 @@ export interface Config {
    * OFF is the control arm of the A/B comparison, not a supported end state.
    */
   autoProcessFailureContext?: boolean
+  /**
+   * P06: generate the alternative reply with this `provider/model` instead of the request's own.
+   *
+   * Empty (the default) resamples the session model. A second model is the upstream ensemble idea
+   * without the proxy: the candidates are then genuinely different hypotheses rather than two
+   * samples of one model. It turns the comparison into "which model's next step is better", which is
+   * a different question — hence the arm is recorded on the row (`route.alternativeModel`).
+   */
+  autoProcessAlternativeModel?: string
   autoRouteMaxItemChars?: number
   autoRouteMaxInputChars?: number
   autoMaxModelCallsPerTask?: number
@@ -134,6 +143,7 @@ export interface ResolvedConfig {
   autoTrackCompletionThreshold: number
   autoProcessSelection: boolean
   autoProcessFailureContext: boolean
+  autoProcessAlternativeModel: string
   autoRouteMaxItemChars: number
   autoRouteMaxInputChars: number
   autoMaxModelCallsPerTask: number
@@ -187,6 +197,7 @@ export const Config: z<Config> = z.object({
   autoTrackCompletionThreshold: z.number().min(0).max(1).default(0.684),
   autoProcessSelection: z.boolean().default(false),
   autoProcessFailureContext: z.boolean().default(true),
+  autoProcessAlternativeModel: z.string().default(''),
   autoRouteMaxItemChars: z.number().step(1).min(100).default(20000),
   autoRouteMaxInputChars: z.number().step(1).min(1000).default(60000),
   autoMaxModelCallsPerTask: z.number().step(1).min(1).default(96),
@@ -256,6 +267,13 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   if (!Number.isFinite(autoVerifyThreshold) || autoVerifyThreshold < 0 || autoVerifyThreshold > 1) throw new Error('llm-verifier: autoVerifyThreshold must be between 0 and 1')
   const temperature = config.temperature ?? 0.2
   if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) throw new Error('llm-verifier: temperature must be between 0 and 2')
+  // P06's alternative-model override: empty means "use the request's own route", anything else must
+  // name both halves, because a half-specified route would silently fall back to the session model
+  // while the row claimed a second model was used.
+  const alternativeModel = (config.autoProcessAlternativeModel ?? '').trim()
+  if (alternativeModel !== '' && !/^[^\s/]+\/[^\s]+$/u.test(alternativeModel)) {
+    throw new Error('llm-verifier: autoProcessAlternativeModel must be "provider/model" or empty')
+  }
   const values = {
     autoVerifyRepeats: config.autoVerifyRepeats ?? 1,
     autoTrackRepeats: config.autoTrackRepeats ?? 3,
@@ -372,6 +390,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     captureDecisions: config.captureDecisions ?? true,
     autoProcessSelection: config.autoProcessSelection ?? false,
     autoProcessFailureContext: config.autoProcessFailureContext ?? true,
+    autoProcessAlternativeModel: alternativeModel,
     criteriaPreset,
     criteriaFile,
     autoVerifyTeamTasks: config.autoVerifyTeamTasks ?? true,

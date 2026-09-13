@@ -23,6 +23,8 @@ export interface ReplayRouteObservation {
     sameCandidate?: boolean;
     /** P06: the alternative was generated with the failing-run evidence attached. */
     alternativeAugmented?: boolean;
+    /** P06: the `provider/model` the alternative was generated with. */
+    alternativeModel?: string;
 }
 /** One persisted invocation, reduced to the fields an acceptance decision depends on. */
 export interface ReplayInvocation {

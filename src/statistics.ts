@@ -222,6 +222,8 @@ export interface RouteObservation {
    * in the stored rows.
    */
   alternativeAugmented?: boolean
+  /** P06: the `provider/model` the alternative was generated with, when it was not the request's own. */
+  alternativeModel?: string
 }
 
 export interface InvocationRecord {
@@ -382,6 +384,7 @@ function cleanRoute(input: RouteObservation | undefined): RouteObservation | und
   if (input.replayed === 'original' || input.replayed === 'candidate' || input.replayed === 'none') route.replayed = input.replayed
   if (input.sameCandidate === true) route.sameCandidate = true
   if (input.alternativeAugmented === true) route.alternativeAugmented = true
+  if (typeof input.alternativeModel === 'string' && input.alternativeModel) route.alternativeModel = input.alternativeModel.slice(0, 120)
   return route
 }
 

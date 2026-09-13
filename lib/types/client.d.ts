@@ -44,6 +44,7 @@ export interface RouteObservationView {
     judgeCalls?: number;
     sameCandidate?: boolean;
     alternativeAugmented?: boolean;
+    alternativeModel?: string;
 }
 export interface InvocationRecord {
     id: string;

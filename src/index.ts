@@ -743,6 +743,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         timeoutMs: selected.timeoutMs,
         maxItemChars: selected.autoRouteMaxItemChars,
         maxInputChars: selected.autoRouteMaxInputChars,
+        alternativeModel: selected.autoProcessAlternativeModel,
       }
     },
     // The same sanitizer every other judge input goes through. A candidate reply is untrusted text

@@ -6,7 +6,7 @@ import { isAgentLoopRequest, markAgentLoopRequest, type GenerateOptions, type St
 import {
   PROCESS_CANDIDATE_CAP_CHARS, PROCESS_INTENT_TTL_MS, ProcessCycleStore, ProcessSelector,
   buildAlternativeRequest, buildProcessView, candidateIdentity, finishKind, measureChunk, renderCandidate,
-  renderCandidateView, renderToolDigest, usageFromChunks, type ProcessCycleReport, type ProcessDeliveryCorrection,
+  renderCandidateView, renderToolDigest, resolveAlternativeTarget, usageFromChunks, type ProcessCycleReport, type ProcessDeliveryCorrection,
   type ProcessIntent, type ProcessSelectorDeps,
 } from './process-selection.ts'
 import type { AutoVerifierRouter, Reservation, RouterPolicy } from './router.ts'
@@ -324,6 +324,28 @@ describe('alternative request', () => {
     const built = buildAlternativeRequest(original as never, new AbortController().signal, 'evidence')
     expect(built.messages.slice(0, 2)).toEqual(history)
     expect(history).toHaveLength(2)
+  })
+})
+
+describe('alternative model target', () => {
+  it('overrides the route and drops an adapter-owned effort only across providers', () => {
+    const original = markAgentLoopRequest({ provider: 'p', model: 'm', messages: [] as never, reasoningEffort: 'high' as never })
+    const signal = new AbortController().signal
+    // Same provider: the effort id is still valid, so the alternative keeps it.
+    expect(buildAlternativeRequest(original, signal, undefined, { provider: 'p', model: 'm2' })).toMatchObject({ provider: 'p', model: 'm2', reasoningEffort: 'high' })
+    // Another adapter may not know that id, and a rejected request would cost the whole cycle.
+    const cross = buildAlternativeRequest(original, signal, 'evidence', { provider: 'q', model: 'm3' })
+    expect(cross).toMatchObject({ provider: 'q', model: 'm3' })
+    expect(cross.reasoningEffort).toBeUndefined()
+    // The failure notice still rides along, and the generation temperature floor still applies.
+    expect(JSON.stringify(cross.messages)).toContain('evidence')
+    expect(cross.temperature).toBe(1)
+  })
+
+  it('treats a half-specified route as no override', () => {
+    expect(resolveAlternativeTarget('  a/b  ')).toEqual({ provider: 'a', model: 'b' })
+    expect(resolveAlternativeTarget('p/a/b')).toEqual({ provider: 'p', model: 'a/b' })
+    for (const value of ['', '   ', 'a', '/b', 'a/']) expect(resolveAlternativeTarget(value)).toBeUndefined()
   })
 })
 

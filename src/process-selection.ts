@@ -97,6 +97,27 @@ export interface ProcessSelectionSettings {
   timeoutMs: number
   maxItemChars: number
   maxInputChars: number
+  /**
+   * `provider/model` for the alternative reply; empty or absent means the request's own route.
+   *
+   * Optional so a settings producer that predates the knob cannot abort a cycle: an absent value
+   * simply mirrors the original request, which is what the plugin did before the override existed.
+   */
+  alternativeModel?: string
+}
+
+/**
+ * Parse the configured alternative-model override.
+ * @param value - raw `provider/model` setting (empty allowed).
+ * @returns The route to generate the alternative with, or undefined to mirror the original.
+ */
+export function resolveAlternativeTarget(value: string | undefined): { provider: string; model: string } | undefined {
+  const trimmed = (value ?? '').trim()
+  const slash = trimmed.indexOf('/')
+  if (slash <= 0 || slash === trimmed.length - 1) return undefined
+  const provider = trimmed.slice(0, slash).trim()
+  const model = trimmed.slice(slash + 1).trim()
+  return provider === '' || model === '' ? undefined : { provider, model }
 }
 
 /** Everything the selector reports back for the statistics sidecar. */
@@ -304,12 +325,15 @@ export function buildFailureNotice(context: string): Message {
  * deliberately NOT copied, and neither is \`sessionId\`, so the alternative can never be mistaken
  * for (or recurse into) a main-loop request.
  */
-export function buildAlternativeRequest(options: GenerateOptions, signal: AbortSignal, failureContext?: string): GenerateOptions {
+export function buildAlternativeRequest(options: GenerateOptions, signal: AbortSignal, failureContext?: string, target?: { provider: string; model: string }): GenerateOptions {
+  // A cross-provider target cannot inherit an adapter-owned reasoning-effort id: the other adapter
+  // may not know it, and a rejected request would cost the whole cycle. Same provider keeps it.
+  const carriesEffort = options.reasoningEffort !== undefined && (target === undefined || target.provider === options.provider)
   return {
-    provider: options.provider,
-    model: options.model,
+    provider: target?.provider ?? options.provider,
+    model: target?.model ?? options.model,
     messages: failureContext === undefined ? options.messages : [...options.messages, buildFailureNotice(failureContext)],
-    ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
+    ...(carriesEffort ? { reasoningEffort: options.reasoningEffort } : {}),
     ...(options.system === undefined ? {} : { system: options.system }),
     ...(options.tools === undefined ? {} : { tools: options.tools }),
     temperature: Math.max(GENERATION_TEMPERATURE, options.temperature ?? 0),
@@ -800,7 +824,8 @@ export class ProcessSelector {
       await this.skip(startedAt, intent, 'no-process-budget', 'the task/session budget or the one-per-task process allowance refused the cycle')
       return
     }
-    const observation: RouteObservation = { cycleId: reservation.id, trigger: 'llm-stream', stage: 'process', destination: 'process', attempt: reservation.attempt, reservedCalls: reservation.expectedCalls, replayed: 'original', generatedCalls: 0, judgeCalls: 0, sameCandidate: false, ...(intent.failureContext === undefined ? {} : { alternativeAugmented: true }) }
+    const alternativeTarget = resolveAlternativeTarget(settings.alternativeModel)
+    const observation: RouteObservation = { cycleId: reservation.id, trigger: 'llm-stream', stage: 'process', destination: 'process', attempt: reservation.attempt, reservedCalls: reservation.expectedCalls, replayed: 'original', generatedCalls: 0, judgeCalls: 0, sameCandidate: false, ...(intent.failureContext === undefined ? {} : { alternativeAugmented: true }), ...(alternativeTarget === undefined ? {} : { alternativeModel: alternativeTarget.provider + '/' + alternativeTarget.model }) }
     const store = this.deps.store(intent.agent)
     const started = await store.begin({ cycleId: reservation.id, sessionId: intent.sessionId, taskStartSeq: intent.taskStartSeq, signal: intent.signal, startedAt: this.deps.now() })
     if (!started) {
@@ -834,7 +859,7 @@ export class ProcessSelector {
         return
       }
       let alternative: BufferedCandidate
-      const request = buildAlternativeRequest(options, phase.signal, intent.failureContext)
+      const request = buildAlternativeRequest(options, phase.signal, intent.failureContext, alternativeTarget)
       this.internal.add(request as object)
       // The alternative's chunks are collected HERE so the usage a stream already reported before
       // throwing survives: reporting the failed generation as zero tokens hid real spend.

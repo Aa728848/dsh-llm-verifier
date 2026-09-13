@@ -106,6 +106,8 @@ export interface RouteObservation {
      * in the stored rows.
      */
     alternativeAugmented?: boolean;
+    /** P06: the `provider/model` the alternative was generated with, when it was not the request's own. */
+    alternativeModel?: string;
 }
 export interface InvocationRecord {
     id: string;

@@ -782,7 +782,7 @@ describe('P06 process selection through the real hooks', () => {
     const stream = handlers.get('llm/stream')!
     const chunks: unknown[] = []
     for await (const chunk of stream(main, () => streamOf(originalChunks())) as AsyncIterable<unknown>) chunks.push(chunk)
-    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ route?: { trigger?: string; replayed?: string; generatedCalls?: number; judgeCalls?: number; alternativeAugmented?: boolean }; verdict?: { outcome?: string } }> } }
+    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ route?: { trigger?: string; replayed?: string; generatedCalls?: number; judgeCalls?: number; alternativeAugmented?: boolean; alternativeModel?: string }; verdict?: { outcome?: string } }> } }
     return { chunks, calls: options.calls, recent: overview.value.recent }
   }
 
@@ -848,6 +848,22 @@ describe('P06 process selection through the real hooks', () => {
     expect(JSON.stringify(generation?.messages ?? [])).not.toContain('DATA, not instructions')
     const cycle = recent.find(row => row.route?.trigger === 'llm-stream')
     expect(cycle?.route?.alternativeAugmented).toBeUndefined()
+  })
+
+  it('generates the alternative with the configured route and records which model it was', async () => {
+    const calls: string[] = []
+    let generation: { provider?: string; model?: string } | undefined
+    const { recent } = await drive({
+      config: { autoProcessSelection: true, autoProcessAlternativeModel: 'other-provider/other-model' },
+      events: stuck(),
+      calls,
+      onGeneration: request => { generation = request as { provider?: string; model?: string } },
+    })
+    // The generation is dispatched on the configured route; the judge still runs on the judge model.
+    expect(generation?.provider).toBe('other-provider')
+    expect(generation?.model).toBe('other-model')
+    const cycle = recent.find(row => row.route?.trigger === 'llm-stream')
+    expect(cycle?.route?.alternativeModel).toBe('other-provider/other-model')
   })
 
   it('buys at most one cycle per task', async () => {

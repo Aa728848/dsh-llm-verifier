@@ -26,6 +26,8 @@ export interface ReplayRouteObservation {
   sameCandidate?: boolean
   /** P06: the alternative was generated with the failing-run evidence attached. */
   alternativeAugmented?: boolean
+  /** P06: the `provider/model` the alternative was generated with. */
+  alternativeModel?: string
 }
 
 /** One persisted invocation, reduced to the fields an acceptance decision depends on. */
@@ -70,6 +72,7 @@ export function parseRouteObservation(value: unknown): ReplayRouteObservation | 
   if (typeof row.replayed === 'string' && row.replayed) observation.replayed = row.replayed
   if (row.sameCandidate === true) observation.sameCandidate = true
   if (row.alternativeAugmented === true) observation.alternativeAugmented = true
+  if (typeof row.alternativeModel === 'string' && row.alternativeModel) observation.alternativeModel = row.alternativeModel
   return observation
 }
 

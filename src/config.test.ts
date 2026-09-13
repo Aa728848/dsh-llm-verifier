@@ -333,6 +333,17 @@ describe('config - judges ensemble resolution', () => {
     expect(roundTripped.autoProcessFailureContext).toBe(false)
   })
 
+  it('accepts an alternative-model override only as a complete provider/model route', () => {
+    // Empty means "use the request's own route", which is the shipped behaviour.
+    expect(resolveConfig({}).autoProcessAlternativeModel).toBe('')
+    expect(resolveConfig({ autoProcessAlternativeModel: '  openai/gpt-5  ' }).autoProcessAlternativeModel).toBe('openai/gpt-5')
+    // A half-specified route would silently fall back to the session model while the statistics row
+    // claimed a second model was used, so it is rejected at save time instead.
+    for (const bad of ['openai', '/gpt-5', 'openai/', 'a b/c']) {
+      expect(() => resolveConfig({ autoProcessAlternativeModel: bad })).toThrow(/provider\/model/)
+    }
+  })
+
   it('resolves the criteria preset and defaults to the historical coding rubric', () => {
     const resolved = resolveConfig({})
     // Default MUST stay 'coding': it is the only preset byte-identical to DEFAULT_CRITERIA, so an

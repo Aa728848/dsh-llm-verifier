@@ -16,6 +16,7 @@ export interface Values {
     captureDecisions: boolean;
     autoProcessSelection: boolean;
     autoProcessFailureContext: boolean;
+    autoProcessAlternativeModel: string;
     autoVerifyMode: 'manual' | 'smart' | 'strict';
     autoVerifyThreshold: number;
     autoVerifyRepeats: number;

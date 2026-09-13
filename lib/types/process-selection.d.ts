@@ -87,7 +87,23 @@ export interface ProcessSelectionSettings {
     timeoutMs: number;
     maxItemChars: number;
     maxInputChars: number;
+    /**
+     * `provider/model` for the alternative reply; empty or absent means the request's own route.
+     *
+     * Optional so a settings producer that predates the knob cannot abort a cycle: an absent value
+     * simply mirrors the original request, which is what the plugin did before the override existed.
+     */
+    alternativeModel?: string;
 }
+/**
+ * Parse the configured alternative-model override.
+ * @param value - raw `provider/model` setting (empty allowed).
+ * @returns The route to generate the alternative with, or undefined to mirror the original.
+ */
+export declare function resolveAlternativeTarget(value: string | undefined): {
+    provider: string;
+    model: string;
+} | undefined;
 /** Everything the selector reports back for the statistics sidecar. */
 export interface ProcessCycleReport {
     agent: unknown;
@@ -237,7 +253,10 @@ export declare function buildFailureNotice(context: string): Message;
  * deliberately NOT copied, and neither is \`sessionId\`, so the alternative can never be mistaken
  * for (or recurse into) a main-loop request.
  */
-export declare function buildAlternativeRequest(options: GenerateOptions, signal: AbortSignal, failureContext?: string): GenerateOptions;
+export declare function buildAlternativeRequest(options: GenerateOptions, signal: AbortSignal, failureContext?: string, target?: {
+    provider: string;
+    model: string;
+}): GenerateOptions;
 /**
  * Render one bounded candidate view for the judge, or refuse when its actions cannot fit.
  *
