@@ -188,6 +188,37 @@ function scriptedStream(strongDraft: number, failing: readonly number[], calls: 
 
 const JUDGE = { provider: 'judge-provider', model: 'judge-model' }
 
+/**
+ * Recursive check that a rendered tool value satisfies its declared output schema.
+ *
+ * The host validates tool output against this schema, and a mismatch would only surface there —
+ * never in a unit test that just inspects fields it happens to know about. `required` sits on the
+ * property spec (the DSH shape), so an omitted required field and an undeclared extra field are
+ * both caught here.
+ */
+function assertMatchesSchema(value: unknown, schema: Record<string, any>, path: string): void {
+  if (schema.enum !== undefined) expect(schema.enum, path).toContain(value)
+  if (schema.type === 'object') {
+    const row = (value ?? {}) as Record<string, unknown>
+    const properties = (schema.properties ?? {}) as Record<string, Record<string, any>>
+    for (const [key, spec] of Object.entries(properties)) {
+      if (spec.required === true) expect(row[key], path + '.' + key + ' is required').toBeDefined()
+      if (row[key] !== undefined) assertMatchesSchema(row[key], spec, path + '.' + key)
+    }
+    if (schema.additionalProperties === false) expect(Object.keys(row).filter(key => !(key in properties)), path + ' has undeclared keys').toEqual([])
+    return
+  }
+  if (schema.type === 'array') {
+    expect(Array.isArray(value), path + ' is an array').toBe(true)
+    ;(value as unknown[]).forEach((entry, index) => assertMatchesSchema(entry, schema.items as Record<string, any>, path + '[' + index + ']'))
+    return
+  }
+  if (schema.type === 'integer') expect(Number.isSafeInteger(value), path + ' is an integer').toBe(true)
+  else if (schema.type === 'number') expect(typeof value === 'number' && Number.isFinite(value), path + ' is a finite number').toBe(true)
+  else if (schema.type === 'string') expect(typeof value === 'string', path + ' is a string').toBe(true)
+  else if (schema.type === 'boolean') expect(typeof value === 'boolean', path + ' is a boolean').toBe(true)
+}
+
 describe('verifier_best_of_n', () => {
   it('registers a gate-shaped output schema', () => {
     const definition = assemble().tools.get('verifier_best_of_n')!
@@ -244,6 +275,12 @@ describe('verifier_best_of_n', () => {
     expect(calls.filter(call => call.model === 'judge-model').length).toBeGreaterThan(3)
     // The reported cost covers the drafts as well as every judge call.
     expect(result.calls).toBe(calls.length)
+  })
+
+  it('renders a result that satisfies the declared output schema', async () => {
+    const definition = assemble(JUDGE, { stream: scriptedStream(2, [], []) }).tools.get('verifier_best_of_n')!
+    const result = await definition.execute({ task: 'do the thing' }, exec)
+    assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'best_of_n')
   })
 
   it('fails closed when fewer than two drafts survive, naming every failure', async () => {
