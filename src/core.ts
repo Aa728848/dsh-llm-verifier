@@ -54,6 +54,108 @@ export const DEFAULT_CRITERIA: Criterion[] = [
   },
 ]
 
+/** Task classes a rubric can be chosen for; `custom` lives at the config layer, not here. */
+export const CRITERIA_PRESET_IDS = ['coding', 'debug', 'research', 'ops', 'writing'] as const
+export type CriteriaPresetId = typeof CRITERIA_PRESET_IDS[number]
+
+/**
+ * Rubric per task class.
+ *
+ * Upstream ships one criteria file per benchmark (`criteria/swe_bench.md`, `terminal_bench.md`,
+ * `medagentbench.md`) and its TEMPLATE states the rule this table follows: 2-4 narrow criteria
+ * beat one broad one. Judging a research answer with "Output Match"/"Error Signal Detection"
+ * measures the wrong thing, and the automatic gate has no per-task override.
+ *
+ * `coding` is byte-identical to {@link DEFAULT_CRITERIA}: the default preset must not change
+ * any existing verdict, prompt or cache key.
+ */
+export const CRITERIA_PRESETS: Record<CriteriaPresetId, Criterion[]> = {
+  coding: DEFAULT_CRITERIA,
+  debug: [
+    {
+      id: 'reproduction',
+      name: 'Failure Reproduction',
+      description: 'Did the agent reproduce the reported failure BEFORE changing code? Look for a command or test whose observed output shows the failure happening. Penalize edits made without any reproduction, and treat "the user said it is broken" as no evidence.',
+    },
+    {
+      id: 'root_cause',
+      name: 'Root Cause',
+      description: 'Compare the stated cause with the evidence: does the diagnosis point at code that the observed output actually implicates, rather than at the last error message? Penalize symptom patches and guesses presented as findings.',
+    },
+    {
+      id: 'fix_verification',
+      name: 'Fix Verification',
+      description: 'Find the command that exercised the fix AFTER the last code change. Reward only observed output showing the previously failing case now passing with no new failures. Penalize "should be fixed" assertions and fixes verified before the final edit.',
+    },
+  ],
+  research: [
+    {
+      id: 'question_addressed',
+      name: 'Question Addressed',
+      description: 'Does the answer address exactly what was asked, including every part of a multi-part question? Penalize thorough answers to a nearby but different question, and unanswered sub-questions.',
+    },
+    {
+      id: 'source_grounding',
+      name: 'Source Grounding',
+      description: 'Is every material claim traceable to evidence the answer names (file, URL, command output)? Reward claims tied to a specific source; penalize confident claims with no traceable basis and citations that do not actually support the claim.',
+    },
+    {
+      id: 'limits_stated',
+      name: 'Limits Stated',
+      description: 'Does the answer separate what was verified from what is inferred, and state assumptions, uncertainty and missing data? Penalize unqualified certainty that goes beyond the observed evidence.',
+    },
+  ],
+  ops: [
+    {
+      id: 'change_specification',
+      name: 'Change Specification',
+      description: 'Compare the executed commands with the requested operation: target, environment, arguments and scope. Penalize actions against the wrong target, and side effects beyond the requested scope.',
+    },
+    {
+      id: 'observed_result',
+      name: 'Observed Result',
+      description: 'Reward commands whose observed output shows the intended state (service up, file present, config applied). Penalize inferring success from an exit code without inspecting the resulting state.',
+    },
+    {
+      id: 'reversibility',
+      name: 'Reversibility',
+      description: 'Does the work leave a way back: a backup, a recorded previous value, a dry run first, or a stated rollback path? Penalize irreversible changes made without one.',
+    },
+  ],
+  writing: [
+    {
+      id: 'brief_adherence',
+      name: 'Brief Adherence',
+      description: 'Check the requested deliverable: format, length, audience and every explicit constraint. Penalize a well-written piece that answers a different brief.',
+    },
+    {
+      id: 'structure_clarity',
+      name: 'Structure And Clarity',
+      description: 'Judge whether the structure carries the argument: ordering, sections, and a point the reader can follow. Penalize padding, repetition and unsupported assertions used as filler.',
+    },
+    {
+      id: 'factual_grounding',
+      name: 'Factual Grounding',
+      description: 'Are factual statements supported by the material the task supplied, or invented? Penalize fabricated specifics such as names, numbers, dates and quotes that do not appear in the evidence.',
+    },
+  ],
+}
+
+/** Derive a criterion id from free text: lowercase, alphanumerics and underscores, max 40 chars. */
+export function slugCriterionId(text: string): string {
+  const slug = text.toLowerCase().replace(/[^a-z0-9]+/gu, '_').replace(/^_+|_+$/gu, '')
+  return slug.slice(0, 40).replace(/_+$/gu, '') || 'criterion'
+}
+
+/** Make an id unique against the ids already used, by appending _2, _3, ... */
+export function dedupeCriterionId(id: string, seen: Set<string>): string {
+  let candidate = id
+  let suffix = 1
+  while (seen.has(candidate)) { suffix += 1; candidate = id + '_' + suffix }
+  seen.add(candidate)
+  return candidate
+}
+
 export const DEFAULT_GROUND_TRUTH_NOTE = "**IMPORTANT:** Focus on observed tool and terminal output as ground truth. Do NOT trust the agent's self-assessment or claims of success."
 
 /**
@@ -282,4 +384,65 @@ export function topPivots(wins: readonly number[], counts: readonly number[], re
 export function rankScores(wins: readonly number[], counts: readonly number[]): CandidateScore[] {
   return Array.from({ length: wins.length }, (_, index) => ({ index, score: (wins[index] ?? 0) / (counts[index] || 1) }))
     .sort((a, b) => b.score - a.score || a.index - b.index)
+}
+
+/** Optional trailing `{#id}` anchor on a criterion heading, e.g. `### Root Cause {#cause}`. */
+const CRITERION_ID_ANCHOR = /^(.*?)\s*\{#([A-Za-z0-9_-]+)\}\s*$/
+const HTML_COMMENT = /<!--[\s\S]*?-->/gu
+
+/**
+ * Parse a criteria file (or an inline markdown string) into a ground-truth note and criteria.
+ *
+ * Upstream's criteria files are the reason this exists: a rubric you can edit, review and
+ * version beats a hard-coded list, and its TEMPLATE pins the layout. Format:
+ *
+ *     # <title>                        (ignored)
+ *     ## Ground Truth Note             (optional)
+ *     <one paragraph the verifier always sees>
+ *     ## Criteria
+ *     ### <Criterion Name> {#id}       (the anchor is optional; the id is slugged from the name)
+ *     <instruction for this criterion>
+ *
+ * HTML comments are stripped, so a file can carry author notes the judge never sees. The
+ * parser fails closed: no criteria, a heading without a body, or a blank instruction throws
+ * rather than silently scoring with fewer criteria than authored.
+ * @param text - criteria markdown.
+ * @returns The optional ground-truth note and the parsed criteria, in file order.
+ */
+export function parseCriteriaMarkdown(text: string): { groundTruthNote: string; criteria: Criterion[] } {
+  const lines = text.replace(HTML_COMMENT, '').split(/\r?\n/u)
+  const criteria: Criterion[] = []
+  const seen = new Set<string>()
+  let groundTruthNote = ''
+  let section: 'ground_truth' | 'criteria' | undefined
+  let current: { name: string; id: string } | undefined
+  let buffer: string[] = []
+  const flush = () => {
+    const body = buffer.join('\n').trim()
+    if (section === 'ground_truth') { if (!groundTruthNote) groundTruthNote = body }
+    else if (current !== undefined) { criteria.push({ id: current.id, name: current.name, description: body }); current = undefined }
+    buffer = []
+  }
+  for (const line of lines) {
+    if (line.startsWith('## ') && !line.startsWith('### ')) {
+      flush()
+      const heading = line.slice(3).trim().toLowerCase()
+      section = heading.includes('ground truth') ? 'ground_truth' : heading.includes('criteri') ? 'criteria' : undefined
+    } else if (line.startsWith('### ') && section === 'criteria') {
+      flush()
+      const heading = line.slice(4).trim()
+      const anchored = CRITERION_ID_ANCHOR.exec(heading)
+      const name = (anchored?.[1] ?? heading).trim()
+      current = { name, id: dedupeCriterionId(slugCriterionId(anchored?.[2] ?? name), seen) }
+    } else if (line.startsWith('# ')) {
+      continue
+    } else {
+      buffer.push(line)
+    }
+  }
+  flush()
+  if (criteria.length === 0) throw new Error('llm-verifier: criteria file has no criteria — add a "## Criteria" section with one "### Criterion Name" heading per criterion')
+  const empty = criteria.filter(criterion => criterion.description.length === 0).map(criterion => criterion.id)
+  if (empty.length > 0) throw new Error('llm-verifier: criteria file has criteria with no instruction: ' + empty.join(', '))
+  return { groundTruthNote, criteria }
 }

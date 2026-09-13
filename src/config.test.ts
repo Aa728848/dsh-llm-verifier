@@ -311,6 +311,20 @@ describe('config - judges ensemble resolution', () => {
     ).toThrow('llm-verifier: extraJudges[0] must be an object')
   })
 
+  it('resolves the criteria preset and defaults to the historical coding rubric', () => {
+    const resolved = resolveConfig({})
+    // Default MUST stay 'coding': it is the only preset byte-identical to DEFAULT_CRITERIA, so an
+    // existing installation's verdicts and cache keys do not move.
+    expect(resolved.criteriaPreset).toBe('coding')
+    expect(resolved.criteriaFile).toBe('')
+    expect(resolveConfig({ criteriaPreset: 'research' }).criteriaPreset).toBe('research')
+    expect(resolveConfig({ criteriaPreset: 'custom', criteriaFile: '  rubric.md ' }).criteriaFile).toBe('rubric.md')
+    // A custom preset with no file is NOT a config error: the resolver degrades to coding and
+    // reports why, so a typo in a rubric path cannot disable the gate.
+    expect(resolveConfig({ criteriaPreset: 'custom' }).criteriaFile).toBe('')
+    expect(() => resolveConfig({ criteriaPreset: 'nonsense' as any })).toThrow('llm-verifier: criteriaPreset must be one of coding, debug, research, ops, writing, custom')
+  })
+
   it('regression: primary configuration still validates and behaves as before', () => {
     expect(() => resolveConfig({ provider: '' })).toThrow('llm-verifier: provider must be non-empty')
     expect(() => resolveConfig({ provider: '   ' })).toThrow('llm-verifier: provider must be non-empty')

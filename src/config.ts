@@ -1,5 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from 'schemastery'
+import { CRITERIA_PRESET_IDS, type CriteriaPresetId } from './core.ts'
+
+/** A configured rubric: a bundled task-class preset, or a markdown file. */
+export type CriteriaPresetSelection = CriteriaPresetId | 'custom'
 
 export const VERIFIER_SETTINGS_NAMESPACE = 'llm-verifier' as never
 
@@ -67,6 +71,15 @@ export interface Config {
    * log; capped per call, per record and per invocation by `decisions.ts`.
    */
   captureDecisions?: boolean
+  /**
+   * Rubric the automatic gate (final acceptance, routed compare/select/track) scores with.
+   *
+   * Defaults to `coding` = the historical DEFAULT_CRITERIA, so an existing installation is
+   * unaffected. Judging a research or ops task with the coding rubric measures the wrong thing.
+   */
+  criteriaPreset?: CriteriaPresetSelection
+  /** Markdown rubric file, read when `criteriaPreset` is `custom`. See README for the format. */
+  criteriaFile?: string
   autoVerifyTeamTasks?: boolean
   autoVerifyPlanMode?: boolean
   autoVerifySubagents?: boolean
@@ -109,6 +122,8 @@ export interface ResolvedConfig {
   autoMaxModelCallsPerTask: number
   autoMaxModelCallsPerSession: number
   captureDecisions: boolean
+  criteriaPreset: CriteriaPresetSelection
+  criteriaFile: string
   autoVerifyTeamTasks: boolean
   autoVerifyPlanMode: boolean
   autoVerifySubagents: boolean
@@ -158,6 +173,8 @@ export const Config: z<Config> = z.object({
   autoMaxModelCallsPerTask: z.number().step(1).min(1).default(96),
   autoMaxModelCallsPerSession: z.number().step(1).min(1).default(240),
   captureDecisions: z.boolean().default(true),
+  criteriaPreset: z.union([...CRITERIA_PRESET_IDS, 'custom'] as const).default('coding'),
+  criteriaFile: z.string().default(''),
   autoVerifyTeamTasks: z.boolean().default(true),
   autoVerifyPlanMode: z.boolean().default(true),
   autoVerifySubagents: z.boolean().default(false),
@@ -257,6 +274,11 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   const estimatedInputUsdPerMillion = config.estimatedInputUsdPerMillion ?? 0
   const estimatedOutputUsdPerMillion = config.estimatedOutputUsdPerMillion ?? 0
   if (![estimatedInputUsdPerMillion, estimatedOutputUsdPerMillion].every(value => Number.isFinite(value) && value >= 0)) throw new Error('llm-verifier: estimated token prices must be finite non-negative numbers')
+  const criteriaPreset = config.criteriaPreset ?? 'coding'
+  if (criteriaPreset !== 'custom' && !CRITERIA_PRESET_IDS.includes(criteriaPreset as CriteriaPresetId)) throw new Error('llm-verifier: criteriaPreset must be one of ' + [...CRITERIA_PRESET_IDS, 'custom'].join(', '))
+  // A half-configured custom rubric is NOT a config error: CriteriaResolver falls back to the
+  // coding preset and reports why, so a typo in a rubric path cannot disable the gate.
+  const criteriaFile = (config.criteriaFile ?? '').trim()
   const reasoningEffort = config.reasoningEffort?.trim()
 
   const extraJudges = config.extraJudges ?? []
@@ -329,6 +351,8 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     autoRouteMinConfidence,
     autoTrackCompletionThreshold,
     captureDecisions: config.captureDecisions ?? true,
+    criteriaPreset,
+    criteriaFile,
     autoVerifyTeamTasks: config.autoVerifyTeamTasks ?? true,
     autoVerifyPlanMode: config.autoVerifyPlanMode ?? true,
     autoVerifySubagents: config.autoVerifySubagents ?? false,

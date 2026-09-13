@@ -3,7 +3,8 @@ import { ScoreCache, SingleFlight, stableHash, type CachedPairScore } from './ca
 import type { DecisionTrace } from './decisions.ts'
 import {
   DEFAULT_CRITERIA, DEFAULT_GROUND_TRUTH_NOTE, accumulatePairs, buildPairwisePrompt, buildProgressPrompt,
-  extractProgressScore, extractScore, pivotRoundPairs, rankScores, ringCycle, topPivots, type Criterion,
+  dedupeCriterionId, extractProgressScore, extractScore, pivotRoundPairs, rankScores, ringCycle, slugCriterionId,
+  topPivots, type Criterion,
 } from './core.ts'
 
 export interface CompareOptions { problem: string; candidateA: string; candidateB: string; criteria?: readonly Criterion[]; groundTruthNote?: string; repeats?: number; images?: readonly VerifierImage[]; trace?: DecisionTrace }
@@ -699,9 +700,35 @@ export class VerifierEngine {
   }
 }
 
+/**
+ * Normalize a caller-supplied `criteria` argument into the engine's canonical shape.
+ *
+ * Mirrors upstream's `normalize_criteria` so a caller does not have to fill in every field: a
+ * plain string is both the name and the instruction, and a missing `id` is slugged from the
+ * name (the score cache keys on the rendered prompt, so a slug is cosmetic). Ids are
+ * de-duplicated because `compare` groups per-criterion results by id — a collision would
+ * silently merge two criteria into one line of the verdict.
+ * @param input - undefined (the default rubric), or a non-empty array of strings/objects.
+ * @returns The criteria the engine will score with.
+ */
 export function normalizeCriteria(input: unknown): Criterion[] {
   if (input === undefined) return DEFAULT_CRITERIA
   if (!Array.isArray(input) || !input.length) throw new Error('llm-verifier: criteria must be a non-empty array')
-  return input.map((value, index) => { if (typeof value !== 'object' || value === null) throw new Error('llm-verifier: criteria[' + index + '] must be an object'); const row = value as Record<string, unknown>; for (const key of ['id', 'name', 'description']) if (typeof row[key] !== 'string' || row[key].trim().length === 0) throw new Error('llm-verifier: criteria[' + index + '].' + key + ' must be non-empty'); return { id: String(row.id), name: String(row.name), description: String(row.description) } })
+  const seen = new Set<string>()
+  return input.map((value, index) => {
+    if (typeof value === 'string') {
+      const text = value.trim()
+      if (!text) throw new Error('llm-verifier: criteria[' + index + '] must not be blank')
+      return { id: dedupeCriterionId(slugCriterionId(text), seen), name: text, description: text }
+    }
+    if (typeof value !== 'object' || value === null) throw new Error('llm-verifier: criteria[' + index + '] must be a string or an object')
+    const row = value as Record<string, unknown>
+    const field = (key: string) => (typeof row[key] === 'string' ? (row[key] as string).trim() : '')
+    const description = field('description')
+    if (!description) throw new Error('llm-verifier: criteria[' + index + '].description must be a non-empty string')
+    const name = field('name') || field('id') || slugCriterionId(description)
+    const id = field('id') || slugCriterionId(name)
+    return { id: dedupeCriterionId(id, seen), name, description }
+  })
 }
 export { DEFAULT_GROUND_TRUTH_NOTE }

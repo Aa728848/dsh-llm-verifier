@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CRITERIA_PRESETS,
   DEFAULT_CRITERIA,
   accumulatePairs,
   bradleyTerry,
@@ -8,10 +9,12 @@ import {
   evidenceNonce,
   extractProgressScore,
   extractScore,
+  parseCriteriaMarkdown,
   pivotRoundPairs,
   rankScores,
   renderDelimitedBlock,
   ringCycle,
+  slugCriterionId,
   topPivots,
 } from './core.ts'
 
@@ -143,5 +146,74 @@ describe('pivot tournament', () => {
     accumulatePairs([[0, 1]], rewards, wins, counts)
     expect(topPivots(wins, counts, 1)).toEqual([0])
     expect(rankScores(wins, counts)[0]?.index).toBe(0)
+  })
+})
+
+describe('criteria presets', () => {
+  it('keeps the default preset byte-identical to the historical default rubric', () => {
+    // The default preset must not change a single verdict, prompt or cache key.
+    expect(CRITERIA_PRESETS.coding).toEqual(DEFAULT_CRITERIA)
+    expect(CRITERIA_PRESETS.coding).toBe(DEFAULT_CRITERIA)
+  })
+
+  it('gives every preset 2-4 narrow, uniquely identified criteria', () => {
+    for (const [name, criteria] of Object.entries(CRITERIA_PRESETS)) {
+      expect(criteria.length, name).toBeGreaterThanOrEqual(2)
+      expect(criteria.length, name).toBeLessThanOrEqual(4)
+      expect(new Set(criteria.map(criterion => criterion.id)).size, name).toBe(criteria.length)
+      for (const criterion of criteria) {
+        expect(criterion.id, name).toMatch(/^[a-z0-9_]+$/)
+        expect(criterion.name.trim().length, name).toBeGreaterThan(0)
+        expect(criterion.description.trim().length, name).toBeGreaterThan(40)
+      }
+    }
+  })
+})
+
+describe('criteria markdown', () => {
+  const file = [
+    '# Task — Verifier Criteria',
+    '<!-- an author note the judge never sees -->',
+    '',
+    '## Ground Truth Note',
+    '',
+    'Do NOT trust the agent self-assessment.',
+    '',
+    '## Criteria',
+    '',
+    '### Final Answer Correctness',
+    '',
+    'Check the answer against what the task asked for.',
+    '',
+    '### Empirical Verification {#verification}',
+    '',
+    'Look at the commands the agent actually ran.',
+    '',
+  ].join('\n')
+
+  it('parses the note, the slugged ids and the pinned anchor', () => {
+    const parsed = parseCriteriaMarkdown(file)
+    expect(parsed.groundTruthNote).toBe('Do NOT trust the agent self-assessment.')
+    expect(parsed.criteria).toEqual([
+      { id: 'final_answer_correctness', name: 'Final Answer Correctness', description: 'Check the answer against what the task asked for.' },
+      { id: 'verification', name: 'Empirical Verification', description: 'Look at the commands the agent actually ran.' },
+    ])
+  })
+
+  it('slugs and de-duplicates colliding ids instead of merging two criteria', () => {
+    const parsed = parseCriteriaMarkdown('## Criteria\n\n### Same Name\n\nfirst body\n\n### Same Name\n\nsecond body\n')
+    expect(parsed.criteria.map(criterion => criterion.id)).toEqual(['same_name', 'same_name_2'])
+    expect(parsed.criteria).toHaveLength(2)
+  })
+
+  it('fails closed on a file with no criteria or with an empty instruction', () => {
+    expect(() => parseCriteriaMarkdown('# nothing here\n')).toThrow(/no criteria/u)
+    expect(() => parseCriteriaMarkdown('## Criteria\n\n### Empty\n\n### Other\n\nbody\n')).toThrow(/no instruction: empty/u)
+  })
+
+  it('derives ids with the same slug rule the parser uses', () => {
+    expect(slugCriterionId('Final Answer Correctness')).toBe('final_answer_correctness')
+    expect(slugCriterionId('***')).toBe('criterion')
+    expect(slugCriterionId('x'.repeat(80)).length).toBe(40)
   })
 })

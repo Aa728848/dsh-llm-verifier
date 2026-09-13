@@ -27,6 +27,8 @@ export interface Values {
     autoMaxModelCallsPerSession: number;
     autoVerifyTeamTasks: boolean;
     autoVerifyPlanMode: boolean;
+    criteriaPreset: 'coding' | 'debug' | 'research' | 'ops' | 'writing' | 'custom';
+    criteriaFile: string;
     provider: string;
     model: string;
     reasoningEffort?: string;

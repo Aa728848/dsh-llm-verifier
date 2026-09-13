@@ -1,5 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis';
 import z from 'schemastery';
+import { type CriteriaPresetId } from './core.ts';
+/** A configured rubric: a bundled task-class preset, or a markdown file. */
+export type CriteriaPresetSelection = CriteriaPresetId | 'custom';
 export declare const VERIFIER_SETTINGS_NAMESPACE: never;
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict';
 export interface JudgeConfig {
@@ -61,6 +64,15 @@ export interface Config {
      * log; capped per call, per record and per invocation by `decisions.ts`.
      */
     captureDecisions?: boolean;
+    /**
+     * Rubric the automatic gate (final acceptance, routed compare/select/track) scores with.
+     *
+     * Defaults to `coding` = the historical DEFAULT_CRITERIA, so an existing installation is
+     * unaffected. Judging a research or ops task with the coding rubric measures the wrong thing.
+     */
+    criteriaPreset?: CriteriaPresetSelection;
+    /** Markdown rubric file, read when `criteriaPreset` is `custom`. See README for the format. */
+    criteriaFile?: string;
     autoVerifyTeamTasks?: boolean;
     autoVerifyPlanMode?: boolean;
     autoVerifySubagents?: boolean;
@@ -102,6 +114,8 @@ export interface ResolvedConfig {
     autoMaxModelCallsPerTask: number;
     autoMaxModelCallsPerSession: number;
     captureDecisions: boolean;
+    criteriaPreset: CriteriaPresetSelection;
+    criteriaFile: string;
     autoVerifyTeamTasks: boolean;
     autoVerifyPlanMode: boolean;
     autoVerifySubagents: boolean;

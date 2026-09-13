@@ -156,6 +156,17 @@ export declare class VerifierEngine {
     private selectUnique;
     select(options: SelectOptions, signal?: AbortSignal): Promise<SelectResult>;
 }
+/**
+ * Normalize a caller-supplied `criteria` argument into the engine's canonical shape.
+ *
+ * Mirrors upstream's `normalize_criteria` so a caller does not have to fill in every field: a
+ * plain string is both the name and the instruction, and a missing `id` is slugged from the
+ * name (the score cache keys on the rendered prompt, so a slug is cosmetic). Ids are
+ * de-duplicated because `compare` groups per-criterion results by id — a collision would
+ * silently merge two criteria into one line of the verdict.
+ * @param input - undefined (the default rubric), or a non-empty array of strings/objects.
+ * @returns The criteria the engine will score with.
+ */
 export declare function normalizeCriteria(input: unknown): Criterion[];
 export { DEFAULT_GROUND_TRUTH_NOTE };
 //# sourceMappingURL=engine.d.ts.map

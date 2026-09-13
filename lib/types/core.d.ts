@@ -21,6 +21,25 @@ export declare const GRANULARITY = 20;
 export declare const LETTERS: string[];
 export declare const SCALE_DESCRIPTION: string;
 export declare const DEFAULT_CRITERIA: Criterion[];
+/** Task classes a rubric can be chosen for; `custom` lives at the config layer, not here. */
+export declare const CRITERIA_PRESET_IDS: readonly ["coding", "debug", "research", "ops", "writing"];
+export type CriteriaPresetId = typeof CRITERIA_PRESET_IDS[number];
+/**
+ * Rubric per task class.
+ *
+ * Upstream ships one criteria file per benchmark (`criteria/swe_bench.md`, `terminal_bench.md`,
+ * `medagentbench.md`) and its TEMPLATE states the rule this table follows: 2-4 narrow criteria
+ * beat one broad one. Judging a research answer with "Output Match"/"Error Signal Detection"
+ * measures the wrong thing, and the automatic gate has no per-task override.
+ *
+ * `coding` is byte-identical to {@link DEFAULT_CRITERIA}: the default preset must not change
+ * any existing verdict, prompt or cache key.
+ */
+export declare const CRITERIA_PRESETS: Record<CriteriaPresetId, Criterion[]>;
+/** Derive a criterion id from free text: lowercase, alphanumerics and underscores, max 40 chars. */
+export declare function slugCriterionId(text: string): string;
+/** Make an id unique against the ids already used, by appending _2, _3, ... */
+export declare function dedupeCriterionId(id: string, seen: Set<string>): string;
 export declare const DEFAULT_GROUND_TRUTH_NOTE = "**IMPORTANT:** Focus on observed tool and terminal output as ground truth. Do NOT trust the agent's self-assessment or claims of success.";
 /**
  * Deterministic per-prompt delimiter token.
@@ -77,4 +96,27 @@ export declare function pivotRoundPairs(count: number, pivots: readonly number[]
 export declare function accumulatePairs(pairs: readonly [number, number][], rewards: ReadonlyMap<string, readonly [number, number]>, wins: number[], counts: number[]): void;
 export declare function topPivots(wins: readonly number[], counts: readonly number[], requested: number): number[];
 export declare function rankScores(wins: readonly number[], counts: readonly number[]): CandidateScore[];
+/**
+ * Parse a criteria file (or an inline markdown string) into a ground-truth note and criteria.
+ *
+ * Upstream's criteria files are the reason this exists: a rubric you can edit, review and
+ * version beats a hard-coded list, and its TEMPLATE pins the layout. Format:
+ *
+ *     # <title>                        (ignored)
+ *     ## Ground Truth Note             (optional)
+ *     <one paragraph the verifier always sees>
+ *     ## Criteria
+ *     ### <Criterion Name> {#id}       (the anchor is optional; the id is slugged from the name)
+ *     <instruction for this criterion>
+ *
+ * HTML comments are stripped, so a file can carry author notes the judge never sees. The
+ * parser fails closed: no criteria, a heading without a body, or a blank instruction throws
+ * rather than silently scoring with fewer criteria than authored.
+ * @param text - criteria markdown.
+ * @returns The optional ground-truth note and the parsed criteria, in file order.
+ */
+export declare function parseCriteriaMarkdown(text: string): {
+    groundTruthNote: string;
+    criteria: Criterion[];
+};
 //# sourceMappingURL=core.d.ts.map
