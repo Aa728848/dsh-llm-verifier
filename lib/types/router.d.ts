@@ -53,8 +53,20 @@ export interface RouterPolicy {
     mode: AutoVerifyMode;
     minConfidence: number;
     maxCandidates: number;
-    maxPerTask: number;
-    maxPerSession: number;
+    /**
+     * Automatic route attempts (semantic classification, plan pre-review, team-task gate and
+     * compare/select/track) allowed within one task and one session.
+     *
+     * Routing and the final acceptance are metered by SEPARATE counters on purpose. They used
+     * to share one, which let routing spend the final gate's share: the gate is mandatory once
+     * armed (finalRequiredFromSeq), so a busy task could exhaust the shared counter on routes
+     * and then close the turn with the gate never having run.
+     */
+    maxRoutePerTask: number;
+    maxRoutePerSession: number;
+    /** Attempts reserved for the final acceptance; routing can never spend these. */
+    maxFinalPerTask: number;
+    maxFinalPerSession: number;
     maxModelCallsPerTask: number;
     maxModelCallsPerSession: number;
     maxInputChars: number;
@@ -188,6 +200,14 @@ export declare class AutoVerifierRouter {
     /** Whether this exact fingerprint already passed within the current task. */
     completedFingerprint(agent: RoutedAgent, fingerprint: string): boolean;
     finalRequired(agent: RoutedAgent): number | undefined;
+    /**
+     * Arm "run the final gate next": a track route already cleared the completion threshold,
+     * so the next stop boundary must not buy another route first.
+     * @param agent - Agent whose track route cleared the threshold.
+     */
+    preferFinal(agent: RoutedAgent): void;
+    /** Whether the next stop boundary must skip routing and run the final gate. */
+    finalPreferred(agent: RoutedAgent): boolean;
     strictBlocked(agent: RoutedAgent): boolean;
     release(agent: {
         id: unknown;

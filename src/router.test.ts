@@ -24,7 +24,7 @@ function evidenceBlock(step: string): string {
 function assistant(value: ReturnType<typeof session>, text: string, turn = 1, step = 1) {
   value.append('assistant/message', { turn, step, message: createAssistantMessage({ content: [{ type: 'text', text }], source: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } }) }, { surfaceOp: 'append' })
 }
-const policy: RouterPolicy = { mode: 'smart', minConfidence: .9, maxCandidates: 8, maxPerTask: 5, maxPerSession: 20, maxModelCallsPerTask: 48, maxModelCallsPerSession: 160, maxInputChars: 60000, maxItemChars: 20000 }
+const policy: RouterPolicy = { mode: 'smart', minConfidence: .9, maxCandidates: 8, maxRoutePerTask: 5, maxRoutePerSession: 20, maxFinalPerTask: 2, maxFinalPerSession: 8, maxModelCallsPerTask: 48, maxModelCallsPerSession: 160, maxInputChars: 60000, maxItemChars: 20000 }
 const envelope = (count: number) => JSON.stringify({ protocol: 'dsh-verifier-candidates', version: 1, groupId: 'auth', candidates: Array.from({ length: count }, (_, i) => ({ id: String(i + 1), label: 'C' + (i + 1), status: 'completed', content: 'candidate ' + (i + 1) })) })
 
 describe('production structured routing', () => {
@@ -598,6 +598,36 @@ describe('transactional router state', () => {
     expect(router.commit(agent, route, 9)).toBe(true); expect(router.finalRequired(agent)).toBe(9)
     const final = router.reserve(agent, 'final', 'final', 4, policy)!
     expect(router.commit(agent, final)).toBe(true); expect(router.finalRequired(agent)).toBeUndefined()
+  })
+  it('reserves final-verification budget independently of routing attempts', () => {
+    const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
+    // Routing gets exactly its own cap: exhausting it must not refuse the armed final gate.
+    const budget = { ...policy, maxRoutePerTask: 1, maxFinalPerTask: 2 }
+    const first = router.reserve(agent, 'track', 'route-1', 1, budget)
+    expect(first).toBeDefined()
+    expect(router.commit(agent, first!, 7)).toBe(true)
+    expect(router.finalRequired(agent)).toBe(7)
+    expect(router.reserve(agent, 'track', 'route-2', 1, budget)).toBeUndefined()
+    expect(router.budgetExhausted(agent, 1, budget)).toBe(true)
+    const final = router.reserve(agent, 'final', 'final-1', 4, budget)
+    expect(final).toBeDefined()
+    expect(router.commit(agent, final!)).toBe(true)
+    expect(router.finalRequired(agent)).toBeUndefined()
+  })
+  it('prefers the final gate after a track route clears the completion threshold', () => {
+    const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
+    expect(router.finalPreferred(agent)).toBe(false)
+    const track = router.reserve(agent, 'track', 'track-pass', 3, policy)!
+    expect(router.commit(agent, track, 9)).toBe(true)
+    router.preferFinal(agent)
+    expect(router.finalPreferred(agent)).toBe(true)
+    // Reserving the final attempt consumes the preference, and a failed acceptance must
+    // release routing again rather than disabling it for the rest of the task.
+    const final = router.reserve(agent, 'final', 'final', 4, policy)!
+    expect(router.finalPreferred(agent)).toBe(false)
+    router.fail(agent, final, false)
+    expect(router.finalPreferred(agent)).toBe(false)
+    expect(router.reserve(agent, 'track', 'route-after-failure', 1, policy)).toBeDefined()
   })
   it('does not arm final verification when a plan pre-review passes', () => {
     const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()

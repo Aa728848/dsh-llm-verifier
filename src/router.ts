@@ -44,8 +44,20 @@ export interface RouterPolicy {
   mode: AutoVerifyMode
   minConfidence: number
   maxCandidates: number
-  maxPerTask: number
-  maxPerSession: number
+  /**
+   * Automatic route attempts (semantic classification, plan pre-review, team-task gate and
+   * compare/select/track) allowed within one task and one session.
+   *
+   * Routing and the final acceptance are metered by SEPARATE counters on purpose. They used
+   * to share one, which let routing spend the final gate's share: the gate is mandatory once
+   * armed (finalRequiredFromSeq), so a busy task could exhaust the shared counter on routes
+   * and then close the turn with the gate never having run.
+   */
+  maxRoutePerTask: number
+  maxRoutePerSession: number
+  /** Attempts reserved for the final acceptance; routing can never spend these. */
+  maxFinalPerTask: number
+  maxFinalPerSession: number
   maxModelCallsPerTask: number
   maxModelCallsPerSession: number
   maxInputChars: number
@@ -55,14 +67,22 @@ export interface RouterPolicy {
 interface Reservation { id: string; phase: RoutePhase; fingerprint: string; taskStartSeq: number }
 interface RouterState {
   taskStartSeq: number
-  taskAttempts: number
-  sessionAttempts: number
+  routeAttempts: number
+  finalAttempts: number
+  sessionRouteAttempts: number
+  sessionFinalAttempts: number
   taskModelCalls: number
   sessionModelCalls: number
   completed: Set<string>
   failed: Set<string>
   inFlight?: Reservation
   finalRequiredFromSeq?: number
+  /**
+   * Armed when a track route already cleared the completion threshold. The next stop
+   * boundary then skips automatic routing and runs the mandatory final gate instead of
+   * paying for another progress route whose steered text would be identical.
+   */
+  finalPreferred: boolean
   strictBlocked: boolean
 }
 
@@ -820,8 +840,9 @@ export class AutoVerifierRouter {
     const taskStartSeq = latestDirectUserSeq(sessionEvents(agent.session))
     if (taskStartSeq === undefined) return undefined
     const id = String(agent.id)
-    const state = this.states.get(id) ?? { taskStartSeq, taskAttempts: 0, sessionAttempts: 0, taskModelCalls: 0, sessionModelCalls: 0, completed: new Set(), failed: new Set(), strictBlocked: false }
-    if (state.taskStartSeq !== taskStartSeq) { state.taskStartSeq = taskStartSeq; state.taskAttempts = 0; state.taskModelCalls = 0; state.completed.clear(); state.failed.clear(); state.inFlight = undefined; state.finalRequiredFromSeq = undefined; state.strictBlocked = false; this.exhaustedNotices.delete(id) }
+    const state = this.states.get(id) ?? { taskStartSeq, routeAttempts: 0, finalAttempts: 0, sessionRouteAttempts: 0, sessionFinalAttempts: 0, taskModelCalls: 0, sessionModelCalls: 0, completed: new Set(), failed: new Set(), finalPreferred: false, strictBlocked: false }
+    // A new task resets its own attempt and model-call counters, but never the session counters.
+    if (state.taskStartSeq !== taskStartSeq) { state.taskStartSeq = taskStartSeq; state.routeAttempts = 0; state.finalAttempts = 0; state.taskModelCalls = 0; state.completed.clear(); state.failed.clear(); state.inFlight = undefined; state.finalRequiredFromSeq = undefined; state.finalPreferred = false; state.strictBlocked = false; this.exhaustedNotices.delete(id) }
     this.states.set(id, state)
     return state
   }
@@ -829,9 +850,27 @@ export class AutoVerifierRouter {
   reserve(agent: RoutedAgent, phase: RoutePhase, fingerprint: string, expectedCalls: number, policy: RouterPolicy): Reservation | undefined {
     if (policy.mode === 'manual') return undefined
     const state = this.state(agent)
-    if (!state || state.inFlight || state.completed.has(fingerprint) || state.taskAttempts >= policy.maxPerTask || state.sessionAttempts >= policy.maxPerSession || state.taskModelCalls + expectedCalls > policy.maxModelCallsPerTask || state.sessionModelCalls + expectedCalls > policy.maxModelCallsPerSession) return undefined
+    if (!state || state.inFlight || state.completed.has(fingerprint)) return undefined
+    // Routing and the final gate draw on separate attempt counters, so no amount of
+    // routing can leave the mandatory acceptance without an attempt of its own.
+    const final = phase === 'final'
+    const attempts = final ? state.finalAttempts : state.routeAttempts
+    const sessionAttempts = final ? state.sessionFinalAttempts : state.sessionRouteAttempts
+    const maxTask = final ? policy.maxFinalPerTask : policy.maxRoutePerTask
+    const maxSession = final ? policy.maxFinalPerSession : policy.maxRoutePerSession
+    if (attempts >= maxTask || sessionAttempts >= maxSession || state.taskModelCalls + expectedCalls > policy.maxModelCallsPerTask || state.sessionModelCalls + expectedCalls > policy.maxModelCallsPerSession) return undefined
     const reservation = { id: String(++this.serial), phase, fingerprint, taskStartSeq: state.taskStartSeq }
-    state.inFlight = reservation; state.taskAttempts++; state.sessionAttempts++; state.taskModelCalls += expectedCalls; state.sessionModelCalls += expectedCalls
+    state.inFlight = reservation
+    if (final) {
+      state.finalAttempts += 1; state.sessionFinalAttempts += 1
+      // The reservation honors the preference; a later failure must not keep routing
+      // disabled for the rest of the task.
+      state.finalPreferred = false
+    } else {
+      state.routeAttempts += 1; state.sessionRouteAttempts += 1
+    }
+    state.taskModelCalls += expectedCalls
+    state.sessionModelCalls += expectedCalls
     return reservation
   }
 
@@ -843,7 +882,7 @@ export class AutoVerifierRouter {
     // a full session verification at the very next stop boundary, before anything was built
     // (and, in strict mode, burn an attempt and set strictBlocked on that empty review).
     if (reservation.phase !== 'semantic' && reservation.phase !== 'final' && reservation.phase !== 'plan_review') state.finalRequiredFromSeq = Math.max(state.finalRequiredFromSeq ?? 0, evidenceSeq ?? reservation.taskStartSeq)
-    if (reservation.phase === 'final') state.finalRequiredFromSeq = undefined
+    if (reservation.phase === 'final') { state.finalRequiredFromSeq = undefined; state.finalPreferred = false }
     return true
   }
 
@@ -851,6 +890,7 @@ export class AutoVerifierRouter {
     const state = this.state(agent)
     if (!state || state.inFlight?.id !== reservation.id) return
     state.inFlight = undefined; state.failed.add(reservation.fingerprint); if (strict) state.strictBlocked = true
+    if (reservation.phase === 'final') state.finalPreferred = false
   }
 
   /**
@@ -878,7 +918,7 @@ export class AutoVerifierRouter {
   budgetExhausted(agent: RoutedAgent, expectedCalls: number, policy: RouterPolicy): boolean {
     const state = this.state(agent)
     if (!state) return true
-    return state.taskAttempts >= policy.maxPerTask || state.sessionAttempts >= policy.maxPerSession
+    return state.routeAttempts >= policy.maxRoutePerTask || state.sessionRouteAttempts >= policy.maxRoutePerSession
       || state.taskModelCalls + expectedCalls > policy.maxModelCallsPerTask || state.sessionModelCalls + expectedCalls > policy.maxModelCallsPerSession
   }
 
@@ -886,6 +926,17 @@ export class AutoVerifierRouter {
   completedFingerprint(agent: RoutedAgent, fingerprint: string): boolean { return this.state(agent)?.completed.has(fingerprint) ?? false }
 
   finalRequired(agent: RoutedAgent): number | undefined { return this.state(agent)?.finalRequiredFromSeq }
+
+  /**
+   * Arm "run the final gate next": a track route already cleared the completion threshold,
+   * so the next stop boundary must not buy another route first.
+   * @param agent - Agent whose track route cleared the threshold.
+   */
+  preferFinal(agent: RoutedAgent): void { const state = this.state(agent); if (state) state.finalPreferred = true }
+
+  /** Whether the next stop boundary must skip routing and run the final gate. */
+  finalPreferred(agent: RoutedAgent): boolean { return this.state(agent)?.finalPreferred ?? false }
+
   strictBlocked(agent: RoutedAgent): boolean { return this.state(agent)?.strictBlocked ?? false }
   release(agent: { id: unknown }): void { this.states.delete(String(agent.id)); this.exhaustedNotices.delete(String(agent.id)) }
 }
