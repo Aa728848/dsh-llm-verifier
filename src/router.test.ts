@@ -644,6 +644,21 @@ describe('semantic route evidence bound', () => {
     expect([...view.candidateCallIds].length).toBeGreaterThanOrEqual(1)
   })
 
+  it('keeps the newest evidence instead of emptying a long session', () => {
+    // Regression: the fixed 64-iteration shrink loop exhausted its cap on a long session
+    // and the safety valve then wiped every artifact AND the task. 300 artifacts against
+    // the default 60000 budget kept zero of them and reported omitted = 64.
+    const value = session()
+    for (let index = 0; index < 300; index += 1) tool(value, 'pwsh', 'call-' + index, 'x'.repeat(1000))
+    const view = buildSemanticRouteView('long task', value.events, 8, 20_000, 60_000)
+    expect(view.candidateCallIds.size).toBeGreaterThan(0)
+    expect(view.evidenceChars).toBeLessThanOrEqual(60_000)
+    expect(view.prompt).toContain('<<<TASK:')
+    // Newest-first: the most recent artifact survives and the older ones are the drops.
+    expect(view.candidateCallIds.has('call-299')).toBe(true)
+    expect(view.omitted).toBe(300 - view.candidateCallIds.size)
+  })
+
   it('only allows references to evidence the prompt actually rendered', () => {
     const value = session()
     tool(value, 'pwsh', 'c1', 'a'.repeat(3000))

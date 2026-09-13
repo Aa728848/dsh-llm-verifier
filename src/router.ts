@@ -901,41 +901,33 @@ export function buildSemanticRouteView(problem: string, events: readonly Session
     ...rawCheckpoints.map(checkpoint => ({ kind: 'checkpoint' as const, seq: checkpoint.seq, content: semanticTodoBody(checkpoint.todos, maxItemChars) })),
   ]
   const perItem = itemBudget(Math.max(1, entries.length), maxItemChars, maxInputChars)
-  let kept = entries.map(entry => ({ ...entry, content: sanitizeVerifierText(entry.content, perItem) }))
+  const fitted = entries.map(entry => ({ ...entry, content: sanitizeVerifierText(entry.content, perItem) }))
+  // The token is content-derived and at most 13 characters, so measuring every block with
+  // a 13-character placeholder is a TRUE upper bound on its rendered length. Selecting
+  // against that bound is one O(n) pass that can never overflow the budget and keeps the
+  // NEWEST evidence that fits. A fixed-iteration shrink loop could not do this: 300
+  // artifacts of 1000 characters against the default 60000 budget exhausted the cap and
+  // the "safety valve" then wiped every artifact, the task, and the omission count with
+  // them.
+  const SEMANTIC_TOKEN_PLACEHOLDER = 'z'.repeat(13)
   let taskText = sanitizeVerifierText(problem, SEMANTIC_TASK_CHARS)
+  const taskOverhead = renderDelimitedBlock('TASK', SEMANTIC_TOKEN_PLACEHOLDER, '').length
+  if (taskOverhead >= maxInputChars) taskText = ''
+  else if (taskOverhead + taskText.length > maxInputChars) taskText = sanitizeVerifierText(taskText, maxInputChars - taskOverhead)
+  let used = renderDelimitedBlock('TASK', SEMANTIC_TOKEN_PLACEHOLDER, taskText).length
+  const kept: typeof fitted = []
   let omitted = 0
-  // ONE shared budget across the task and every rendered block, measured on the ACTUAL
-  // payload. The content-derived token is recomputed whenever the kept set changes, so the
-  // measurement always matches what would be sent. The loop drops the oldest entry first
-  // and, once only one remains, shrinks its content — each step strictly reduces the
-  // payload, so it terminates.
-  let token = ''
-  let taskBlock = ''
-  let blocks: string[] = []
-  let payload = ''
-  for (let attempt = 0; attempt < 64; attempt += 1) {
-    token = evidenceNonce(taskText, ...kept.map(entry => entry.content))
-    taskBlock = renderDelimitedBlock('TASK', token, taskText)
-    blocks = kept.map(entry => renderSemanticEntry(entry, token))
-    payload = [taskBlock, ...blocks].join('\n\n')
-    if (payload.length <= maxInputChars) break
-    if (kept.length > 1) { kept = kept.slice(0, -1); omitted += 1; continue }
-    const excess = payload.length - maxInputChars
-    if (kept.length === 1) {
-      const current = kept[0]!
-      const next = Math.max(1, current.content.length - excess)
-      if (next < current.content.length) { kept = [{ ...current, content: sanitizeVerifierText(current.content, next) }]; continue }
-      kept = []; omitted += 1
-      continue
-    }
-    const nextTask = Math.max(1, taskText.length - excess)
-    if (nextTask < taskText.length) { taskText = sanitizeVerifierText(taskText, nextTask); continue }
-    taskText = ''
+  for (const entry of fitted) {
+    const block = renderSemanticEntry(entry, SEMANTIC_TOKEN_PLACEHOLDER)
+    const separator = kept.length === 0 ? 0 : 2
+    if (used + block.length + separator > maxInputChars) { omitted += 1; continue }
+    used += block.length + separator
+    kept.push(entry)
   }
-  if (payload.length > maxInputChars) {
-    // Safety valve: an empty evidence payload is far below the minimum budget.
-    kept = []; taskText = ''; token = evidenceNonce(taskText); taskBlock = renderDelimitedBlock('TASK', token, taskText); blocks = []; payload = taskBlock
-  }
+  const token = evidenceNonce(taskText, ...kept.map(entry => entry.content))
+  const taskBlock = renderDelimitedBlock('TASK', token, taskText)
+  const blocks = kept.map(entry => renderSemanticEntry(entry, token))
+  const payload = [taskBlock, ...blocks].join('\n\n')
 
   const renderedByEntry = new Map<SemanticEntry, string>()
   kept.forEach((entry, index) => renderedByEntry.set(entry, blocks[index]!))
