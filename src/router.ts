@@ -919,9 +919,11 @@ export function buildSemanticRouteView(problem: string, events: readonly Session
   let omitted = 0
   for (const entry of fitted) {
     const block = renderSemanticEntry(entry, SEMANTIC_TOKEN_PLACEHOLDER)
-    const separator = kept.length === 0 ? 0 : 2
-    if (used + block.length + separator > maxInputChars) { omitted += 1; continue }
-    used += block.length + separator
+    // The payload is [taskBlock, ...evidenceBlocks].join('\n\n'), so EVERY evidence block
+    // carries a 2-character separator before it — including the first one. Omitting that
+    // separator for the first block under-counted by 2 and let a budget of N render N+2.
+    if (used + block.length + 2 > maxInputChars) { omitted += 1; continue }
+    used += block.length + 2
     kept.push(entry)
   }
   const token = evidenceNonce(taskText, ...kept.map(entry => entry.content))

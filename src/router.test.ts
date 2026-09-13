@@ -659,6 +659,22 @@ describe('semantic route evidence bound', () => {
     expect(view.omitted).toBe(300 - view.candidateCallIds.size)
   })
 
+  it('never exceeds the evidence budget at the separator boundary', () => {
+    // Regression: the first evidence block did not count the two characters joining it to
+    // the TASK block, so a budget of 1130 could render 1132.
+    const value = session()
+    tool(value, 'pwsh', 'a', 'a'.repeat(200))
+    tool(value, 'pwsh', 'b', 'b'.repeat(200))
+    const full = buildSemanticRouteView('boundary task', value.events, 8, 20_000, 1_000_000)
+    const exact = full.evidenceChars
+    // The floor stays above the minimal TASK block (~54 characters of delimiters): below
+    // that nothing can fit, and resolveConfig requires autoRouteMaxInputChars >= 1000.
+    for (let budget = exact + 4; budget >= Math.max(exact - 600, 64); budget -= 1) {
+      const view = buildSemanticRouteView('boundary task', value.events, 8, 20_000, budget)
+      expect(view.evidenceChars, 'budget=' + budget).toBeLessThanOrEqual(budget)
+    }
+  })
+
   it('only allows references to evidence the prompt actually rendered', () => {
     const value = session()
     tool(value, 'pwsh', 'c1', 'a'.repeat(3000))
