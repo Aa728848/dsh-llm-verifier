@@ -166,6 +166,23 @@ export function extractScore(completion: CompletionLogprobs, tag: string): numbe
   return (letterValue(letter) - 1) / (GRANULARITY - 1)
 }
 
+/**
+ * One pairwise prompt focused on a single criterion.
+ *
+ * Everything that does not depend on the criterion (task, both trajectories, the rating
+ * scale) comes first and ONLY the criterion varies at the tail. That is not cosmetic:
+ * it maximizes the shared prompt prefix across the criteria of one comparison, so a
+ * prefix-caching backend serves the trace-heavy body from cache. Upstream documents the
+ * same constraint on its `build_prompt` ("Keep criterion-specific text strictly at the
+ * end when editing"), and `VerifierEngine.compare` warms the prefix with one job before
+ * fanning out the rest. Keep it that way.
+ * @param problem - task statement shown to the judge.
+ * @param traceA - candidate A's trajectory.
+ * @param traceB - candidate B's trajectory.
+ * @param criterion - the single criterion this call scores.
+ * @param groundTruthNote - note prepended to every judge prompt.
+ * @returns The rendered prompt.
+ */
 export function buildPairwisePrompt(problem: string, traceA: string, traceB: string, criterion: Criterion, groundTruthNote = DEFAULT_GROUND_TRUTH_NOTE): string {
   const token = evidenceNonce(problem, traceA, traceB)
   return [

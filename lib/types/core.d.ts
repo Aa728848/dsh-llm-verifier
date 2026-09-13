@@ -49,6 +49,23 @@ export declare function renderDelimitedBlock(tag: string, token: string, content
 export declare const UNTRUSTED_EVIDENCE_NOTE: string;
 export declare function normalizeScoreLetter(token: string): string | undefined;
 export declare function extractScore(completion: CompletionLogprobs, tag: string): number;
+/**
+ * One pairwise prompt focused on a single criterion.
+ *
+ * Everything that does not depend on the criterion (task, both trajectories, the rating
+ * scale) comes first and ONLY the criterion varies at the tail. That is not cosmetic:
+ * it maximizes the shared prompt prefix across the criteria of one comparison, so a
+ * prefix-caching backend serves the trace-heavy body from cache. Upstream documents the
+ * same constraint on its `build_prompt` ("Keep criterion-specific text strictly at the
+ * end when editing"), and `VerifierEngine.compare` warms the prefix with one job before
+ * fanning out the rest. Keep it that way.
+ * @param problem - task statement shown to the judge.
+ * @param traceA - candidate A's trajectory.
+ * @param traceB - candidate B's trajectory.
+ * @param criterion - the single criterion this call scores.
+ * @param groundTruthNote - note prepended to every judge prompt.
+ * @returns The rendered prompt.
+ */
 export declare function buildPairwisePrompt(problem: string, traceA: string, traceB: string, criterion: Criterion, groundTruthNote?: string): string;
 export declare function buildProgressPrompt(problem: string, steps: readonly string[], checkpoints: readonly number[]): string;
 /** Progress uses A=NO..T=YES, the reverse of pairwise success scoring. */
