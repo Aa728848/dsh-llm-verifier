@@ -46,6 +46,9 @@ const MAX_PROMPT_CHARS = 8000
 const MAX_OUTPUT_CHARS = 4000
 /** Upper bound on one record's captured text, so a wide select cannot fill the file. */
 const MAX_RECORD_CHARS = 30000
+/** Smallest window worth storing; unreachable while MAX_CALLS stays at 12. */
+const MIN_PROMPT_CHARS = 512
+const MIN_OUTPUT_CHARS = 256
 
 export function resolveDecisionsFile(cacheFile: string): string {
   return join(dirname(cacheFile), 'decisions-v1.json')
@@ -77,25 +80,40 @@ export function boundCaptureText(text: string, maxChars: number): string {
  * Redact and bound captured calls.
  *
  * Runs the same sanitizer the prompts do, so a snapshot can never persist a secret the
- * judge itself never saw, and drops calls past the per-record budget instead of writing
- * an unbounded file. Text uses {@link boundCaptureText}, which keeps both ends: a
+ * judge itself never saw. The record is bounded twice: at {@link MAX_CALLS} calls, and at
+ * {@link MAX_RECORD_CHARS} characters shared EQUALLY between the calls it keeps — a six-call
+ * session acceptance must not shrink to its first three calls, and which three survived must not
+ * depend on completion order. Text uses {@link boundCaptureText}, which keeps both ends: a
  * session-acceptance prompt runs past 100k characters, and head-only truncation kept the
  * instructions while dropping the trajectory tail the judge actually graded.
- * @param calls - captured calls, oldest first.
+ * @param calls - captured calls; callers sort them by label so the bounded set is deterministic.
  * @returns The bounded calls; empty when nothing was captured.
  */
 export function boundDecisionCalls(calls: readonly DecisionCall[]): DecisionCall[] {
+  const selected = calls.slice(0, MAX_CALLS)
+  if (selected.length === 0) return []
+  // Equal share per call, not first-come-first-served. A session acceptance makes six calls on
+  // ~8k-char prompts; a fixed 8k + 4k per call let only the FIRST THREE through, and which three
+  // survived depended on completion order, i.e. on the network — so the most expensive path in
+  // the plugin stored a different (and partial) set of criteria every time. Every call now keeps
+  // a smaller window: boundCaptureText keeps both ends, so the instruction head and the graded
+  // trajectory tail still survive.
+  const overhead = selected.reduce((sum, call) => sum + Math.min(call.label.length, 200) + Math.min(call.channel.length, 40), 0)
+  const perCall = Math.max(MIN_PROMPT_CHARS + MIN_OUTPUT_CHARS, Math.floor((MAX_RECORD_CHARS - overhead) / selected.length))
   const bounded: DecisionCall[] = []
   let used = 0
-  for (const call of calls.slice(0, MAX_CALLS)) {
+  for (const call of selected) {
+    const promptChars = Math.min(MAX_PROMPT_CHARS, Math.max(MIN_PROMPT_CHARS, Math.floor(perCall * 0.8)))
+    const outputChars = Math.min(MAX_OUTPUT_CHARS, Math.max(MIN_OUTPUT_CHARS, perCall - promptChars))
     const value: DecisionCall = {
       label: call.label.slice(0, 200),
       channel: call.channel.slice(0, 40),
-      prompt: boundCaptureText(call.prompt, MAX_PROMPT_CHARS),
-      output: boundCaptureText(call.output, MAX_OUTPUT_CHARS),
+      prompt: boundCaptureText(call.prompt, promptChars),
+      output: boundCaptureText(call.output, outputChars),
       ...(typeof call.score === 'number' && Number.isFinite(call.score) ? { score: call.score } : {}),
     }
     const cost = value.label.length + value.channel.length + value.prompt.length + value.output.length
+    // Safety net only: the equal share already fits at MAX_CALLS = 12.
     if (bounded.length > 0 && used + cost > MAX_RECORD_CHARS) break
     bounded.push(value)
     used += cost

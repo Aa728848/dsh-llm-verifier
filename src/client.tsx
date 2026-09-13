@@ -4,7 +4,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { Button, IconDataOutline16, IconRefreshOutline16, Input } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage,
   compact, money, duration, dateTime, type I18nDict,
@@ -548,6 +548,32 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
                 <div style={{ margin: '6px 0 0 15px' }}>
                   <button type="button" onClick={() => void toggleSnapshot(item.id)} style={{ fontSize: 11, padding: '2px 7px', borderRadius: 5, cursor: 'pointer', color: 'var(--dsw-text-secondary)', background: 'var(--dsw-surface-sunken)', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))' }}>{snapshot?.id === item.id ? t['recent.decisionHide'] : t['recent.decision']}</button>
                 </div>
+                <details style={{ margin: '6px 0 0 15px' }}>
+                  <summary style={{ cursor: 'pointer', fontSize: 11, color: 'var(--dsw-text-secondary)' }}>{t['recent.details']}</summary>
+                  <div style={{ marginTop: 8, border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))', borderRadius: 8, padding: '8px 10px', background: 'var(--dsw-surface-sunken)', fontSize: 11 }}>
+                    {(item.verdict?.criteria?.length ?? 0) > 0 && <div style={{ display: 'grid', gridTemplateColumns: 'minmax(120px,1fr) auto auto', gap: '4px 14px', marginBottom: 8 }}>
+                      <strong style={{ color: 'var(--dsw-text-secondary)' }}>{t['recent.detail.criterion']}</strong>
+                      <strong style={{ color: 'var(--dsw-text-secondary)' }}>{t['recent.detail.score']}</strong>
+                      <strong style={{ color: 'var(--dsw-text-secondary)' }}>{t['recent.detail.threshold']}</strong>
+                      {item.verdict!.criteria!.map(criterion => {
+                        const threshold = typeof item.verdict!.threshold === 'number' ? item.verdict!.threshold : undefined
+                        const missed = threshold !== undefined && criterion.score < threshold
+                        return <Fragment key={criterion.id}>
+                          <span>{criterion.id}</span>
+                          <span style={{ color: missed ? '#e76565' : '#77d49b' }}>{formatPercentage(criterion.score)}</span>
+                          <span style={{ color: 'var(--dsw-text-secondary)' }}>{threshold === undefined ? '—' : formatPercentage(threshold)}</span>
+                        </Fragment>
+                      })}
+                    </div>}
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, color: 'var(--dsw-text-secondary)' }}>
+                      <span>{tFormat(t['recent.detail.calls'], { calls: compact(item.stats.calls, lang) })}</span>
+                      <span>{tFormat(t['recent.detail.tokens'], { input: compact(item.stats.inputTokens, lang), cached: compact(item.stats.cachedInputTokens, lang), output: compact(item.stats.outputTokens, lang) })}</span>
+                      <span>{tFormat(t['recent.detail.scoreCache'], { hits: compact(item.stats.cacheHits, lang), misses: compact(item.stats.cacheMisses, lang) })}</span>
+                      <span>{tFormat(t['recent.detail.prefixCache'], { rate: ((item.stats.inputTokens + item.stats.cachedInputTokens) > 0 ? (100 * item.stats.cachedInputTokens / (item.stats.inputTokens + item.stats.cachedInputTokens)).toFixed(0) : '0') + '%' })}</span>
+                      <span>{tFormat(t['recent.detail.cost'], { cost: money(item.stats.estimatedCostUsd) })}</span>
+                    </div>
+                  </div>
+                </details>
                 {snapshot?.id === item.id && <div style={{ margin: '8px 0 2px 15px', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))', borderRadius: 8, padding: '8px 10px', background: 'var(--dsw-surface-sunken)' }}>
                   {snapshot.error !== undefined && <div style={{ fontSize: 11, color: '#e76565' }}>{snapshot.error}</div>}
                   {snapshot.record === undefined && snapshot.error === undefined && <div style={{ ...muted, fontSize: 11 }}>{t['recent.decisionLoading']}</div>}

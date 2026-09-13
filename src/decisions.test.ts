@@ -27,15 +27,35 @@ describe('boundDecisionCalls', () => {
     expect(bounded[0]!.output.length).toBeLessThanOrEqual(4000)
   })
 
-  it('drops calls past the per-record budget instead of writing an unbounded file', () => {
-    const many = Array.from({ length: 12 }, (_, index) => call({ label: 'c' + index, prompt: 'p'.repeat(6000), output: 'o'.repeat(3000) }))
+  it('bounds a record by call count and by the per-record character budget', () => {
+    // 40 calls are capped at MAX_CALLS = 12, and the equal per-call share keeps every one of
+    // them inside the character budget rather than dropping the tail.
+    const many = Array.from({ length: 40 }, (_, index) => call({ label: 'c' + index, prompt: 'p'.repeat(6000), output: 'o'.repeat(3000) }))
     const bounded = boundDecisionCalls(many)
-    expect(bounded.length).toBeGreaterThan(0)
-    expect(bounded.length).toBeLessThan(many.length)
+    expect(bounded).toHaveLength(12)
     const total = bounded.reduce((sum, value) => sum + value.prompt.length + value.output.length + value.label.length + value.channel.length, 0)
     expect(total).toBeLessThanOrEqual(30000)
     // The first call is always kept, so a snapshot never comes back empty.
     expect(bounded[0]!.label).toBe('c0')
+  })
+
+  it('keeps every call of a six-call session acceptance instead of the first three', () => {
+    // Regression: a fixed 8000-char prompt window meant 30000 / 8000 drove the loop to break
+    // after three calls, and only the calls that finished first were stored — the acceptance
+    // path, the plugin's most expensive decision, lost half its criteria.
+    const acceptance = Array.from({ length: 6 }, (_, index) => call({
+      label: 'criterion ' + Math.floor(index / 2) + ' repeat ' + (index % 2 + 1),
+      prompt: 'HEAD\n' + 'p'.repeat(120000) + '\nTAIL',
+      output: '<score_A> K </score_A>\n' + 'o'.repeat(900),
+    }))
+    const bounded = boundDecisionCalls(acceptance)
+    expect(bounded).toHaveLength(6)
+    expect(new Set(bounded.map(value => value.label)).size).toBe(6)
+    // Both ends of the (much shorter) window still survive.
+    expect(bounded[0]!.prompt.startsWith('HEAD')).toBe(true)
+    expect(bounded[0]!.prompt.endsWith('TAIL')).toBe(true)
+    const total = bounded.reduce((sum, value) => sum + value.prompt.length + value.output.length + value.label.length + value.channel.length, 0)
+    expect(total).toBeLessThanOrEqual(30000)
   })
 
   it('ignores a non-finite score instead of persisting NaN', () => {

@@ -171,7 +171,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       selected = completed.selected
       const value = { ...completed.result as T & object, ...route(selected) } as T & { provider: string; model: string }
       await statistics.record({ toolName, sessionId: String(agent.id), startedAt, success: true, provider: selected.provider, model: selected.model, stats: statsFrom(value), verdict: verdictFrom(toolName, value, phase) }).catch(() => {})
-      if (calls.length > 0) await topicEntry.decisions.record({ toolName, phase, startedAt, provider: selected.provider, model: selected.model, calls: boundDecisionCalls(calls) }).catch(() => {})
+      // Order by label before storing: the engine reports calls as they complete, so a concurrent
+      // fan-out reports them in network order. Sorting makes "which calls are in the snapshot"
+      // reproducible even when the record has to bound its text.
+      if (calls.length > 0) await topicEntry.decisions.record({ toolName, phase, startedAt, provider: selected.provider, model: selected.model, calls: boundDecisionCalls([...calls].sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))) }).catch(() => {})
       return value
     } catch (error) {
       const details = errorDetails(error)

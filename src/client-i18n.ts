@@ -215,6 +215,15 @@ export const zh = {
   'recent.decisionEmpty': '这次调用没有捕获到模型调用（命中缓存或已关闭捕获）',
   'recent.decisionPrompt': '提示词',
   'recent.decisionOutput': '原始回答',
+  'recent.details': '查看详情',
+  'recent.detail.criterion': '判据',
+  'recent.detail.score': '分数',
+  'recent.detail.threshold': '阈值',
+  'recent.detail.calls': '模型调用 {calls}',
+  'recent.detail.tokens': '输入 {input} · 缓存 {cached} · 输出 {output}',
+  'recent.detail.scoreCache': '评分缓存 {hits} 命中 / {misses} 未命中',
+  'recent.detail.prefixCache': '前缀缓存命中 {rate}',
+  'recent.detail.cost': '预估成本 {cost}',
 
   // Model summary
   'models.title': '模型汇总',
@@ -456,6 +465,15 @@ export const en: I18nDict = {
   'recent.decisionEmpty': 'No model calls were captured for this invocation (cache hit, or capture disabled)',
   'recent.decisionPrompt': 'Prompt',
   'recent.decisionOutput': 'Raw answer',
+  'recent.details': 'Details',
+  'recent.detail.criterion': 'Criterion',
+  'recent.detail.score': 'Score',
+  'recent.detail.threshold': 'Threshold',
+  'recent.detail.calls': '{calls} model calls',
+  'recent.detail.tokens': 'input {input} · cached {cached} · output {output}',
+  'recent.detail.scoreCache': 'score cache {hits} hits / {misses} misses',
+  'recent.detail.prefixCache': 'prefix cache {rate}',
+  'recent.detail.cost': 'est. {cost}',
 
   // Model summary
   'models.title': 'Model Summary',

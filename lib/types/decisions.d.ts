@@ -42,11 +42,13 @@ export declare function boundCaptureText(text: string, maxChars: number): string
  * Redact and bound captured calls.
  *
  * Runs the same sanitizer the prompts do, so a snapshot can never persist a secret the
- * judge itself never saw, and drops calls past the per-record budget instead of writing
- * an unbounded file. Text uses {@link boundCaptureText}, which keeps both ends: a
+ * judge itself never saw. The record is bounded twice: at {@link MAX_CALLS} calls, and at
+ * {@link MAX_RECORD_CHARS} characters shared EQUALLY between the calls it keeps — a six-call
+ * session acceptance must not shrink to its first three calls, and which three survived must not
+ * depend on completion order. Text uses {@link boundCaptureText}, which keeps both ends: a
  * session-acceptance prompt runs past 100k characters, and head-only truncation kept the
  * instructions while dropping the trajectory tail the judge actually graded.
- * @param calls - captured calls, oldest first.
+ * @param calls - captured calls; callers sort them by label so the bounded set is deterministic.
  * @returns The bounded calls; empty when nothing was captured.
  */
 export declare function boundDecisionCalls(calls: readonly DecisionCall[]): DecisionCall[];
