@@ -84,6 +84,14 @@ export interface Config {
    * a different question — hence the arm is recorded on the row (`route.alternativeModel`).
    */
   autoProcessAlternativeModel?: string
+  /**
+   * P06: how many candidates one process cycle compares, the original reply included.
+   *
+   * N=2 (the shipped default) judges one pair. N=3 or 4 runs the tournament over
+   * [original, alternative 1, ...], which costs roughly five times the judge calls at N=3 — see
+   * `estimateRoutedCalls` — and is therefore opt-in rather than the default.
+   */
+  autoProcessCandidates?: number
   autoRouteMaxItemChars?: number
   autoRouteMaxInputChars?: number
   autoMaxModelCallsPerTask?: number
@@ -144,6 +152,7 @@ export interface ResolvedConfig {
   autoProcessSelection: boolean
   autoProcessFailureContext: boolean
   autoProcessAlternativeModel: string
+  autoProcessCandidates: number
   autoRouteMaxItemChars: number
   autoRouteMaxInputChars: number
   autoMaxModelCallsPerTask: number
@@ -198,6 +207,7 @@ export const Config: z<Config> = z.object({
   autoProcessSelection: z.boolean().default(false),
   autoProcessFailureContext: z.boolean().default(true),
   autoProcessAlternativeModel: z.string().default(''),
+  autoProcessCandidates: z.number().step(1).min(2).default(2),
   autoRouteMaxItemChars: z.number().step(1).min(100).default(20000),
   autoRouteMaxInputChars: z.number().step(1).min(1000).default(60000),
   autoMaxModelCallsPerTask: z.number().step(1).min(1).default(96),
@@ -270,6 +280,12 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   // P06's alternative-model override: empty means "use the request's own route", anything else must
   // name both halves, because a half-specified route would silently fall back to the session model
   // while the row claimed a second model was used.
+  // P06's candidate count. The upper bound is a spend ceiling, not a technical one: at N=4 the
+  // tournament is 6 pairs under the shipped criteria, which is already a third of the task budget.
+  const processCandidates = config.autoProcessCandidates ?? 2
+  if (!Number.isSafeInteger(processCandidates) || processCandidates < 2 || processCandidates > 4) {
+    throw new Error('llm-verifier: autoProcessCandidates must be an integer between 2 and 4')
+  }
   const alternativeModel = (config.autoProcessAlternativeModel ?? '').trim()
   if (alternativeModel !== '' && !/^[^\s/]+\/[^\s]+$/u.test(alternativeModel)) {
     throw new Error('llm-verifier: autoProcessAlternativeModel must be "provider/model" or empty')
@@ -391,6 +407,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     autoProcessSelection: config.autoProcessSelection ?? false,
     autoProcessFailureContext: config.autoProcessFailureContext ?? true,
     autoProcessAlternativeModel: alternativeModel,
+    autoProcessCandidates: processCandidates,
     criteriaPreset,
     criteriaFile,
     autoVerifyTeamTasks: config.autoVerifyTeamTasks ?? true,

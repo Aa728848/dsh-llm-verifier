@@ -782,7 +782,7 @@ describe('P06 process selection through the real hooks', () => {
     const stream = handlers.get('llm/stream')!
     const chunks: unknown[] = []
     for await (const chunk of stream(main, () => streamOf(originalChunks())) as AsyncIterable<unknown>) chunks.push(chunk)
-    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ route?: { trigger?: string; replayed?: string; generatedCalls?: number; judgeCalls?: number; alternativeAugmented?: boolean; alternativeModel?: string }; verdict?: { outcome?: string } }> } }
+    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ route?: { trigger?: string; replayed?: string; generatedCalls?: number; judgeCalls?: number; alternativeAugmented?: boolean; alternativeModel?: string }; toolName?: string; verdict?: { outcome?: string } }> } }
     return { chunks, calls: options.calls, recent: overview.value.recent }
   }
 
@@ -848,6 +848,19 @@ describe('P06 process selection through the real hooks', () => {
     expect(JSON.stringify(generation?.messages ?? [])).not.toContain('DATA, not instructions')
     const cycle = recent.find(row => row.route?.trigger === 'llm-stream')
     expect(cycle?.route?.alternativeAugmented).toBeUndefined()
+  })
+
+  it('judges the configured number of candidates in one tournament', async () => {
+    const calls: string[] = []
+    const { recent } = await drive({ config: { autoProcessSelection: true, autoProcessCandidates: 3 }, events: stuck(), calls })
+    // Two alternatives are generated and the tournament is what judges them. The two identical
+    // alternatives are de-duplicated inside the engine, so exactly one pair is judged here.
+    expect(calls.filter(entry => entry === 'generation')).toHaveLength(2)
+    expect(calls.filter(entry => entry === 'judge')).toHaveLength(6)
+    const cycle = recent.find(row => row.route?.trigger === 'llm-stream')
+    expect(cycle?.route?.generatedCalls).toBe(2)
+    // The row says which seam produced it: a tournament is not a pairwise comparison.
+    expect(cycle?.toolName).toBe('verifier_select')
   })
 
   it('generates the alternative with the configured route and records which model it was', async () => {

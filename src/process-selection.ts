@@ -21,8 +21,8 @@ import { dirname, join } from 'node:path'
 import { addUsage, emptyUsage, GENERATION_TEMPERATURE, type UsageStats } from './caller.ts'
 import { stableHash } from './cache.ts'
 import { PROCESS_CRITERIA, type Criterion } from './core.ts'
-import { mergeRunStats, partialStats, type CompareResult, type RunStats } from './engine.ts'
-import { itemBudget, type AutoVerifierRouter, type Reservation, type RouterPolicy, type RoutedAgent } from './router.ts'
+import { mergeRunStats, partialStats, type CompareResult, type RunStats, type SelectResult } from './engine.ts'
+import { estimateRoutedCalls, itemBudget, type AutoVerifierRouter, type Reservation, type RouterPolicy, type RoutedAgent } from './router.ts'
 import type { RouteObservation } from './statistics.ts'
 
 /**
@@ -104,6 +104,13 @@ export interface ProcessSelectionSettings {
    * simply mirrors the original request, which is what the plugin did before the override existed.
    */
   alternativeModel?: string
+  /**
+   * Candidates one cycle compares, the original reply included (2..4; absent means 2).
+   *
+   * Optional for the same reason as `alternativeModel`: an embedder that predates the knob keeps the
+   * pairwise behaviour instead of aborting a cycle.
+   */
+  candidates?: number
 }
 
 /**
@@ -135,8 +142,24 @@ export interface ProcessCycleReport {
   sameCandidate: boolean
   usage: RunStats
   observation: RouteObservation
+  /** Present when the cycle judged one pair (N=2). */
   compare?: CompareResult
+  /** Present when the cycle ran the tournament (N>2). */
+  select?: SelectResult
   error?: string
+}
+
+export interface ProcessSelectRequest {
+  /** Agent owning the topic the tournament runs under. */
+  agent: unknown
+  problem: string
+  /** Bounded reference context (constraints, recent failure evidence, tool definitions). */
+  context?: string
+  /** Original reply first, then the generated alternatives, in judge order. */
+  candidates: readonly string[]
+  criteria: readonly Criterion[]
+  repeats: number
+  signal: AbortSignal
 }
 
 export interface ProcessCompareRequest {
@@ -194,6 +217,13 @@ export interface ProcessSelectorDeps {
   /** Independent dispatch for the alternative reply (a fresh request object). */
   stream(options: GenerateOptions): AsyncIterable<StreamChunk>
   compare(request: ProcessCompareRequest): Promise<CompareResult>
+  /**
+   * Tournament over 3+ candidates; required only when `settings.candidates` is above 2.
+   *
+   * Optional on purpose: an embedder that never raises the count needs no tournament seam, and a
+   * cycle that asks for one without it falls back to the pairwise path with a warning.
+   */
+  select?(request: ProcessSelectRequest): Promise<SelectResult>
   record(report: ProcessCycleReport): Promise<void>
   /**
    * Rewrite the STATISTICS row of one already-recorded cycle because its delivery changed.
@@ -433,9 +463,24 @@ export interface ProcessViewInput extends ProcessEvidencePack {
   sanitize(text: string, maxChars: number): string
 }
 
+/** One bounded, redacted N-candidate view, or the reason it could not be built. */
+export interface ProcessSelectViewInput extends ProcessEvidencePack {
+  /** Original first, then the generated alternatives, in the order the tournament will see them. */
+  candidates: ReadonlyArray<{ text: string; actions: readonly string[] }>
+  maxItemChars: number
+  maxInputChars: number
+  /** Redact and bound one piece of untrusted text before it reaches a judge. */
+  sanitize(text: string, maxChars: number): string
+}
+
 /** A bounded, redacted comparison view, or the reason it could not be built. */
 export type ProcessView =
   | { ok: true; problem: string; context?: string; candidateA: string; candidateB: string }
+  | { ok: false; reason: string }
+
+/** A bounded, redacted tournament view (2+ candidates), or the reason it could not be built. */
+export type ProcessSelectView =
+  | { ok: true; problem: string; context?: string; candidates: string[] }
   | { ok: false; reason: string }
 
 /**
@@ -456,7 +501,24 @@ export type ProcessView =
  * @param input - the evidence pack plus both replies and the live bounds.
  * @returns The view, or the specific length reason it was refused.
  */
-export function buildProcessView(input: ProcessViewInput): ProcessView {
+/** Shared inputs of both view shapes. */
+interface ProcessViewShared extends ProcessEvidencePack {
+  maxItemChars: number
+  maxInputChars: number
+  /** Redact and bound one piece of untrusted text before it reaches a judge. */
+  sanitize(text: string, maxChars: number): string
+}
+
+/**
+ * Build the bounded, redacted context every candidate view shares.
+ *
+ * The task and its context must fit the combined input budget: a candidate scored against a
+ * truncated constraint set measures the truncation, not the candidate. Every piece is redacted
+ * BEFORE it is measured, so a secret the sanitizer masks can never reach the judge prompt.
+ * @param input - the evidence pack plus the live bounds.
+ * @returns The rendered task/context and their exact length, or the refusal reason.
+ */
+function buildProcessContext(input: ProcessViewShared): { ok: true; task: string; context?: string; fixed: number } | { ok: false; reason: string } {
   // Bounds are validated HERE, not left to the sanitizer: this runs inside the host's streams
   // waterfall, where a throw would cost the host the reply it was already receiving.
   if (!Number.isSafeInteger(input.maxItemChars) || input.maxItemChars < 1 || !Number.isSafeInteger(input.maxInputChars) || input.maxInputChars < 1) {
@@ -504,23 +566,70 @@ export function buildProcessView(input: ProcessViewInput): ProcessView {
   if (fixed > input.maxInputChars) {
     return { ok: false, reason: 'the task and its context need ' + fixed + ' characters but the process comparison budget is ' + input.maxInputChars + '; replaying the original reply' }
   }
-  const perCandidate = itemBudget(2, input.maxItemChars, input.maxInputChars - fixed)
-  // One character of headroom over the per-item cap: a piece the sanitizer had to truncate is
-  // therefore still longer than the per-item cap, so it can never pass for a complete action.
-  const atomicCapForCandidate = atomicCap
-  const render = (candidate: { text: string; actions: readonly string[] }): string | undefined => renderCandidateView({
-    text: input.sanitize(candidate.text, atomicCapForCandidate),
-    actions: candidate.actions.map(action => input.sanitize(action, atomicCapForCandidate)),
-  }, perCandidate)
-  const candidateA = render(input.original)
-  if (candidateA === undefined) return { ok: false, reason: 'candidate A has more tool-call text than the ' + perCandidate + '-character candidate budget; replaying the original reply' }
-  const candidateB = render(input.alternative)
-  if (candidateB === undefined) return { ok: false, reason: 'candidate B has more tool-call text than the ' + perCandidate + '-character candidate budget; replaying the original reply' }
-  const total = fixed + candidateA.length + candidateB.length
+  return { ok: true, task, ...(context === undefined || context === '' ? {} : { context }), fixed }
+}
+
+/**
+ * Render one bounded candidate list against the shared context.
+ *
+ * The remaining budget is split across the candidates with itemBudget, a candidate whose ACTIONS
+ * cannot be shown in full is refused (see renderCandidateView), and the total is measured on the
+ * rendered strings, so the view can never exceed maxInputChars.
+ * @param input - the shared inputs.
+ * @param candidates - candidates in judge order.
+ * @param labels - one short label per candidate, used only in refusal reasons.
+ * @returns The rendered candidates, or the refusal reason.
+ */
+function renderCandidateList(input: ProcessViewShared, candidates: ReadonlyArray<{ text: string; actions: readonly string[] }>, labels: readonly string[]): { ok: true; problem: string; context?: string; candidates: string[] } | { ok: false; reason: string } {
+  const context = buildProcessContext(input)
+  if (!context.ok) return context
+  const atomicCap = Math.max(1, Math.floor(input.maxItemChars)) + 1
+  const perCandidate = itemBudget(candidates.length, input.maxItemChars, input.maxInputChars - context.fixed)
+  const rendered: string[] = []
+  for (const [index, candidate] of candidates.entries()) {
+    const view = renderCandidateView({
+      text: input.sanitize(candidate.text, atomicCap),
+      actions: candidate.actions.map(action => input.sanitize(action, atomicCap)),
+    }, perCandidate)
+    if (view === undefined) {
+      return { ok: false, reason: 'candidate ' + (labels[index] ?? String(index + 1)) + ' has more tool-call text than the ' + perCandidate + '-character candidate budget; replaying the original reply' }
+    }
+    rendered.push(view)
+  }
+  const total = context.fixed + rendered.reduce((sum, view) => sum + view.length, 0)
   if (total > input.maxInputChars) {
     return { ok: false, reason: 'the rendered comparison view is ' + total + ' characters against a ' + input.maxInputChars + '-character budget; replaying the original reply' }
   }
-  return { ok: true, problem: task, ...(context === undefined || context === '' ? {} : { context }), candidateA, candidateB }
+  return { ok: true, problem: context.task, ...(context.context === undefined ? {} : { context: context.context }), candidates: rendered }
+}
+
+/**
+ * Build the bounded, redacted comparison view of one process cycle.
+ *
+ * Three boundaries are enforced here, and exceeding any of them declines the cycle instead of
+ * sending incomplete evidence: every piece is redacted before it is measured; the task and its
+ * context must fit the combined budget; and the remaining budget is split across the two candidates
+ * with itemBudget, a candidate whose actions cannot be shown in full being refused.
+ * @param input - the evidence pack plus both replies and the live bounds.
+ * @returns The view, or the specific length reason it was refused.
+ */
+export function buildProcessView(input: ProcessViewInput): ProcessView {
+  const rendered = renderCandidateList(input, [input.original, input.alternative], ['A', 'B'])
+  if (!rendered.ok) return rendered
+  return { ok: true, problem: rendered.problem, ...(rendered.context === undefined ? {} : { context: rendered.context }), candidateA: rendered.candidates[0]!, candidateB: rendered.candidates[1]! }
+}
+
+/**
+ * Build the bounded, redacted tournament view (2+ candidates) of one process cycle.
+ *
+ * Same boundaries as {@link buildProcessView}, with the budget split across every candidate. Used
+ * when the cycle judges more than one pair, where the pairwise builder would silently score only
+ * the first two candidates.
+ * @param input - the evidence pack plus the candidate list and the live bounds.
+ * @returns The view, or the specific length reason it was refused.
+ */
+export function buildProcessSelectView(input: ProcessSelectViewInput): ProcessSelectView {
+  return renderCandidateList(input, input.candidates, input.candidates.map((_, index) => String(index + 1)))
 }
 
 /**
@@ -664,15 +773,23 @@ export class ProcessCycleStore {
  * re-entrancy guard are per-plugin-instance state; every decision point reads settings and budget
  * fresh, so a settings change or a spent budget is honoured without restarting anything.
  */
-/** A cycle whose reservation, purchase record and generation dispatch are already in flight. */
+/** One dispatched alternative reply and the chunks it reported. */
+interface ProcessDispatch {
+  /** A rejection is a generation failure and counts as one added call. */
+  generated: Promise<BufferedCandidate>
+  /** Owned by the caller so a failure keeps the usage the stream already reported. */
+  chunks: StreamChunk[]
+}
+
+/** A cycle whose reservation, purchase record and generation dispatches are already in flight. */
 interface StartedCycle {
   reservation: Reservation
   observation: RouteObservation
   phase: AbortController
-  /** The alternative reply; a rejection is a generation failure and counts as one added call. */
-  generated: Promise<BufferedCandidate>
-  /** Chunks the dispatch reported, owned by the caller so a failure keeps its usage. */
-  chunks: StreamChunk[]
+  /** Candidates the cycle compares, the original reply included (2..4). */
+  count: number
+  /** One dispatch per generated alternative (count - 1 of them). */
+  dispatches: ProcessDispatch[]
   /** Idempotent: release the deadline, the parent-signal listener and the in-flight registration. */
   cleanup(): void
 }
@@ -789,10 +906,22 @@ export class ProcessSelector {
       await this.skip(startedAt, intent, 'task-changed', 'the intent no longer belongs to the current task')
       return undefined
     }
+    // The tournament seam is optional: a cycle that asks for three candidates without one falls back
+    // to the pair instead of failing, because a missing embedding seam must not abort a request.
+    const requested = Math.floor(settings.candidates ?? 2)
+    const wanted = Number.isFinite(requested) ? Math.min(4, Math.max(2, requested)) : 2
+    const count = wanted > 2 && this.deps.select === undefined ? 2 : wanted
+    if (count !== wanted) this.deps.logger.warn('llm-verifier process selection: ' + wanted + ' candidates were configured without a tournament seam; comparing one pair instead')
+    const judges = Math.max(1, this.deps.judges())
     const policy = await this.deps.policy()
     const router = this.deps.router()
     const criteria = PROCESS_CRITERIA
-    const expected = 1 + criteria.length * PROCESS_REPEATS * Math.max(1, this.deps.judges())
+    // One reservation must cover the generated alternatives plus every judged pair. The pair count
+    // comes from the engine's own estimator (ring + pivot round), so this never drifts from what
+    // engine.select actually runs.
+    const expected = count === 2
+      ? (count - 1) + criteria.length * PROCESS_REPEATS * judges
+      : (count - 1) + estimateRoutedCalls({ kind: 'select', candidates: new Array(count).fill(null) } as never, PROCESS_REPEATS, criteria.length) * judges
     const fingerprint = stableHash({ phase: 'process', sessionId: intent.sessionId, taskStartSeq: intent.taskStartSeq, signal: intent.signal })
     const reservation = router.reserve(intent.agent as RoutedAgent, 'process', fingerprint, expected, policy)
     if (reservation === undefined) {
@@ -838,13 +967,17 @@ export class ProcessSelector {
       await this.report({ intent, reservation, observation, startedAt, outcome: stale, replayed: 'original', generatedCalls: 0, judgeCalls: 0, sameCandidate: false, usage: blankProcessStats(), ...(stale === 'canceled' ? { error: 'the process-selection phase was cancelled' } : {}) })
       return undefined
     }
-    const request = buildAlternativeRequest(options, phase.signal, intent.failureContext, alternativeTarget)
-    this.internal.add(request as object)
-    const chunks: StreamChunk[] = []
-    const generated = drainAlternative(this.deps.stream(request), PROCESS_CANDIDATE_CAP_CHARS, chunks)
-    // A discarded cycle must never surface as an unhandled rejection; the awaiting paths still see it.
-    generated.catch(() => {})
-    return { reservation, observation, phase, generated, chunks, cleanup }
+    const dispatches: ProcessDispatch[] = []
+    for (let index = 0; index < count - 1; index += 1) {
+      const request = buildAlternativeRequest(options, phase.signal, intent.failureContext, alternativeTarget)
+      this.internal.add(request as object)
+      const chunks: StreamChunk[] = []
+      const generated = drainAlternative(this.deps.stream(request), PROCESS_CANDIDATE_CAP_CHARS, chunks)
+      // A discarded cycle must never surface as an unhandled rejection; the awaiting paths still see it.
+      generated.catch(() => {})
+      dispatches.push({ generated, chunks })
+    }
+    return { reservation, observation, phase, count, dispatches, cleanup }
   }
 
   /**
@@ -866,18 +999,23 @@ export class ProcessSelector {
     cycle.cleanup()
     this.deps.router().fail(intent.agent as RoutedAgent, cycle.reservation, false)
     cycle.phase.abort(new Error('llm-verifier: process-selection cycle discarded (' + reason + ')'))
-    await this.report({ intent, reservation: cycle.reservation, observation: cycle.observation, startedAt, outcome, replayed: 'original', generatedCalls: 1, judgeCalls: 0, sameCandidate: false, usage: await this.settledUsage(cycle), error: error ?? reason })
+    await this.report({ intent, reservation: cycle.reservation, observation: cycle.observation, startedAt, outcome, replayed: 'original', generatedCalls: cycle.dispatches.length, judgeCalls: 0, sameCandidate: false, usage: await this.settledUsage(cycle), error: error ?? reason })
   }
 
-  /** Usage a discarded dispatch already reported, best effort, never zero when tokens were seen. */
+  /** Usage across every dispatch, best effort, never zero when tokens were seen. */
   private async settledUsage(cycle: StartedCycle): Promise<RunStats> {
-    try {
-      return statsWith((await cycle.generated).usage)
-    } catch {
-      const usage = statsWith(usageFromChunks(cycle.chunks))
-      usage.usageIncomplete = true
-      return usage
+    const stats = blankProcessStats()
+    for (const dispatch of cycle.dispatches) {
+      try {
+        const candidate = await dispatch.generated
+        addUsage(stats, candidate.usage)
+        if (candidate.usage.usageIncomplete) stats.usageIncomplete = true
+      } catch {
+        addUsage(stats, usageFromChunks(dispatch.chunks))
+        stats.usageIncomplete = true
+      }
     }
+    return stats
   }
 
   /**
@@ -975,36 +1113,41 @@ export class ProcessSelector {
         await this.abandon(cycle, intent, startedAt, staleBeforeGeneration, 'the cycle became stale before its first added model call', staleBeforeGeneration === 'canceled' ? 'the process-selection phase was cancelled' : undefined)
         return
       }
-      let alternative: BufferedCandidate
-      // The dispatch happened in beginCycle, overlapping the original reply. Its chunks are owned by
-      // the cycle, so the usage a stream already reported before throwing survives: reporting the
+      let alternatives: BufferedCandidate[]
+      const generatedCount = cycle.dispatches.length
+      // The dispatches happened in beginCycle, overlapping the original reply. Their chunks are owned
+      // by the cycle, so the usage a stream already reported before throwing survives: reporting the
       // failed generation as zero tokens hid real spend.
       try {
-        alternative = await cycle.generated
+        alternatives = await Promise.all(cycle.dispatches.map(dispatch => dispatch.generated))
       } catch (error) {
-        const generationUsage = statsWith(usageFromChunks(cycle.chunks))
-        // The dispatch really happened and never finished: what it already reported is known, what
-        // it would have reported next is not.
+        const generationUsage = await this.settledUsage(cycle)
+        // At least one dispatch really happened and never finished: what it already reported is
+        // known, what it would have reported next is not.
         generationUsage.usageIncomplete = true
         router.fail(intent.agent as RoutedAgent, reservation, false)
         for (const chunk of original) yield chunk
-        await this.report({ intent, reservation, observation, startedAt, outcome: 'generation-failed', replayed: 'original', generatedCalls: 1, judgeCalls: 0, sameCandidate: false, usage: generationUsage, error: error instanceof Error ? error.message : String(error) })
+        await this.report({ intent, reservation, observation, startedAt, outcome: 'generation-failed', replayed: 'original', generatedCalls: generatedCount, judgeCalls: 0, sameCandidate: false, usage: generationUsage, error: error instanceof Error ? error.message : String(error) })
         return
       }
-      observation.generatedCalls = 1
-      const generatedUsage = alternative.usage
-      if (!alternative.complete || (!alternative.text && alternative.actions.length === 0)) {
+      observation.generatedCalls = generatedCount
+      const generatedUsage = await this.settledUsage(cycle)
+      const unusable = alternatives.find(candidate => !candidate.complete)
+      const blank = alternatives.find(candidate => !candidate.text && candidate.actions.length === 0)
+      if (unusable !== undefined || blank !== undefined) {
         router.fail(intent.agent as RoutedAgent, reservation, false)
         for (const chunk of original) yield chunk
-        await this.report({ intent, reservation, observation, startedAt, outcome: alternative.complete ? 'alternative-empty' : 'alternative-incomplete', replayed: 'original', generatedCalls: 1, judgeCalls: 0, sameCandidate: false, usage: statsWith(generatedUsage) })
+        await this.report({ intent, reservation, observation, startedAt, outcome: unusable !== undefined ? 'alternative-incomplete' : 'alternative-empty', replayed: 'original', generatedCalls: generatedCount, judgeCalls: 0, sameCandidate: false, usage: generatedUsage })
         return
       }
-      if (candidateIdentity(alternative) === candidateIdentity(rendered)) {
-        // Same plan expressed with a fresh call id: no judge call can separate them.
+      // Every alternative repeats the original plan under a fresh call id, so no judge call can
+      // separate them: the shipped majority short-circuit, which collapses the set to nothing to
+      // judge. Deliberately NOT upstream's rule of returning an UNJUDGED candidate as the winner.
+      if (alternatives.every(candidate => candidateIdentity(candidate) === candidateIdentity(rendered))) {
         router.commit(intent.agent as RoutedAgent, reservation, intent.lastSeq)
         observation.sameCandidate = true
         for (const chunk of original) yield chunk
-        await this.report({ intent, reservation, observation, startedAt, outcome: 'identical-candidate', replayed: 'original', generatedCalls: 1, judgeCalls: 0, sameCandidate: true, usage: statsWith(generatedUsage) })
+        await this.report({ intent, reservation, observation, startedAt, outcome: 'identical-candidate', replayed: 'original', generatedCalls: generatedCount, judgeCalls: 0, sameCandidate: true, usage: generatedUsage })
         return
       }
       // A switch-off, a cancellation or a new task while the alternative was generating must not
@@ -1013,7 +1156,7 @@ export class ProcessSelector {
       if (staleAfterGeneration !== undefined) {
         router.fail(intent.agent as RoutedAgent, reservation, false)
         for (const chunk of original) yield chunk
-        await this.report({ intent, reservation, observation, startedAt, outcome: staleAfterGeneration, replayed: 'original', generatedCalls: 1, judgeCalls: 0, sameCandidate: false, usage: statsWith(generatedUsage), ...(staleAfterGeneration === 'canceled' ? { error: 'the process-selection phase was cancelled' } : {}) })
+        await this.report({ intent, reservation, observation, startedAt, outcome: staleAfterGeneration, replayed: 'original', generatedCalls: 1, judgeCalls: 0, sameCandidate: false, usage: generatedUsage, ...(staleAfterGeneration === 'canceled' ? { error: 'the process-selection phase was cancelled' } : {}) })
         return
       }
       let evidence: ProcessTaskEvidence
@@ -1022,53 +1165,73 @@ export class ProcessSelector {
       } catch (error) {
         router.fail(intent.agent as RoutedAgent, reservation, false)
         for (const chunk of original) yield chunk
-        await this.report({ intent, reservation, observation, startedAt, outcome: 'task-unreadable', replayed: 'original', generatedCalls: 1, judgeCalls: 0, sameCandidate: false, usage: statsWith(generatedUsage), error: error instanceof Error ? error.message : String(error) })
+        await this.report({ intent, reservation, observation, startedAt, outcome: 'task-unreadable', replayed: 'original', generatedCalls: generatedCount, judgeCalls: 0, sameCandidate: false, usage: generatedUsage, error: error instanceof Error ? error.message : String(error) })
         return
       }
       // The judge scores the SAME bounded, redacted view this decision is made on. The budget is
       // split with itemBudget and the total is measured on the rendered text; a candidate whose
       // actions cannot be shown in full declines the cycle rather than being scored truncated.
       const tools = renderToolDigest(options.tools)
-      const view = buildProcessView({
+      const shared = {
         task: evidence.problem,
         ...(evidence.evidence === undefined ? {} : { evidence: evidence.evidence }),
         ...(typeof options.system === 'string' ? { constraints: options.system } : {}),
         ...(tools === undefined ? {} : { tools }),
-        original: rendered,
-        alternative,
         maxItemChars: settings.maxItemChars,
         maxInputChars: settings.maxInputChars,
-        sanitize: (text, maxChars) => this.deps.sanitize(text, maxChars),
-      })
+        sanitize: (text: string, maxChars: number) => this.deps.sanitize(text, maxChars),
+      }
+      // One builder per shape: the pairwise one keeps its A/B labels (and its exact refusal reasons),
+      // the tournament one splits the same budget across every candidate. A pairwise builder cannot
+      // be used for N>2 without silently scoring only the first two.
+      const view: ProcessView | ProcessSelectView = cycle.count === 2
+        ? buildProcessView({ ...shared, original: rendered, alternative: alternatives[0]! })
+        : buildProcessSelectView({ ...shared, candidates: [rendered, ...alternatives] })
       if (!view.ok) {
         router.fail(intent.agent as RoutedAgent, reservation, false)
         for (const chunk of original) yield chunk
-        await this.report({ intent, reservation, observation, startedAt, outcome: 'view-over-budget', replayed: 'original', generatedCalls: 1, judgeCalls: 0, sameCandidate: false, usage: statsWith(generatedUsage), error: view.reason })
+        await this.report({ intent, reservation, observation, startedAt, outcome: 'view-over-budget', replayed: 'original', generatedCalls: generatedCount, judgeCalls: 0, sameCandidate: false, usage: generatedUsage, error: view.reason })
         return
       }
-      if (view.candidateA === view.candidateB) {
+      // Two byte-identical renders cannot be separated by a judge call. Only the pairwise path needs
+      // this: a tournament de-duplicates inside the engine, which maps its ranking back to this list.
+      if ('candidateA' in view && view.candidateA === view.candidateB) {
         router.commit(intent.agent as RoutedAgent, reservation, intent.lastSeq)
         observation.sameCandidate = true
         for (const chunk of original) yield chunk
-        await this.report({ intent, reservation, observation, startedAt, outcome: 'identical-candidate', replayed: 'original', generatedCalls: 1, judgeCalls: 0, sameCandidate: true, usage: statsWith(generatedUsage) })
+        await this.report({ intent, reservation, observation, startedAt, outcome: 'identical-candidate', replayed: 'original', generatedCalls: generatedCount, judgeCalls: 0, sameCandidate: true, usage: generatedUsage })
         return
       }
-      let compared: CompareResult
+      let judged: { judgeCalls: number; winner: BufferedCandidate | undefined; tie: boolean; stats: RunStats; compare?: CompareResult; select?: SelectResult }
       try {
-        compared = await this.deps.compare({
-          agent: intent.agent,
-          problem: view.problem,
-          ...(view.context === undefined ? {} : { context: view.context }),
-          candidateA: view.candidateA,
-          candidateB: view.candidateB,
-          criteria,
-          repeats: PROCESS_REPEATS,
-          signal: phase.signal,
-        })
+        if ('candidateA' in view) {
+          const compared = await this.deps.compare({
+            agent: intent.agent,
+            problem: view.problem,
+            ...(view.context === undefined ? {} : { context: view.context }),
+            candidateA: view.candidateA,
+            candidateB: view.candidateB,
+            criteria,
+            repeats: PROCESS_REPEATS,
+            signal: phase.signal,
+          })
+          judged = { judgeCalls: compared.calls, winner: compared.winner === 'B' ? alternatives[0] : undefined, tie: compared.winner === 'tie', stats: compared.stats, compare: compared }
+        } else {
+          const selected = await this.deps.select!({
+            agent: intent.agent,
+            problem: view.problem,
+            ...(view.context === undefined ? {} : { context: view.context }),
+            candidates: view.candidates,
+            criteria,
+            repeats: PROCESS_REPEATS,
+            signal: phase.signal,
+          })
+          judged = { judgeCalls: selected.calls, winner: selected.index > 0 ? alternatives[selected.index - 1] : undefined, tie: false, stats: selected.stats, select: selected }
+        }
       } catch (error) {
         // The judge run really happened before it failed: fold in every call the engine attached to
         // the error, so a partial comparison is never recorded as a free one.
-        const failureUsage = statsWith(generatedUsage)
+        const failureUsage = generatedUsage
         const partial = partialStats(error)
         if (partial === undefined) failureUsage.usageIncomplete = true
         else mergeRunStats(failureUsage, partial)
@@ -1076,27 +1239,28 @@ export class ProcessSelector {
         observation.judgeCalls = judgeCalls
         router.fail(intent.agent as RoutedAgent, reservation, false)
         for (const chunk of original) yield chunk
-        await this.report({ intent, reservation, observation, startedAt, outcome: 'comparison-failed', replayed: 'original', generatedCalls: 1, judgeCalls, sameCandidate: false, usage: failureUsage, error: error instanceof Error ? error.message : String(error) })
+        await this.report({ intent, reservation, observation, startedAt, outcome: 'comparison-failed', replayed: 'original', generatedCalls: generatedCount, judgeCalls, sameCandidate: false, usage: failureUsage, error: error instanceof Error ? error.message : String(error) })
         return
       }
-      observation.judgeCalls = compared.calls
-      const usage = statsWith(generatedUsage)
-      mergeRunStats(usage, compared.stats)
+      observation.judgeCalls = judged.judgeCalls
+      const usage = generatedUsage
+      mergeRunStats(usage, judged.stats)
       // Last check before the decision is committed and recorded: the winner is only replayed while
       // the cycle is still current, and a switch turned off (or a cancellation, or a new task)
-      // during the comparison must leave the host with the ORIGINAL reply.
+      // during the judging must leave the host with the ORIGINAL reply.
       const stale = this.staleReason(intent, phase)
       if (stale !== undefined) {
         router.fail(intent.agent as RoutedAgent, reservation, false)
         for (const chunk of original) yield chunk
-        await this.report({ intent, reservation, observation, startedAt, outcome: stale, replayed: 'original', generatedCalls: 1, judgeCalls: compared.calls, sameCandidate: false, usage, compare: compared, ...(stale === 'canceled' ? { error: 'the process-selection phase was cancelled' } : {}) })
+        await this.report({ intent, reservation, observation, startedAt, outcome: stale, replayed: 'original', generatedCalls: generatedCount, judgeCalls: judged.judgeCalls, sameCandidate: false, usage, ...(judged.compare === undefined ? {} : { compare: judged.compare }), ...(judged.select === undefined ? {} : { select: judged.select }), ...(stale === 'canceled' ? { error: 'the process-selection phase was cancelled' } : {}) })
         return
       }
       // A selection is never an acceptance: armed here, discharged only by the final gate.
       router.commit(intent.agent as RoutedAgent, reservation, intent.lastSeq)
-      const replaced = compared.winner === 'B'
+      const winner = judged.winner
+      const replaced = winner !== undefined
       observation.replayed = replaced ? 'candidate' : 'original'
-      await this.report({ intent, reservation, observation, startedAt, outcome: replaced ? 'candidate-selected' : compared.winner === 'tie' ? 'tie' : 'original-selected', replayed: replaced ? 'candidate' : 'original', generatedCalls: 1, judgeCalls: compared.calls, sameCandidate: false, usage, compare: compared })
+      await this.report({ intent, reservation, observation, startedAt, outcome: replaced ? 'candidate-selected' : judged.tie ? 'tie' : 'original-selected', replayed: replaced ? 'candidate' : 'original', generatedCalls: generatedCount, judgeCalls: judged.judgeCalls, sameCandidate: false, usage, ...(judged.compare === undefined ? {} : { compare: judged.compare }), ...(judged.select === undefined ? {} : { select: judged.select }) })
       // The report awaited the cycle log and the statistics row, so re-read the live state once more
       // IMMEDIATELY before the first chunk leaves this generator: nothing has been yielded yet, and a
       // switch turned off (or a cancellation) during the accounting must still leave the host with the
@@ -1125,7 +1289,7 @@ export class ProcessSelector {
         }
         // Once the first chunk is out the winner is replayed as ONE piece: a reply is never switched
         // halfway through because the settings changed during the reveal.
-        for (const chunk of alternative.chunks) yield chunk
+        for (const chunk of winner!.chunks) yield chunk
         return
       }
       for (const chunk of original) yield chunk
@@ -1171,7 +1335,7 @@ export class ProcessSelector {
   }
 
   /** Record a purchased cycle and stamp its durable outcome. */
-  private async report(input: { intent: ProcessIntent; reservation: Reservation; observation: RouteObservation; startedAt: number; outcome: string; replayed: 'original' | 'candidate'; generatedCalls: number; judgeCalls: number; sameCandidate: boolean; usage: RunStats; compare?: CompareResult; error?: string }): Promise<void> {
+  private async report(input: { intent: ProcessIntent; reservation: Reservation; observation: RouteObservation; startedAt: number; outcome: string; replayed: 'original' | 'candidate'; generatedCalls: number; judgeCalls: number; sameCandidate: boolean; usage: RunStats; compare?: CompareResult; select?: SelectResult; error?: string }): Promise<void> {
     await this.deps.store(input.intent.agent).finish(input.reservation.id, input.outcome, input.replayed)
     await this.deps.record({
       agent: input.intent.agent,
@@ -1186,6 +1350,7 @@ export class ProcessSelector {
       usage: input.usage,
       observation: input.observation,
       ...(input.compare === undefined ? {} : { compare: input.compare }),
+      ...(input.select === undefined ? {} : { select: input.select }),
       ...(input.error === undefined ? {} : { error: input.error }),
     }).catch(() => {})
   }

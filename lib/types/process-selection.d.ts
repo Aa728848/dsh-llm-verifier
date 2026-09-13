@@ -18,7 +18,7 @@
 import { type GenerateOptions, type Message, type StreamChunk } from '@deepseek-ai/dsh-llm';
 import { type UsageStats } from './caller.ts';
 import { type Criterion } from './core.ts';
-import { type CompareResult, type RunStats } from './engine.ts';
+import { type CompareResult, type RunStats, type SelectResult } from './engine.ts';
 import { type AutoVerifierRouter, type RouterPolicy } from './router.ts';
 import type { RouteObservation } from './statistics.ts';
 /**
@@ -94,6 +94,13 @@ export interface ProcessSelectionSettings {
      * simply mirrors the original request, which is what the plugin did before the override existed.
      */
     alternativeModel?: string;
+    /**
+     * Candidates one cycle compares, the original reply included (2..4; absent means 2).
+     *
+     * Optional for the same reason as `alternativeModel`: an embedder that predates the knob keeps the
+     * pairwise behaviour instead of aborting a cycle.
+     */
+    candidates?: number;
 }
 /**
  * Parse the configured alternative-model override.
@@ -119,8 +126,23 @@ export interface ProcessCycleReport {
     sameCandidate: boolean;
     usage: RunStats;
     observation: RouteObservation;
+    /** Present when the cycle judged one pair (N=2). */
     compare?: CompareResult;
+    /** Present when the cycle ran the tournament (N>2). */
+    select?: SelectResult;
     error?: string;
+}
+export interface ProcessSelectRequest {
+    /** Agent owning the topic the tournament runs under. */
+    agent: unknown;
+    problem: string;
+    /** Bounded reference context (constraints, recent failure evidence, tool definitions). */
+    context?: string;
+    /** Original reply first, then the generated alternatives, in judge order. */
+    candidates: readonly string[];
+    criteria: readonly Criterion[];
+    repeats: number;
+    signal: AbortSignal;
 }
 export interface ProcessCompareRequest {
     /** Agent owning the topic the comparison runs under. */
@@ -174,6 +196,13 @@ export interface ProcessSelectorDeps {
     /** Independent dispatch for the alternative reply (a fresh request object). */
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
     compare(request: ProcessCompareRequest): Promise<CompareResult>;
+    /**
+     * Tournament over 3+ candidates; required only when `settings.candidates` is above 2.
+     *
+     * Optional on purpose: an embedder that never raises the count needs no tournament seam, and a
+     * cycle that asks for one without it falls back to the pairwise path with a warning.
+     */
+    select?(request: ProcessSelectRequest): Promise<SelectResult>;
     record(report: ProcessCycleReport): Promise<void>;
     /**
      * Rewrite the STATISTICS row of one already-recorded cycle because its delivery changed.
@@ -305,6 +334,18 @@ export interface ProcessViewInput extends ProcessEvidencePack {
     /** Redact and bound one piece of untrusted text before it reaches a judge. */
     sanitize(text: string, maxChars: number): string;
 }
+/** One bounded, redacted N-candidate view, or the reason it could not be built. */
+export interface ProcessSelectViewInput extends ProcessEvidencePack {
+    /** Original first, then the generated alternatives, in the order the tournament will see them. */
+    candidates: ReadonlyArray<{
+        text: string;
+        actions: readonly string[];
+    }>;
+    maxItemChars: number;
+    maxInputChars: number;
+    /** Redact and bound one piece of untrusted text before it reaches a judge. */
+    sanitize(text: string, maxChars: number): string;
+}
 /** A bounded, redacted comparison view, or the reason it could not be built. */
 export type ProcessView = {
     ok: true;
@@ -316,25 +357,37 @@ export type ProcessView = {
     ok: false;
     reason: string;
 };
+/** A bounded, redacted tournament view (2+ candidates), or the reason it could not be built. */
+export type ProcessSelectView = {
+    ok: true;
+    problem: string;
+    context?: string;
+    candidates: string[];
+} | {
+    ok: false;
+    reason: string;
+};
 /**
  * Build the bounded, redacted comparison view of one process cycle.
  *
  * Three boundaries are enforced here, and exceeding any of them declines the cycle instead of
- * sending incomplete evidence:
- *
- * 1. every piece is redacted with the plugin's sanitizer BEFORE it is measured, so a secret that
- *    sanitizeVerifierText masks can never reach the judge prompt through a candidate reply;
- * 2. the task and its context must fit the combined input budget (a candidate scored against a
- *    truncated constraint set measures the truncation, not the candidate);
- * 3. the remaining budget is split across the two candidates with itemBudget, and a candidate whose
- *    actions cannot be shown in full is refused (see renderCandidateView).
- *
- * The TOTAL is measured on the rendered text, never estimated, so the view can never exceed
- * maxInputChars.
+ * sending incomplete evidence: every piece is redacted before it is measured; the task and its
+ * context must fit the combined budget; and the remaining budget is split across the two candidates
+ * with itemBudget, a candidate whose actions cannot be shown in full being refused.
  * @param input - the evidence pack plus both replies and the live bounds.
  * @returns The view, or the specific length reason it was refused.
  */
 export declare function buildProcessView(input: ProcessViewInput): ProcessView;
+/**
+ * Build the bounded, redacted tournament view (2+ candidates) of one process cycle.
+ *
+ * Same boundaries as {@link buildProcessView}, with the budget split across every candidate. Used
+ * when the cycle judges more than one pair, where the pairwise builder would silently score only
+ * the first two candidates.
+ * @param input - the evidence pack plus the candidate list and the live bounds.
+ * @returns The view, or the specific length reason it was refused.
+ */
+export declare function buildProcessSelectView(input: ProcessSelectViewInput): ProcessSelectView;
 /**
  * One bounded digest of the tools the original request could call.
  *
@@ -468,7 +521,7 @@ export declare class ProcessSelector {
      * @param error - error text to store instead of the reason, when there is one.
      */
     private abandon;
-    /** Usage a discarded dispatch already reported, best effort, never zero when tokens were seen. */
+    /** Usage across every dispatch, best effort, never zero when tokens were seen. */
     private settledUsage;
     /**
      * The waterfall body.

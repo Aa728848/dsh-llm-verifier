@@ -51,6 +51,20 @@ function compareResult(winner: 'A' | 'B' | 'tie', overrides: Record<string, unkn
   } as never
 }
 
+function selectResult(index: number, calls = 10) {
+  return {
+    index,
+    best: 'candidate ' + (index + 1),
+    scores: [0.2, 0.4, 0.9],
+    ranking: [2, 1, 0],
+    pivots: [],
+    comparisons: 5,
+    calls,
+    stats: { ...emptyUsage(), calls, attempts: calls, inputTokens: 10 * calls, outputTokens: 5 * calls, cacheHits: 0, cacheMisses: calls, estimatedCostUsd: 0, topLogprobScores: 0, explicitTagScores: calls },
+    judges: [],
+    diagnostics: [],
+  } as never
+}
 interface Harness {
   selector: ProcessSelector
   reports: ProcessCycleReport[]
@@ -481,6 +495,51 @@ describe('process cycle execution', () => {
     expect(h.failed).toBe(1)
   })
 
+  it('runs the tournament when more than two candidates are configured', async () => {
+    let dispatched = 0
+    let seen: { candidates: readonly string[] } | undefined
+    const h = harness({
+      settings: () => ({ active: true, smart: true, timeoutMs: 5000, maxItemChars: 20_000, maxInputChars: 60_000, candidates: 3 }),
+      // Distinct prose per dispatch, so the two alternatives are not collapsed into one candidate.
+      stream: () => { dispatched += 1; return streamOf(textChunks('ALTERNATIVE-' + dispatched)) },
+      select: async request => { seen = request as { candidates: readonly string[] }; return selectResult(2) },
+    })
+    const { chunks, report } = await run(h, { original: textChunks('ORIGINAL') })
+    // Two dispatches, one tournament over [original, alt 1, alt 2].
+    expect(dispatched).toBe(2)
+    expect(seen?.candidates).toHaveLength(3)
+    expect(seen?.candidates[0]).toContain('ORIGINAL')
+    expect(report?.generatedCalls).toBe(2)
+    expect(report?.select?.index).toBe(2)
+    expect(report?.replayed).toBe('candidate')
+    // Index 2 is the SECOND alternative, and the winner is replayed verbatim.
+    expect(chunks).toEqual(textChunks('ALTERNATIVE-2'))
+  })
+
+  it('collapses a set where every alternative repeats the original', async () => {
+    let selects = 0
+    const h = harness({
+      settings: () => ({ active: true, smart: true, timeoutMs: 5000, maxItemChars: 20_000, maxInputChars: 60_000, candidates: 3 }),
+      stream: () => streamOf(textChunks('ORIGINAL')),
+      select: async () => { selects += 1; return selectResult(1) },
+    })
+    const { chunks, report } = await run(h, { original: textChunks('ORIGINAL') })
+    // Nothing to separate: no judge call is bought, and the original is replayed.
+    expect(selects).toBe(0)
+    expect(report?.outcome).toBe('identical-candidate')
+    expect(report?.judgeCalls).toBe(0)
+    expect(chunks).toEqual(textChunks('ORIGINAL'))
+  })
+
+  it('falls back to one pair when the tournament seam is missing', async () => {
+    const h = harness({ settings: () => ({ active: true, smart: true, timeoutMs: 5000, maxItemChars: 20_000, maxInputChars: 60_000, candidates: 3 }) })
+    const { report } = await run(h, { original: textChunks('ORIGINAL') })
+    // A missing embedding seam degrades to the shipped pair instead of aborting the request.
+    expect(h.warnings.some(warning => warning.includes('tournament seam'))).toBe(true)
+    expect(report?.generatedCalls).toBe(1)
+    expect(report?.compare).toBeDefined()
+    expect(report?.select).toBeUndefined()
+  })
   it('dispatches the alternative before the original reply finishes', async () => {
     const order: string[] = []
     // The overlap is a property of the selector, not of the purchase's IO latency: the store is

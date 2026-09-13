@@ -20,6 +20,7 @@ export interface Values {
   autoProcessSelection: boolean
   autoProcessFailureContext: boolean
   autoProcessAlternativeModel: string
+  autoProcessCandidates: number
   autoVerifyMode: 'manual' | 'smart' | 'strict'
   autoVerifyThreshold: number
   autoVerifyRepeats: number
@@ -75,6 +76,7 @@ export const CONFIG_DEFAULTS: Values = {
   autoProcessSelection: false,
   autoProcessFailureContext: true,
   autoProcessAlternativeModel: '',
+  autoProcessCandidates: 2,
   autoVerifyMode: 'smart',
   autoVerifyThreshold: 0.65,
   autoVerifyRepeats: 1,
@@ -212,6 +214,7 @@ export const FIELDS: readonly FieldSpec[] = [
   toggle('autoProcessSelection', 'routing'),
   toggle('autoProcessFailureContext', 'routing'),
   text('autoProcessAlternativeModel', 'routing'),
+  number('autoProcessCandidates', 'routing', { min: 2, max: 4, integer: true }),
 
   select('provider', 'model', 'provider', false),
   select('model', 'model', 'model', false),
@@ -295,6 +298,7 @@ export function valuesFromView(view: Record<string, unknown> | undefined): Value
     autoProcessSelection: v.autoProcessSelection === true,
     autoProcessFailureContext: v.autoProcessFailureContext !== false,
     autoProcessAlternativeModel: typeof v.autoProcessAlternativeModel === 'string' ? v.autoProcessAlternativeModel.trim() : '',
+    autoProcessCandidates: numberOr('autoProcessCandidates'),
     autoVerifyMode: mode,
     autoVerifyThreshold: numberOr('autoVerifyThreshold'),
     autoVerifyRepeats: numberOr('autoVerifyRepeats'),
@@ -489,6 +493,7 @@ const POLICY_KEYS = [
   'autoVerifySubagents',
   'autoProcessSelection',
   'autoProcessFailureContext',
+  'autoProcessCandidates',
 ] as const satisfies readonly (keyof Values)[]
 
 function policyDefaults(values: Values): Values {

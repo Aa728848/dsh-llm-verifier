@@ -744,6 +744,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         maxItemChars: selected.autoRouteMaxItemChars,
         maxInputChars: selected.autoRouteMaxInputChars,
         alternativeModel: selected.autoProcessAlternativeModel,
+        candidates: selected.autoProcessCandidates,
       }
     },
     // The same sanitizer every other judge input goes through. A candidate reply is untrusted text
@@ -795,6 +796,36 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
       return result
     },
+    // The tournament seam. Optional by construction: it is only reached when autoProcessCandidates
+    // asks for more than two candidates, and a cycle without it compares one pair instead.
+    select: async request => {
+      const agent = request.agent as Agent
+      const { verifier, selected } = await engine(agent)
+      const calls: DecisionCall[] = []
+      const trace: DecisionTrace | undefined = current().captureDecisions ? call => { calls.push(call) } : undefined
+      const startedAt = Date.now()
+      const result = await verifier.select({
+        problem: request.problem,
+        candidates: request.candidates,
+        ...(request.context === undefined ? {} : { context: request.context }),
+        criteria: request.criteria,
+        repeats: request.repeats,
+        reviewStage: 'proposal',
+        ...(trace ? { trace } : {}),
+      }, request.signal)
+      // One decision snapshot, one statistics row for the whole cycle — exactly like the pair path.
+      if (calls.length > 0) {
+        await topic(agent.session.header).decisions.record({
+          toolName: 'verifier_select',
+          phase: 'process',
+          startedAt,
+          provider: selected.provider,
+          model: selected.model,
+          calls: boundDecisionCalls([...calls].sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))),
+        }).catch(() => {})
+      }
+      return result
+    },
     record: async (report: ProcessCycleReport) => {
       const agent = report.agent as Agent
       const selected = current()
@@ -804,15 +835,20 @@ export function apply(ctx: Context, config: Config = {}): void {
         ...report.usage,
         estimatedCostUsd: ((report.usage.inputTokens + report.usage.cachedInputTokens) * selected.estimatedInputUsdPerMillion + report.usage.outputTokens * selected.estimatedOutputUsdPerMillion) / 1_000_000,
       }
-      const verdict: VerdictSummary = report.compare === undefined
-        ? { phase: 'process', outcome: report.outcome }
-        : summarizeVerdict('verifier_compare', { ...report.compare, reviewStage: 'proposal', criteriaSource: 'process' }, 'process', {
-            autoVerifyThreshold: selected.autoVerifyThreshold,
-            autoTrackCompletionThreshold: selected.autoTrackCompletionThreshold,
-          })
+      // The row is the SAME shape for both cycle sizes; only the tool name and the summarizer differ,
+      // so a tournament row still reports the process phase, the route observation and its usage.
+      const thresholds = {
+        autoVerifyThreshold: selected.autoVerifyThreshold,
+        autoTrackCompletionThreshold: selected.autoTrackCompletionThreshold,
+      }
+      const verdict: VerdictSummary = report.compare !== undefined
+        ? summarizeVerdict('verifier_compare', { ...report.compare, reviewStage: 'proposal', criteriaSource: 'process' }, 'process', thresholds)
+        : report.select !== undefined
+          ? summarizeVerdict('verifier_select', { ...report.select, reviewStage: 'proposal', criteriaSource: 'process' }, 'process', thresholds)
+          : { phase: 'process', outcome: report.outcome }
       const failedCall = report.outcome === 'generation-failed' || report.outcome === 'comparison-failed'
       await topic(agent.session.header).statistics.record({
-        toolName: 'verifier_compare',
+        toolName: report.select === undefined ? 'verifier_compare' : 'verifier_select',
         sessionId: String(agent.id),
         startedAt: report.startedAt,
         success: !failedCall,

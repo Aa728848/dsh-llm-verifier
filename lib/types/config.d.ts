@@ -77,6 +77,14 @@ export interface Config {
      * a different question — hence the arm is recorded on the row (`route.alternativeModel`).
      */
     autoProcessAlternativeModel?: string;
+    /**
+     * P06: how many candidates one process cycle compares, the original reply included.
+     *
+     * N=2 (the shipped default) judges one pair. N=3 or 4 runs the tournament over
+     * [original, alternative 1, ...], which costs roughly five times the judge calls at N=3 — see
+     * `estimateRoutedCalls` — and is therefore opt-in rather than the default.
+     */
+    autoProcessCandidates?: number;
     autoRouteMaxItemChars?: number;
     autoRouteMaxInputChars?: number;
     autoMaxModelCallsPerTask?: number;
@@ -136,6 +144,7 @@ export interface ResolvedConfig {
     autoProcessSelection: boolean;
     autoProcessFailureContext: boolean;
     autoProcessAlternativeModel: string;
+    autoProcessCandidates: number;
     autoRouteMaxItemChars: number;
     autoRouteMaxInputChars: number;
     autoMaxModelCallsPerTask: number;

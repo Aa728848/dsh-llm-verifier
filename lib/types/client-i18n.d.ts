@@ -241,6 +241,8 @@ export declare const zh: {
     'field.autoProcessSelection.title': string;
     'field.autoProcessSelection.help': string;
     'field.autoProcessFailureContext.title': string;
+    'field.autoProcessCandidates.title': string;
+    'field.autoProcessCandidates.help': string;
     'field.autoProcessAlternativeModel.title': string;
     'field.autoProcessAlternativeModel.help': string;
     'field.autoProcessFailureContext.help': string;
@@ -537,6 +539,8 @@ export declare const dictionaries: {
         'field.autoProcessSelection.title': string;
         'field.autoProcessSelection.help': string;
         'field.autoProcessFailureContext.title': string;
+        'field.autoProcessCandidates.title': string;
+        'field.autoProcessCandidates.help': string;
         'field.autoProcessAlternativeModel.title': string;
         'field.autoProcessAlternativeModel.help': string;
         'field.autoProcessFailureContext.help': string;
@@ -830,6 +834,8 @@ export declare const dictionaries: {
         'field.autoProcessSelection.title': string;
         'field.autoProcessSelection.help': string;
         'field.autoProcessFailureContext.title': string;
+        'field.autoProcessCandidates.title': string;
+        'field.autoProcessCandidates.help': string;
         'field.autoProcessAlternativeModel.title': string;
         'field.autoProcessAlternativeModel.help': string;
         'field.autoProcessFailureContext.help': string;

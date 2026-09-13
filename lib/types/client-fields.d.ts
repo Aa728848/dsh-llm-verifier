@@ -17,6 +17,7 @@ export interface Values {
     autoProcessSelection: boolean;
     autoProcessFailureContext: boolean;
     autoProcessAlternativeModel: string;
+    autoProcessCandidates: number;
     autoVerifyMode: 'manual' | 'smart' | 'strict';
     autoVerifyThreshold: number;
     autoVerifyRepeats: number;

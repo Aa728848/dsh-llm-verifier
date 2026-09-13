@@ -339,6 +339,10 @@ describe('config - judges ensemble resolution', () => {
     expect(resolveConfig({ autoProcessAlternativeModel: '  openai/gpt-5  ' }).autoProcessAlternativeModel).toBe('openai/gpt-5')
     // A half-specified route would silently fall back to the session model while the statistics row
     // claimed a second model was used, so it is rejected at save time instead.
+    expect(resolveConfig({}).autoProcessCandidates).toBe(2)
+    // The upper bound is a spend ceiling (N=4 is six pairs), not a technical one.
+    expect(resolveConfig({ autoProcessCandidates: 4 }).autoProcessCandidates).toBe(4)
+    for (const bad of [1, 5, 2.5]) expect(() => resolveConfig({ autoProcessCandidates: bad })).toThrow(/between 2 and 4/)
     for (const bad of ['openai', '/gpt-5', 'openai/', 'a b/c']) {
       expect(() => resolveConfig({ autoProcessAlternativeModel: bad })).toThrow(/provider\/model/)
     }
