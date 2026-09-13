@@ -6,7 +6,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import { Config, installVerifierSettings, resolveConfig } from './config.ts'
-import { RequestLimiter, callVerifierText, type VerifierClientConfig } from './caller.ts'
+import { RequestLimiter, callVerifier, callVerifierText, type VerifierClientConfig } from './caller.ts'
 import { TopLogprobCapabilityCache, resolveCapabilityFile } from './top-logprobs.ts'
 import { ScoreCache, SingleFlight, resolveCacheFile, stableHash, type CachedPairScore } from './cache.ts'
 import { VerifierEngine, normalizeCriteria, type JudgeScore, type RunStats } from './engine.ts'
@@ -15,7 +15,7 @@ import { extractSession, sanitizeVerifierText, sessionEvents } from './session.t
 import { CriteriaResolver, type ResolvedCriteria } from './criteria.ts'
 import { analyzeAutoTask, automaticFeedback, failedAcceptanceCriteria, isSubagentSession, sessionAccepted, type AcceptanceCriterion } from './auto.ts'
 import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRoutePrompt, estimateRoutedCalls, parseSemanticRoute, routedRepeats, semanticDecision, semanticRouteHint, type RouteDecision, type RoutedVerifierKind } from './router.ts'
-import { DEFAULT_CRITERIA } from './core.ts'
+import { DEFAULT_GROUND_TRUTH_NOTE, buildPairwisePrompt, extractScore } from './core.ts'
 import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from './plan-gate.ts'
 import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from './team-gate.ts'
 import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, parseStatisticsQuery, resolveStatisticsFile, summarizeVerdict, type StatisticsOverview, type VerifierToolName } from './statistics.ts'
@@ -101,6 +101,20 @@ function rpcSuccess<T>(value: T) { return { ok: true as const, value } }
 function rpcFailure(message: string) { return { ok: false as const, error: { code: 'bad-request' as const, message, details: { issues: [] } } } }
 
 interface SessionVerificationOptions { fromSeq?: number; toSeq?: number; includeAssistantText?: boolean; redactPatterns?: readonly string[]; maxChars?: number; repeats?: number }
+
+/**
+ * Small but real pair for the settings-page probe.
+ *
+ * The probe asks each judge for an actual A–T verdict instead of a "ping": that is what proves
+ * the response PARSES, which is the failure a reachability check misses. A pair where one side is
+ * obviously better keeps the exercise honest without making the expected score a secret.
+ */
+const PROBE_TASK = 'Fix the failing parser test and prove it passes.'
+const PROBE_A = 'Ran the test: 1 failed. Patched the separator handling. Ran it again: 1 passed, no other failures.'
+const PROBE_B = 'The test should pass now.'
+
+/** Bound the probe: a diagnostics button must not sit on the configured 5-minute timeout plus retries. */
+const PROBE_TIMEOUT_MS = 30000
 interface SessionVerificationResult { sessionId: string; problem: string; score: number; baselineScore: number; winner: 'A' | 'B' | 'tie'; criteria: AcceptanceCriterion[]; fromSeq: number; toSeq: number; omittedCharacters: number; calls: number; stats: RunStats; judges: JudgeScore[]; agreement: number }
 
 export function apply(ctx: Context, config: Config = {}): void {
@@ -287,6 +301,51 @@ export function apply(ctx: Context, config: Config = {}): void {
   /** Whether a payload asks for a decision snapshot instead of a statistics overview. */
   const isDecisionQuery = (payload: unknown): boolean => typeof payload === 'object' && payload !== null && (payload as { kind?: unknown }).kind === 'decision'
 
+  /**
+   * Judge diagnostics: one real, bounded judge call per configured judge plus the resolved rubric.
+   *
+   * Answers the two questions a user actually has after configuring the plugin: "which scoring
+   * channel is this judge using" (a silent explicit-tag downgrade is invisible otherwise) and
+   * "is the rubric I configured the one in effect" (a broken custom file degrades quietly).
+   * Deliberately NOT recorded in the statistics: it is a diagnostic, not a verification.
+   * @returns Per-judge probe results and the rubric in effect.
+   */
+  const handleProbe = async () => {
+    try {
+      const agent = requireAgent(undefined)
+      const { verifier } = await engine(agent)
+      const rubric = await configuredCriteria()
+      const criterion = rubric.criteria[0]
+      if (criterion === undefined) return rpcFailure('llm-verifier: the configured rubric has no criteria')
+      const prompt = buildPairwisePrompt(PROBE_TASK, PROBE_A, PROBE_B, criterion, rubric.groundTruthNote ?? DEFAULT_GROUND_TRUTH_NOTE)
+      const judges: Array<Record<string, unknown>> = []
+      for (const client of verifier.clients) {
+        const label = client.label ?? client.provider + '/' + client.model
+        const startedAt = Date.now()
+        try {
+          const completion = await callVerifier({ ...client, timeoutMs: Math.min(client.timeoutMs, PROBE_TIMEOUT_MS), maxRetries: 0 }, prompt)
+          judges.push({
+            label,
+            provider: client.provider,
+            model: client.model,
+            ok: true,
+            channel: completion.scoringMode,
+            scoreA: extractScore(completion, '<score_A>'),
+            scoreB: extractScore(completion, '<score_B>'),
+            latencyMs: Date.now() - startedAt,
+            ...completion.usage,
+          })
+        } catch (error) {
+          judges.push({ label, provider: client.provider, model: client.model, ok: false, latencyMs: Date.now() - startedAt, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+      return rpcSuccess({
+        judges,
+        rubric: { source: rubric.source, count: rubric.criteria.length, ...(rubric.file ? { file: rubric.file } : {}), ...(rubric.error ? { error: rubric.error } : {}) },
+      })
+    } catch (error) { return rpcFailure(error instanceof Error ? error.message : String(error)) }
+  }
+
   // 1. 优先注册到官方 /api 共享通道 (connection.fetch.register)
   const anyConn = services.connection as unknown as { fetch?: { register: (route: unknown) => () => Promise<void> } }
   if (anyConn && anyConn.fetch && typeof anyConn.fetch.register === 'function') {
@@ -305,7 +364,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           const isRpcEnvelope = typeof body === 'object' && body !== null && (body as { type?: unknown }).type === 'client-request' && typeof (body as { rpcId?: unknown }).rpcId === 'string'
           const rpcId = isRpcEnvelope ? (body as { rpcId: string }).rpcId : 'direct'
           const payload = isRpcEnvelope ? (body as { payload?: unknown }).payload : body
-          const outcome = isDecisionQuery(payload) ? await handleDecisionQuery((payload as { id?: unknown }).id) : await handleStatisticsQuery(payload)
+          const isProbe = typeof payload === 'object' && payload !== null && (payload as { kind?: unknown }).kind === 'probe'
+          const outcome = isDecisionQuery(payload) ? await handleDecisionQuery((payload as { id?: unknown }).id) : isProbe ? await handleProbe() : await handleStatisticsQuery(payload)
           if (isRpcEnvelope) {
             return Response.json({
               type: 'server-response',
@@ -329,6 +389,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     try {
       legacyRpc.rpc.handle('/llm-verifier', async (endpoint: string, payload: unknown) => {
         if (endpoint === 'decision') return handleDecisionQuery((payload as { id?: unknown } | undefined)?.id)
+        if (endpoint === 'probe') return handleProbe()
         if (endpoint !== 'statistics') return rpcFailure('unknown llm-verifier endpoint')
         return handleStatisticsQuery(payload)
       })

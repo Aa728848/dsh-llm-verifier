@@ -71,6 +71,9 @@ interface VerifierRemote {
   }
 }
 
+export interface JudgeProbeView { label: string; provider: string; model: string; ok: boolean; channel?: string; scoreA?: number; scoreB?: number; latencyMs: number; calls?: number; inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; error?: string }
+export interface ProbeResultView { judges: JudgeProbeView[]; rubric: { source: string; count: number; file?: string; error?: string } }
+
 interface VerifierSettingsProps { remote: VerifierRemote }
 interface StatisticsPageProps {
   sessionId?: string
@@ -401,6 +404,34 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
       if (snapshotRequest.current === request) setSnapshot({ id, error: message(cause) })
     }
   }
+  // Judge probe: one real, bounded call per configured judge. Not recorded in the statistics —
+  // it answers "which channel is this judge on, and is my rubric the one in effect", which the
+  // aggregate counters cannot.
+  const [probe, setProbe] = useState<{ busy: boolean; value?: ProbeResultView; error?: string } | null>(null)
+  const runProbe = async () => {
+    if (probe?.busy) return
+    setProbe({ busy: true })
+    const payload = { kind: 'probe' }
+    try {
+      let value: ProbeResultView | undefined
+      if (rpc && typeof rpc.call === 'function') {
+        try {
+          const result = await rpc.call('/api', 'llm-verifier/statistics', payload)
+          if (result && result.ok === true) value = result.value as ProbeResultView
+        } catch (rpcError) { console.warn('[llm-verifier] probe rpc.call failed, trying fetch fallback:', rpcError) }
+      }
+      if (value === undefined) {
+        const response = await fetch('/api/llm-verifier/statistics', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
+        const body = await response.json().catch(() => undefined)
+        const fallback = body?.ok === true ? body.value : body?.result?.ok === true ? body.result.value : undefined
+        if (fallback === undefined || fallback === null) throw new EndpointError(body?.error?.message ?? body?.result?.error?.message ?? t['stats.requestFailed'])
+        value = fallback as ProbeResultView
+      }
+      setProbe({ busy: false, value })
+    } catch (cause) {
+      setProbe({ busy: false, error: message(cause) })
+    }
+  }
   // Data belongs to the range/session that produced it: keeping the previous
   // range's numbers under an error banner reads as if they were current.
   const queryKey = days + '|' + sessionOnly + '|' + String(sessionId ?? '')
@@ -500,10 +531,32 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
             {[7, 30, 90].map(value => <button key={value} aria-pressed={days === value} onClick={() => setDays(value)} style={{ border: 0, borderRadius: 7, padding: '6px 10px', cursor: 'pointer', color: days === value ? '#fff' : 'var(--dsw-text-secondary)', background: days === value ? '#3f68d8' : 'transparent' }}>{tFormat(t['stats.daysUnit'], { days: value })}</button>)}
           </div>
           {Boolean(sessionId) && <button aria-pressed={sessionOnly} onClick={() => setSessionOnly(value => !value)} style={{ border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.15))', borderRadius: 9, padding: '7px 11px', cursor: 'pointer', color: 'var(--dsw-text-primary)', background: sessionOnly ? 'rgba(79,140,255,.18)' : 'var(--dsw-surface-sunken)' }}>{sessionOnly ? t['stats.currentSession'] : t['stats.allSessions']}</button>}
+          <button type="button" disabled={probe?.busy === true} onClick={() => void runProbe()} style={{ border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.15))', borderRadius: 9, padding: '7px 11px', cursor: 'pointer', color: 'var(--dsw-text-primary)', background: 'var(--dsw-surface-sunken)' }}>{probe?.busy === true ? t['probe.running'] : t['probe.button']}</button>
           <button title={t['stats.refresh']} onClick={() => setRefresh(value => value + 1)} style={{ display: 'grid', placeItems: 'center', width: 34, height: 34, borderRadius: 9, border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.15))', color: 'var(--dsw-text-primary)', background: 'var(--dsw-surface-sunken)', cursor: 'pointer' }}><IconRefreshOutline16 size={16} /></button>
         </div>
       </header>
       {error && <div style={{ ...dashboardCard, padding: 18, borderColor: 'var(--dsw-danger, #e85858)', color: 'var(--dsw-danger, #e85858)' }}>{error}<div style={{ ...muted, marginTop: 6 }}>{t['stats.hostRestartHint']}</div></div>}
+      {probe !== null && <section style={{ ...dashboardCard, padding: '16px 18px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><strong>{t['probe.title']}</strong><span style={muted}>{t['probe.note']}</span></div>
+        {probe.error !== undefined && <div style={{ marginTop: 10, fontSize: 12, color: '#e76565' }}>{probe.error}</div>}
+        {probe.value !== undefined && <>
+          <div style={{ ...muted, marginTop: 8 }}>{tFormat(t['probe.rubric'], { source: probe.value.rubric.source, count: probe.value.rubric.count, file: probe.value.rubric.file ?? '' })}</div>
+          {probe.value.rubric.error !== undefined && <div style={{ marginTop: 6, fontSize: 12, color: '#e3bd63' }}>{tFormat(t['probe.rubricFallback'], { error: probe.value.rubric.error })}</div>}
+          <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {probe.value.judges.map(judge => <div key={judge.label + judge.model} style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', fontSize: 12, padding: '9px 11px', borderRadius: 9, background: 'var(--dsw-surface-sunken)' }}>
+              <span style={{ color: judge.ok ? '#77d49b' : '#e76565', fontWeight: 600 }}>{judge.ok ? 'OK' : t['probe.failed']}</span>
+              <strong>{judge.label}</strong>
+              <span style={muted}>{judge.provider}/{judge.model}</span>
+              {judge.ok ? <>
+                {judge.channel !== undefined && <span style={muted}>{tFormat(t['probe.channel'], { channel: judge.channel })}</span>}
+                {judge.scoreA !== undefined && judge.scoreB !== undefined && <span style={muted}>{tFormat(t['probe.scores'], { a: formatPercentage(judge.scoreA), b: formatPercentage(judge.scoreB) })}</span>}
+                <span style={muted}>{tFormat(t['probe.latency'], { ms: String(judge.latencyMs) })}</span>
+                {judge.calls !== undefined && <span style={muted}>{tFormat(t['probe.calls'], { calls: String(judge.calls) })}</span>}
+              </> : <span style={{ color: '#e76565' }}>{judge.error}</span>}
+            </div>)}
+          </div>
+        </>}
+      </section>}
       {loading && !data ? <div style={{ ...dashboardCard, padding: 32, textAlign: 'center', ...muted }}>{t['stats.loading']}</div> : <>
         <section style={{ ...dashboardCard, padding: '22px 24px', display: 'grid', gridTemplateColumns: 'minmax(220px,1.4fr) minmax(240px,1fr)', gap: 24, alignItems: 'center' }}>
           <div>

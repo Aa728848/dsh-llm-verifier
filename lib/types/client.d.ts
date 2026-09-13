@@ -119,6 +119,30 @@ interface VerifierRemote {
         }>;
     };
 }
+export interface JudgeProbeView {
+    label: string;
+    provider: string;
+    model: string;
+    ok: boolean;
+    channel?: string;
+    scoreA?: number;
+    scoreB?: number;
+    latencyMs: number;
+    calls?: number;
+    inputTokens?: number;
+    cachedInputTokens?: number;
+    outputTokens?: number;
+    error?: string;
+}
+export interface ProbeResultView {
+    judges: JudgeProbeView[];
+    rubric: {
+        source: string;
+        count: number;
+        file?: string;
+        error?: string;
+    };
+}
 interface VerifierSettingsProps {
     remote: VerifierRemote;
 }
