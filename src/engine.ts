@@ -77,6 +77,39 @@ function median(values: readonly number[]): number {
 }
 
 function blankStats(): RunStats { return { ...emptyUsage(), cacheHits: 0, cacheMisses: 0, estimatedCostUsd: 0, topLogprobScores: 0, explicitTagScores: 0 } }
+
+/**
+ * Where an invocation records the usage it accumulated before it finally failed.
+ *
+ * The engine aggregates per-judge usage while jobs are still running, so a later job that
+ * throws used to discard everything the earlier jobs had already spent: a run with two
+ * successful calls then one failure was persisted as one attempt and zero tokens. Attaching
+ * the live stats object to the error keeps every known request and token.
+ */
+const PARTIAL_STATS = Symbol('llm-verifier.partialStats')
+
+/** Usage accumulated before an invocation failed; undefined when the error carries none. */
+export function partialStats(error: unknown): RunStats | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const value = (error as { [PARTIAL_STATS]?: unknown })[PARTIAL_STATS]
+  return typeof value === 'object' && value !== null ? value as RunStats : undefined
+}
+
+function attachPartialStats(error: unknown, stats: RunStats): void {
+  if (typeof error === 'object' && error !== null) (error as { [PARTIAL_STATS]?: RunStats })[PARTIAL_STATS] = stats
+}
+
+/** Fold one nested run's counters into an accumulator (usage, cache, channel, incompleteness). */
+function mergeRunStats(target: RunStats, source: RunStats | undefined): void {
+  if (source === undefined) return
+  addUsage(target, source)
+  target.cacheHits += source.cacheHits
+  target.cacheMisses += source.cacheMisses
+  target.topLogprobScores += source.topLogprobScores
+  target.explicitTagScores += source.explicitTagScores
+  if (source.usageIncomplete) target.usageIncomplete = true
+  if (source.channelFallbacks) target.channelFallbacks = (target.channelFallbacks ?? 0) + source.channelFallbacks
+}
 /** Candidate indices best-first by score, ties broken by index. */
 function rankByScore(scores: readonly number[]): number[] { return Array.from({ length: scores.length }, (_, index) => index).sort((a, b) => (scores[b] ?? 0) - (scores[a] ?? 0) || a - b) }
 function unorderedPair(a: number, b: number): string { return a < b ? a + ',' + b : b + ',' + a }
@@ -253,6 +286,18 @@ export class VerifierEngine {
       if (warmedOrientations.has(orientation)) rest.push(job)
       else { warmedOrientations.add(orientation); warm.push(job) }
     }
+    // Shared with the workers so a job that fails still reports what the earlier jobs spent:
+    // aggregating only after every job resolved discarded all of it when one threw. A run with
+    // two successful judge calls and one failure used to persist one attempt and zero tokens.
+    const stats = blankStats()
+    const judgeCalls = new Array<number>(this.clients.length).fill(0)
+    const judgeOk = new Array<boolean>(this.clients.length).fill(true)
+    const judgeErrors = new Array<string | undefined>(this.clients.length).fill(undefined)
+    const judgeJobScores: Array<Array<{ criterionId: string; scoreA: number; scoreB: number }>> = Array.from(
+      { length: this.clients.length },
+      () => []
+    )
+
     const run = async (batch: typeof jobs) => this.mapLimited(batch, async ({ criterion, repeat }) => {
       const swapped = repeat % 2 === 1
       const candA = swapped ? options.candidateB : options.candidateA
@@ -280,31 +325,10 @@ export class VerifierEngine {
           }
         })
       )
-      const successful = judgeResults.filter((r): r is Extract<typeof r, { ok: true }> => r.ok)
-      if (successful.length === 0) {
-        const firstFail = judgeResults.find(r => !r.ok)! as Extract<typeof judgeResults[number], { ok: false }>
-        throw firstFail.error
-      }
-      const leafScoreA = median(successful.map(r => r.scoreA))
-      const leafScoreB = median(successful.map(r => r.scoreB))
-      return { criterion, repeat, leafScoreA, leafScoreB, judgeResults }
-    })
-
-    const jobOutcomes = [...await run(warm), ...await run(rest)]
-    const stats = blankStats()
-    const judgeCalls = new Array<number>(this.clients.length).fill(0)
-    const judgeOk = new Array<boolean>(this.clients.length).fill(true)
-    const judgeErrors = new Array<string | undefined>(this.clients.length).fill(undefined)
-    const judgeJobScores: Array<Array<{ criterionId: string; scoreA: number; scoreB: number }>> = Array.from(
-      { length: this.clients.length },
-      () => []
-    )
-
-    for (const outcome of jobOutcomes) {
-      for (const r of outcome.judgeResults) {
+      for (const r of judgeResults) {
         if (r.ok) {
           judgeCalls[r.k] += r.usage.calls
-          judgeJobScores[r.k]!.push({ criterionId: outcome.criterion.id, scoreA: r.scoreA, scoreB: r.scoreB })
+          judgeJobScores[r.k]!.push({ criterionId: criterion.id, scoreA: r.scoreA, scoreB: r.scoreB })
           addUsage(stats, r.usage)
           if (r.hit) stats.cacheHits++
           else stats.cacheMisses++
@@ -323,7 +347,19 @@ export class VerifierEngine {
           }
         }
       }
-    }
+      const successful = judgeResults.filter((r): r is Extract<typeof r, { ok: true }> => r.ok)
+      if (successful.length === 0) {
+        const firstFail = judgeResults.find(r => !r.ok)! as Extract<typeof judgeResults[number], { ok: false }>
+        // Carry the usage the earlier jobs already spent on this error.
+        attachPartialStats(firstFail.error, stats)
+        throw firstFail.error
+      }
+      const leafScoreA = median(successful.map(r => r.scoreA))
+      const leafScoreB = median(successful.map(r => r.scoreB))
+      return { criterion, repeat, leafScoreA, leafScoreB, judgeResults }
+    })
+
+    const jobOutcomes = [...await run(warm), ...await run(rest)]
 
     const byCriterion = criteria.map(criterion => {
       const rows = jobOutcomes.filter(row => row.criterion.id === criterion.id)
@@ -400,40 +436,20 @@ export class VerifierEngine {
     stats: RunStats
   }> {
     const unique = [...new Map(pairs.map(pair => [pair[0] + ',' + pair[1], pair])).values()]
-    const values = await this.mapLimited(unique, async ([a, b]) => ({
-      a,
-      b,
-      result: await this.compare({
-        problem: options.problem,
-        candidateA: options.candidates[a]!,
-        candidateB: options.candidates[b]!,
-        criteria: options.criteria,
-        groundTruthNote: options.groundTruthNote,
-        repeats: options.repeats,
-        images: options.images,
-        trace: options.trace,
-      }, signal),
-    }))
+    // Aggregated inside each worker so a pair that fails still reports what the other pairs
+    // already spent; the outer loop used to run only after every pair had resolved.
     const rewards = new Map<string, readonly [number, number]>()
     const judgeRewards: Array<Map<string, readonly [number, number]>> = Array.from({ length: this.clients.length }, () => new Map())
     const judgeOk = new Array<boolean>(this.clients.length).fill(true)
     const judgeErrors = new Array<string | undefined>(this.clients.length).fill(undefined)
     const judgeCalls = new Array<number>(this.clients.length).fill(0)
     const stats = blankStats()
-
-    for (const value of values) {
-      const pairKey = value.a + ',' + value.b
-      rewards.set(pairKey, [value.result.scoreA, value.result.scoreB])
-      addUsage(stats, value.result.stats)
-      stats.cacheHits += value.result.stats.cacheHits
-      stats.cacheMisses += value.result.stats.cacheMisses
-      stats.topLogprobScores += value.result.stats.topLogprobScores
-      stats.explicitTagScores += value.result.stats.explicitTagScores
-      if (value.result.stats.usageIncomplete) stats.usageIncomplete = true
-      if (value.result.stats.channelFallbacks) stats.channelFallbacks = (stats.channelFallbacks ?? 0) + value.result.stats.channelFallbacks
-
+    const recordPair = (a: number, b: number, result: CompareResult): void => {
+      const pairKey = a + ',' + b
+      rewards.set(pairKey, [result.scoreA, result.scoreB])
+      mergeRunStats(stats, result.stats)
       for (let k = 0; k < this.clients.length; k++) {
-        const js = value.result.judges[k]!
+        const js = result.judges[k]!
         judgeCalls[k] += js.calls
         if (js.ok && js.scoreA !== undefined && js.scoreB !== undefined) {
           judgeRewards[k]!.set(pairKey, [js.scoreA, js.scoreB])
@@ -445,6 +461,27 @@ export class VerifierEngine {
         }
       }
     }
+    await this.mapLimited(unique, async ([a, b]) => {
+      try {
+        const result = await this.compare({
+          problem: options.problem,
+          candidateA: options.candidates[a]!,
+          candidateB: options.candidates[b]!,
+          criteria: options.criteria,
+          groundTruthNote: options.groundTruthNote,
+          repeats: options.repeats,
+          images: options.images,
+          trace: options.trace,
+        }, signal)
+        recordPair(a, b, result)
+      } catch (error) {
+        // Merge this pair's own partial usage into the shared accumulator, then hand the union
+        // to the caller's failure row.
+        mergeRunStats(stats, partialStats(error))
+        attachPartialStats(error, stats)
+        throw error
+      }
+    })
     return { rewards, judgeRewards, judgeOk, judgeErrors, judgeCalls, stats: this.finishStats(stats) }
   }
 
@@ -485,12 +522,8 @@ export class VerifierEngine {
         })
       )
 
-      const successful = judgeResults.filter((r): r is Extract<typeof r, { ok: true }> => r.ok)
-      if (successful.length === 0) {
-        const firstFail = judgeResults.find(r => !r.ok)! as Extract<typeof judgeResults[number], { ok: false }>
-        throw firstFail.error
-      }
-
+      // Aggregate BEFORE the all-failed check so an earlier repeat's usage survives a later
+      // repeat throwing; the error then carries it to the failure row.
       for (const r of judgeResults) {
         if (r.ok) {
           judgeCalls[r.k] += r.completion.usage.calls
@@ -507,6 +540,13 @@ export class VerifierEngine {
             judgeErrors[r.k] = r.error instanceof Error ? r.error.message : String(r.error)
           }
         }
+      }
+
+      const successful = judgeResults.filter((r): r is Extract<typeof r, { ok: true }> => r.ok)
+      if (successful.length === 0) {
+        const firstFail = judgeResults.find(r => !r.ok)! as Extract<typeof judgeResults[number], { ok: false }>
+        attachPartialStats(firstFail.error, stats)
+        throw firstFail.error
       }
 
       return checkpoints.map((_, cIndex) => median(successful.map(r => r.scores[cIndex]!)))

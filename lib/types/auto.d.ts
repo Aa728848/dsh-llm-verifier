@@ -75,7 +75,7 @@ export declare function automaticFeedback(score: number, baselineScore: number, 
     fromSeq?: number;
     toSeq?: number;
     omittedCharacters?: number;
-}): string;
+}, reportedCriteria?: number): string;
 /** One automatic feedback message may not exceed this many characters, fixed wording included. */
 export declare const MAX_ROUTE_FEEDBACK_CHARS = 4000;
 /** Locator for one routed candidate: a label plus the identity/event position it can be found by. */

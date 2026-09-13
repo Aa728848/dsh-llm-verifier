@@ -887,6 +887,15 @@ describe('transactional router state', () => {
     expect(router.commit(agent, final!)).toBe(true)
     expect(router.finalRequired(agent)).toBeUndefined()
   })
+  it('gives every reservation a cycle id that is unique across router instances', () => {
+    // A plugin reload builds a fresh router; a per-instance counter restarting at 1 made two
+    // genuinely different cycles share one id (and merge in the dashboard/summary).
+    const value = session(); const agent = { id: value.id, session: value }
+    const first = new AutoVerifierRouter().reserve(agent, 'semantic', 'one', 1, policy)!
+    const second = new AutoVerifierRouter().reserve(agent, 'semantic', 'two', 1, policy)!
+    expect(first.id).not.toBe(second.id)
+    expect(first.id.length).toBeGreaterThan(1)
+  })
   it('prefers the final gate after a track route clears the completion threshold', () => {
     const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
     expect(router.finalPreferred(agent)).toBe(false)

@@ -235,13 +235,17 @@ export function summarizeRouteCycles(invocations: readonly ReplayInvocation[]): 
   const routed = invocations.filter(record => record.route !== undefined)
   const summary: RouteCycleSummary = { cycles: 0, classificationRows: 0, executionRows: 0, finalRows: 0, skippedRows: 0, classificationOnly: 0, canceled: 0, usageIncomplete: 0, preStepExecutions: 0, reservedCalls: 0, actualScoringCalls: 0, preStepShare: 0, classificationOnlyShare: 0, byTrigger: {}, byDestination: {}, bySkipReason: {} }
   const cycles = new Set<string>()
+  // A promoted cycle reports a CUMULATIVE reservation on each of its rows (classification sees
+  // the classification estimate, execution the promoted one), so the rows of one cycle are
+  // never summed: the cycle's reservation is the largest it ever held.
+  const reservedByCycle = new Map<string, number>()
   for (const record of routed) {
     const route = record.route!
     cycles.add(route.cycleId)
     summary.byTrigger[route.trigger] = (summary.byTrigger[route.trigger] ?? 0) + 1
     summary.byDestination[route.destination] = (summary.byDestination[route.destination] ?? 0) + 1
     if (route.skipReason !== undefined) summary.bySkipReason[route.skipReason] = (summary.bySkipReason[route.skipReason] ?? 0) + 1
-    summary.reservedCalls += route.reservedCalls ?? 0
+    reservedByCycle.set(route.cycleId, Math.max(reservedByCycle.get(route.cycleId) ?? 0, route.reservedCalls ?? 0))
     if (route.canceled === true) summary.canceled += 1
     if (route.usageIncomplete === true) summary.usageIncomplete += 1
     if (route.skipReason === 'classification-only-budget') summary.classificationOnly += 1
@@ -254,6 +258,7 @@ export function summarizeRouteCycles(invocations: readonly ReplayInvocation[]): 
     else if (route.stage === 'skipped') summary.skippedRows += 1
   }
   summary.cycles = cycles.size
+  summary.reservedCalls = [...reservedByCycle.values()].reduce((total, value) => total + value, 0)
   summary.preStepShare = summary.executionRows > 0 ? summary.preStepExecutions / summary.executionRows : 0
   summary.classificationOnlyShare = summary.classificationRows > 0 ? summary.classificationOnly / summary.classificationRows : 0
   return summary
@@ -326,7 +331,10 @@ export function evaluateSample(sample: EvaluationSample, policy: AutoVerifyPolic
   const delivery = inspectDeliveryPhase(events)
   const deliveryReady = delivery !== undefined && delivery.todosComplete && delivery.verification !== undefined
   const eligible = analyzeAutoTask(events, policy).eligible
-  if (eligible) observedPhases.push("final")
+  // The mandatory final acceptance IS a review: an eligible task is graded even when neither the
+  // structured nor the semantic route fired. Omitting it here made every eligible-but-unrouted
+  // task (for example one with six final-acceptance requests) look like a MISS.
+  if (eligible) { observedPhases.push("final"); observedTrigger = true }
   const outcome: SampleOutcome["outcome"] = sample.shouldReview
     ? (observedTrigger ? "hit" : "miss")
     : (observedTrigger ? "false-trigger" : "correct-skip")

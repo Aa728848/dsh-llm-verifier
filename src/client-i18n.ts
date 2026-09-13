@@ -236,6 +236,12 @@ export const zh = {
   'recent.detail.scoreCache': '评分缓存 {hits} 命中 / {misses} 未命中',
   'recent.detail.prefixCache': '前缀缓存命中 {rate}',
   'recent.detail.cost': '预估成本 {cost}',
+  'recent.route.badge': '路由 {stage}→{destination}',
+  'recent.detail.usageIncomplete': '用量不完整',
+  'recent.detail.route': '周期 {cycle} · {trigger} · {stage}→{destination} · 第 {attempt} 次',
+  'recent.detail.routeReserved': '预留 {reserved} / 实评 {actual}',
+  'recent.detail.routeSkip': '跳过 {reason}',
+  'recent.detail.channelFallback': '通道降级 {count}',
 
   // Model summary
   'models.title': '模型汇总',
@@ -498,6 +504,12 @@ export const en: I18nDict = {
   'recent.detail.scoreCache': 'score cache {hits} hits / {misses} misses',
   'recent.detail.prefixCache': 'prefix cache {rate}',
   'recent.detail.cost': 'est. {cost}',
+  'recent.route.badge': 'route {stage}→{destination}',
+  'recent.detail.usageIncomplete': 'usage incomplete',
+  'recent.detail.route': 'cycle {cycle} · {trigger} · {stage}→{destination} · try {attempt}',
+  'recent.detail.routeReserved': 'reserved {reserved} / actual {actual}',
+  'recent.detail.routeSkip': 'skip {reason}',
+  'recent.detail.channelFallback': 'channel fallbacks {count}',
 
   // Model summary
   'models.title': 'Model Summary',

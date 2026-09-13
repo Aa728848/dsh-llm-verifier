@@ -442,6 +442,32 @@ describe('usage diagnostics in tool outputs', () => {
     expect(statsSchema.properties.channelFallbacks.required).toBeUndefined()
   })
 
+  it('keeps the known usage of earlier calls on a failed explicit invocation', async () => {
+    const promptOf = (options: { messages: readonly any[] }) => {
+      const message = options.messages[0]
+      return typeof message.content === 'string' ? message.content : message.content.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('')
+    }
+    const stream = (options: { messages: readonly any[] }) => promptOf(options).includes('third requirement')
+      ? (async function* () { throw new Error('judge exploded') })()
+      : textStream('reasoning\n<score_A> A </score_A>\n<score_B> T </score_B>')
+    // One call at a time: the two successful criteria must resolve before the third fails,
+    // so the failure row has to keep their usage (that is the regression).
+    const { tools, rpc } = assemble({ ...JUDGE, maxConcurrency: 1 }, { stream, sessions: [{ id: 'session-1', createdAt: 1 }] })
+    const definition = tools.get('verifier_compare')!
+    const criteria = [
+      { id: 'a', name: 'A', description: 'first requirement' },
+      { id: 'b', name: 'B', description: 'second requirement' },
+      { id: 'c', name: 'C', description: 'third requirement' },
+    ]
+    await expect(definition.execute({ problem: 'pick', candidate_a: 'AAA', candidate_b: 'BBB', criteria, repeats: 1 }, exec)).rejects.toThrow('judge exploded')
+    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ success: boolean; stats: { calls: number; attempts: number; usageIncomplete?: boolean } }> } }
+    const failed = overview.value.recent.find(row => row.success === false)
+    // Two calls completed with their usage, then the third failed: the row must say so.
+    expect(failed?.stats.calls).toBe(2)
+    expect(failed?.stats.attempts).toBe(3)
+    expect(failed?.stats.usageIncomplete).toBe(true)
+  })
+
   it('marks a partial generation failure incomplete and still satisfies the output schema', async () => {
     // Draft 1 dies, drafts 2 and 3 survive: the invocation succeeds, but the failed request
     // really happened. The REAL return value must carry the flag AND satisfy the schema.
@@ -652,6 +678,25 @@ describe('routing-cycle budget through the real hooks', () => {
     expect(JSON.stringify(steered)).not.toContain('Automatic verifier routing: compare')
   })
 
+  it('does not re-classify when a narrative message changes only the last sequence', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const stream = (options: { messages: readonly unknown[] }) => {
+      const prompt = promptText(options)
+      calls.push({ prompt })
+      if (isRouter(prompt)) return textStream(JSON.stringify({ kind: 'none', confidence: 1, reason: 'same subtask', candidateCallIds: [], checkpointSeqs: [] }))
+      return textStream('reasoning\n<score_A> A </score_A>\n<score_B> T </score_B>')
+    }
+    const { handlers } = assemble(JUDGE, { stream, sessions: [{ id: 'agent-cycle', createdAt: 1 }] })
+    const events: Array<Record<string, unknown>> = [user(0, 'Do it'), call(1, 's1', 'subagent'), result(2, 's1', 'analysis'), call(3, 'e', 'edit'), result(4, 'e', 'edited')]
+    const handle = handlers.get('agent/turn-stopping')!
+    await handle({ agent: agent(events, []), signal: new AbortController().signal })
+    // A pure narrative changes admittedLastSeq but not one byte of the classifier prompt, so
+    // the evidence-based fingerprint must still suppress the second classification.
+    events.push({ type: 'assistant/message', seq: 5, data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'I will continue with the next part.' }] } } })
+    await handle({ agent: agent(events, []), signal: new AbortController().signal })
+    expect(calls.map(entry => String(entry.prompt)).filter(isRouter)).toHaveLength(1)
+  })
+
   it('classifies one snapshot once even when the stop boundary is reached repeatedly', async () => {
     const calls: Array<Record<string, unknown>> = []
     const stream = (options: { messages: readonly unknown[] }) => {
@@ -856,6 +901,17 @@ describe('early candidate review through agent/pre-step', () => {
     const decision = await handlers.get('agent/pre-step')!({ agent: agent(workflowEvents(rows)), messages: [], turn: 1, step: 2, signal: signal() }, nextEnter())
     expect(calls).toHaveLength(0)
     expect(JSON.stringify(decision.messages)).toContain('byte-identical')
+  })
+
+  it('stays out of a continuation a downstream listener cleared', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: reviewStream(calls), sessions: [{ id: 'agent-pre', createdAt: 1 }] })
+    // The step was OFFERED a message and the deciding listener came back with none: that is a
+    // cleared continuation, not an empty tool-follow-up, and injecting would resurrect it.
+    const offered = [{ source: { kind: 'goal' }, content: [{ type: 'text', text: 'continue' }] }]
+    const decision = await handlers.get('agent/pre-step')!({ agent: agent(workflowEvents([candidate('1', 'a'), candidate('2', 'b')])), messages: offered, turn: 1, step: 2, signal: signal() }, async () => ({ kind: 'enter', messages: [] }))
+    expect(decision).toEqual({ kind: 'enter', messages: [] })
+    expect(calls).toHaveLength(0)
   })
 
   it('respects a rejected step and never resurrects it with an injected prompt', async () => {

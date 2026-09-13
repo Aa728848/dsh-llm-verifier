@@ -5,6 +5,16 @@ import { evidenceNonce, renderDelimitedBlock } from './core.ts'
 import type { AutoVerifyMode } from './auto.ts'
 import { sanitizeVerifierText, sessionEvents } from './session.ts'
 
+/**
+ * Cycle ids must be unique across plugin reloads too.
+ *
+ * A bare per-instance counter restarts at 1 after every reload, so two genuinely different
+ * cycles would merge into one row in the dashboard and in the offline summary. The epoch is
+ * fixed per module load and the instance serial disambiguates routers within it.
+ */
+const ROUTER_EPOCH = Date.now().toString(36) + Math.floor(Math.random() * 0x1000000).toString(36)
+let routerInstanceSerial = 0
+
 /** One durable todo entry carried by `todo/write` snapshots (DSH 0.1.5 dropped the exported type). */
 export interface TodoItem {
   content: string
@@ -1154,6 +1164,8 @@ export class AutoVerifierRouter {
   /** Agent ids that already received this task's budget-exhaustion notice. */
   private readonly exhaustedNotices = new Set<string>()
   private serial = 0
+  /** Namespace for this router's cycle ids; unique per router and per process incarnation. */
+  private readonly instance = ROUTER_EPOCH + '-' + (++routerInstanceSerial)
 
   private state(agent: RoutedAgent): RouterState | undefined {
     const taskStartSeq = latestDirectUserSeq(sessionEvents(agent.session))
@@ -1184,7 +1196,7 @@ export class AutoVerifierRouter {
     const floor = final ? 0 : policy.minFinalModelCalls ?? 0
     if (state.taskModelCalls + expectedCalls + floor > policy.maxModelCallsPerTask) return undefined
     if (state.sessionModelCalls + expectedCalls + floor > policy.maxModelCallsPerSession) return undefined
-    const reservation: Reservation = { id: String(++this.serial), phase, fingerprint, taskStartSeq: state.taskStartSeq, expectedCalls, attempt: (final ? state.finalAttempts : state.routeAttempts) + 1 }
+    const reservation: Reservation = { id: this.instance + '-' + (++this.serial), phase, fingerprint, taskStartSeq: state.taskStartSeq, expectedCalls, attempt: (final ? state.finalAttempts : state.routeAttempts) + 1 }
     state.inFlight = reservation
     if (final) {
       state.finalAttempts += 1; state.sessionFinalAttempts += 1

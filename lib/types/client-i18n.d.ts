@@ -211,6 +211,12 @@ export declare const zh: {
     'recent.detail.scoreCache': string;
     'recent.detail.prefixCache': string;
     'recent.detail.cost': string;
+    'recent.route.badge': string;
+    'recent.detail.usageIncomplete': string;
+    'recent.detail.route': string;
+    'recent.detail.routeReserved': string;
+    'recent.detail.routeSkip': string;
+    'recent.detail.channelFallback': string;
     'models.title': string;
     'models.calls': string;
     'models.tokens': string;
@@ -446,6 +452,12 @@ export declare const dictionaries: {
         'recent.detail.scoreCache': string;
         'recent.detail.prefixCache': string;
         'recent.detail.cost': string;
+        'recent.route.badge': string;
+        'recent.detail.usageIncomplete': string;
+        'recent.detail.route': string;
+        'recent.detail.routeReserved': string;
+        'recent.detail.routeSkip': string;
+        'recent.detail.channelFallback': string;
         'models.title': string;
         'models.calls': string;
         'models.tokens': string;
@@ -678,6 +690,12 @@ export declare const dictionaries: {
         'recent.detail.scoreCache': string;
         'recent.detail.prefixCache': string;
         'recent.detail.cost': string;
+        'recent.route.badge': string;
+        'recent.detail.usageIncomplete': string;
+        'recent.detail.route': string;
+        'recent.detail.routeReserved': string;
+        'recent.detail.routeSkip': string;
+        'recent.detail.channelFallback': string;
         'models.title': string;
         'models.calls': string;
         'models.tokens': string;

@@ -261,14 +261,19 @@ export function sessionAccepted(evidence: { score: number; winner: 'A' | 'B' | '
   return failedAcceptanceCriteria(evidence.criteria, threshold).length === 0
 }
 
-export function automaticFeedback(score: number, baselineScore: number, winner: 'A' | 'B' | 'tie', threshold: number, failedCriteria: readonly AcceptanceCriterion[] = [], locator?: { sessionId?: string; fromSeq?: number; toSeq?: number; omittedCharacters?: number }): string {
+export function automaticFeedback(score: number, baselineScore: number, winner: 'A' | 'B' | 'tie', threshold: number, failedCriteria: readonly AcceptanceCriterion[] = [], locator?: { sessionId?: string; fromSeq?: number; toSeq?: number; omittedCharacters?: number }, reportedCriteria?: number): string {
   const percent = (value: number) => (value * 100).toFixed(1) + '%'
   return [
     '[Automatic verifier gate]',
     `The independent verifier did not clear this task for completion: evidence score ${percent(score)}, baseline ${percent(baselineScore)}, verdict ${winner}, required ${percent(threshold)}.`,
     ...(failedCriteria.length > 0
       ? ['Criteria below the threshold: ' + failedCriteria.map(criterion => (criterion.name ?? criterion.id) + ' ' + percent(criterion.score)).join('; ') + '.']
-      : ['The judge reported no per-criterion breakdown for this review, so there is no per-requirement locator to act on; the score and verdict above are the only evidence returned.']),
+      // "No criterion failed" and "the judge reported no criteria at all" are different
+      // situations: claiming a missing breakdown when every criterion passed and only the
+      // verdict was a tie tells the agent to look for evidence that is right there.
+      : reportedCriteria === 0
+        ? ['The judge reported no per-criterion breakdown for this review, so there is no per-requirement locator to act on; the score and verdict above are the only evidence returned.']
+        : []),
     ...(winner !== 'A' ? ['The verdict did not favour the session over the empty-work baseline.'] : []),
     ...(locator === undefined
       ? []
@@ -303,10 +308,21 @@ function percent(value: number): string {
  * the feedback must let the agent find the object it is being told about, and copying the
  * candidate into the message would pay the evidence budget twice.
  */
-function locate(ref: RoutedCandidateRef, budget: number): string {
+function locate(ref: RoutedCandidateRef, budget: number, ordinal: number): string {
+  const limit = Math.max(10, Math.floor(budget))
+  const position = '[' + ordinal + ']'
   const at = ref.fromSeq === undefined ? '' : ' @seq ' + ref.fromSeq + (ref.toSeq !== undefined && ref.toSeq !== ref.fromSeq ? '-' + ref.toSeq : '')
   const id = ref.id === undefined || ref.id === ref.label ? '' : ' (#' + ref.id + ')'
-  return sanitizeVerifierText(ref.label + id + at, Math.max(8, Math.floor(budget)))
+  // The ordinal is allocated FIRST and always survives, then the event position, and only then
+  // the label: truncating label + id + seq together used to delete the distinguishing part of a
+  // long id AND the position, leaving same-named candidates impossible to locate. The id is
+  // included only when it fits; the ordinal is the locator of last resort.
+  const fixed = position + at
+  if (fixed.length >= limit) return sanitizeVerifierText(fixed, limit)
+  const withId = fixed.length + id.length + 2 < limit ? id : ''
+  const labelBudget = Math.max(1, limit - fixed.length - withId.length - 1)
+  const label = ref.label.length > labelBudget ? ref.label.slice(0, Math.max(1, labelBudget - 1)) + '…' : ref.label
+  return sanitizeVerifierText(position + ' ' + label + withId + at, limit)
 }
 
 /**
@@ -341,7 +357,7 @@ export function compareRouteFeedbackDetail(
   maxChars = MAX_ROUTE_FEEDBACK_CHARS,
 ): string {
   const perItem = Math.max(48, Math.floor(maxChars / 6))
-  const located = [locate(candidates[0], perItem), locate(candidates[1], perItem)]
+  const located = [locate(candidates[0], perItem, 1), locate(candidates[1], perItem, 2)]
   const bound = (text: string): string => sanitizeVerifierText(text, maxChars)
   if (result.identical === true) {
     return bound([
@@ -386,7 +402,7 @@ export function selectRouteFeedbackDetail(
   maxChars = MAX_ROUTE_FEEDBACK_CHARS,
 ): string {
   const perItem = Math.max(32, Math.floor(maxChars / Math.max(2, candidates.length + 3)))
-  const located = candidates.map(candidate => locate(candidate, perItem))
+  const located = candidates.map((candidate, index) => locate(candidate, perItem, index + 1))
   const bound = (text: string): string => sanitizeVerifierText(text, maxChars)
   if (result.identical === true) {
     return bound([

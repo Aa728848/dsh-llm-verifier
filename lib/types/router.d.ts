@@ -308,6 +308,8 @@ export declare class AutoVerifierRouter {
     /** Agent ids that already received this task's budget-exhaustion notice. */
     private readonly exhaustedNotices;
     private serial;
+    /** Namespace for this router's cycle ids; unique per router and per process incarnation. */
+    private readonly instance;
     private state;
     reserve(agent: RoutedAgent, phase: RoutePhase, fingerprint: string, expectedCalls: number, policy: RouterPolicy): Reservation | undefined;
     /**

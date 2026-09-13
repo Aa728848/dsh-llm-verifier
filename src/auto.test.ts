@@ -243,7 +243,7 @@ describe('routed selection feedback', () => {
 
   it('names a unique winner with a locator and never the loser', () => {
     const text = compareRouteFeedbackDetail([ref('A', 'call-a', 1, 2), ref('B', 'call-b', 3, 4)], { winner: 'A', scoreA: 0.9, scoreB: 0.2 })
-    expect(text).toContain('Winner: A (#call-a) @seq 1-2')
+    expect(text).toContain('Winner: [1] A (#call-a) @seq 1-2')
     expect(text).toContain('90.0% vs 20.0%')
     expect(text).not.toContain('Winner: B')
     expect(text).toContain('verify the required work')
@@ -273,7 +273,7 @@ describe('routed selection feedback', () => {
 
   it('names a unique best with its relative share and locator', () => {
     const text = selectRouteFeedbackDetail([ref('A', 'x', 1, 2), ref('B', 'y', 3, 4), ref('C', 'z', 5, 6)], { index: 2, ranking: [2, 1, 0], scores: [0.1, 0.3, 0.6] })
-    expect(text).toContain('Proceed with C (#z) @seq 5-6')
+    expect(text).toContain('Proceed with [3] C (#z) @seq 5-6')
     expect(text).toContain('relative preference')
   })
 
@@ -298,6 +298,19 @@ describe('routed selection feedback', () => {
     expect(text.length).toBeLessThanOrEqual(400)
   })
 
+  it('keeps the candidate ordinal and event position when labels and ids are long', () => {
+    // Same label, ids that only differ after 200 characters: truncating label + id + seq
+    // together used to delete both the distinguishing id suffix AND the event position.
+    const longA = ref('same-label', 'x'.repeat(200) + '-A', 10, 20)
+    const longB = ref('same-label', 'x'.repeat(200) + '-B', 30, 40)
+    const text = compareRouteFeedbackDetail([longA, longB], { winner: 'tie', scoreA: 0.5, scoreB: 0.5 }, 500)
+    expect(text).toContain('[1]')
+    expect(text).toContain('[2]')
+    expect(text).toContain('@seq 10-20')
+    expect(text).toContain('@seq 30-40')
+    expect(text.length).toBeLessThanOrEqual(500)
+  })
+
   it('finds the tied-for-top set and refuses to name one for unusable scores', () => {
     expect(topScoreIndices([0.2, 0.9, 0.9])).toEqual([1, 2])
     expect(topScoreIndices([0.5, 0.5, 0.5])).toEqual([0, 1, 2])
@@ -306,12 +319,20 @@ describe('routed selection feedback', () => {
   })
 
   it('locates the reviewed range and admits a missing or truncated breakdown', () => {
-    const withLocator = automaticFeedback(0.2, 0.1, 'B', 0.65, [], { sessionId: 's-1', fromSeq: 4, toSeq: 9, omittedCharacters: 1200 })
+    const withLocator = automaticFeedback(0.2, 0.1, 'B', 0.65, [], { sessionId: 's-1', fromSeq: 4, toSeq: 9, omittedCharacters: 1200 }, 0)
     expect(withLocator).toContain('no per-criterion breakdown')
     expect(withLocator).toContain('session s-1 seq 4-9')
     expect(withLocator).toContain('1200 characters of earlier evidence were omitted')
     const failed = automaticFeedback(0.2, 0.1, 'A', 0.65, [{ id: 'spec', name: 'Spec', score: 0 }], { sessionId: 's', fromSeq: 0, toSeq: 3 })
     expect(failed).toContain('Spec 0.0%')
     expect(failed).not.toContain('no per-criterion breakdown')
+  })
+
+  it('does not claim a missing breakdown when every reported criterion passed', () => {
+    // A tie (or a wrong winner) with all criteria passing is not "no breakdown".
+    const tie = automaticFeedback(0.7, 0.5, 'tie', 0.65, [], { sessionId: 's', fromSeq: 0, toSeq: 3 }, 3)
+    expect(tie).not.toContain('no per-criterion breakdown')
+    const missing = automaticFeedback(0.7, 0.5, 'tie', 0.65, [], { sessionId: 's', fromSeq: 0, toSeq: 3 }, 0)
+    expect(missing).toContain('no per-criterion breakdown')
   })
 })

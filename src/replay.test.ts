@@ -108,7 +108,8 @@ describe('summarizeRouteCycles', () => {
     expect(summary.usageIncomplete).toBe(1)
     expect(summary.preStepExecutions).toBe(1)
     expect(summary.preStepShare).toBe(0.5)
-    expect(summary.reservedCalls).toBe(1 + 7 + 3 + 1 + 6)
+    // c1 promoted 1 -> 7 calls; the cycle's reservation is 7, not 8.
+    expect(summary.reservedCalls).toBe(7 + 3 + 1 + 6)
     expect(summary.actualScoringCalls).toBe(6 + 3 + 6)
     expect(summary.classificationOnlyShare).toBe(1)
     expect(summary.bySkipReason).toEqual({ 'classification-only-budget': 1 })
@@ -142,18 +143,26 @@ const SAMPLE_SET = [
   { id: 'chat-false-trigger', category: 'conversational', shouldReview: false, events: envelopeEvents([candidate('1', 'C1'), candidate('2', 'C2')]) },
   { id: 'writing-plain', category: 'writing', shouldReview: false, events: [userEvent(0, 'Draft a note'), callEvent(1, 'e', 'edit'), resultEvent(2, 'e', 'drafted')] },
   { id: 'chat-plain', category: 'conversational', shouldReview: false, events: [userEvent(0, 'What does this flag do?')] },
+  // Eligible (3 tool calls, real state changes) but no structural artifact and no semantic hint:
+  // the final acceptance still grades it, so it must count as a hit rather than a miss.
+  { id: 'code-final-only', category: 'code', shouldReview: true, expectedPhases: ['final'], events: [userEvent(0, 'Fix and test it'), callEvent(1, 'e', 'edit'), resultEvent(2, 'e', 'edited'), callEvent(3, 'r', 'read'), resultEvent(4, 'r', 'file'), callEvent(5, 'p', 'pwsh'), resultEvent(6, 'p', 'Tests 3 passed')] },
 ]
 
 describe('labeled offline evaluation', () => {
   it('scores trigger precision and recall against real labels without a model call', () => {
     const report = summarizeEvaluation(SAMPLE_SET)
-    expect(report.samples).toBe(7)
-    expect(report.hits).toBe(4)
+    expect(report.samples).toBe(8)
+    expect(report.hits).toBe(5)
     expect(report.misses).toBe(0)
     expect(report.falseTriggers).toBe(1)
     expect(report.correctSkips).toBe(2)
-    expect(report.precision).toBeCloseTo(4 / 5)
+    expect(report.precision).toBeCloseTo(5 / 6)
     expect(report.recall).toBe(1)
+    // The eligible-only task is the regression: without eligibility in observedTrigger it is a miss.
+    const eligibleOnly = report.outcomes.find(entry => entry.id === 'code-final-only')!
+    expect(eligibleOnly.eligible).toBe(true)
+    expect(eligibleOnly.observedTrigger).toBe(true)
+    expect(eligibleOnly.outcome).toBe('hit')
     // Phase coverage counts samples, so a labeled compare that the detector finds is visible.
     // Two samples are labeled "compare", and the detector finds both (one structured, one from
     // the false-trigger sample), so the coverage row counts samples rather than model calls.

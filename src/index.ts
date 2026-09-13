@@ -9,7 +9,7 @@ import { Config, installVerifierSettings, resolveConfig } from './config.ts'
 import { RequestLimiter, addUsage, callVerifier, callVerifierText, generateCandidate, requestAttempts, type UsageStats, type VerifierClientConfig } from './caller.ts'
 import { TopLogprobCapabilityCache, resolveCapabilityFile } from './top-logprobs.ts'
 import { ScoreCache, SingleFlight, resolveCacheFile, stableHash, type CachedPairScore } from './cache.ts'
-import { VerifierEngine, normalizeCriteria, type JudgeScore, type RunStats } from './engine.ts'
+import { VerifierEngine, normalizeCriteria, partialStats, type JudgeScore, type RunStats } from './engine.ts'
 import { loadVerifierImages } from './images.ts'
 import { extractSession, sanitizeVerifierText, sessionEvents } from './session.ts'
 import { CriteriaResolver, type ResolvedCriteria } from './criteria.ts'
@@ -265,12 +265,17 @@ export function apply(ctx: Context, config: Config = {}): void {
       return value
     } catch (error) {
       const details = errorDetails(error)
-      // A request that failed before returning usage leaves the tokens UNKNOWN. The transport
-      // does know how many attempts it made, so those are kept and the row is marked
-      // incomplete instead of being reported as a confident zero-cost call.
+      // A request that failed before returning usage leaves the tokens UNKNOWN. Everything the
+      // engine already spent before the failure (partialStats) and the attempts the failing
+      // request made are both kept, and the row is marked incomplete instead of being reported
+      // as a confident zero-cost call. The partial already includes the failing request's own
+      // attempts, so they are never added twice.
+      const partial = partialStats(error)
       const attempts = requestAttempts(error)
-      const failedStats = attempts > 0 ? { ...emptyRunStats(), attempts, retries: Math.max(0, attempts - 1) } : emptyRunStats()
-      await statistics.record({ toolName, sessionId: String(agent.id), startedAt, success: false, ...details, provider: selected.provider, model: selected.model, stats: failedStats, verdict: { phase, outcome: 'error' }, ...(observation ? { route: attempts > 0 ? { ...observation, usageIncomplete: true } : observation } : {}) }).catch(() => {})
+      const failedStats: RunStats = partial === undefined
+        ? (attempts > 0 ? { ...emptyRunStats(), attempts, retries: Math.max(0, attempts - 1), usageIncomplete: true } : emptyRunStats())
+        : { ...partial, usageIncomplete: true }
+      await statistics.record({ toolName, sessionId: String(agent.id), startedAt, success: false, ...details, provider: selected.provider, model: selected.model, stats: failedStats, verdict: { phase, outcome: 'error' }, ...(observation ? { route: failedStats.usageIncomplete === true ? { ...observation, usageIncomplete: true } : observation } : {}) }).catch(() => {})
       throw error
     }
   }
@@ -776,9 +781,16 @@ export function apply(ctx: Context, config: Config = {}): void {
       return kind === 'user' || kind === 'team-message'
     })
     if (carriesTask) return decision
-    // The host ends a turn whose FIRST proposed step has no message to enter; injecting one
-    // would resurrect it. Later tool-follow-up steps may legitimately be empty.
-    if (payload.step <= 1 && decision.messages.length === 0) return decision
+    // Respect host admission. The plugin sees only the FINAL waterfall decision, so it can
+    // tell a normal tool-follow-up from a continuation a downstream listener cleared by
+    // comparing that decision with what the step was OFFERED:
+    //   - the driver's first step with nothing to enter (the host ends the turn), or
+    //   - a step that was offered messages but came back with none (cleared downstream),
+    // must stay empty. Only a tool-follow-up — nothing offered, nothing cleared — may receive
+    // an injected message; injecting into a cleared step resurrects a suppressed step and
+    // spends judge calls on it.
+    const clearedContinuation = payload.messages.length > 0 && decision.messages.length === 0
+    if (decision.messages.length === 0 && (payload.step <= 1 || clearedContinuation)) return decision
     const injected = await earlyCandidateReview(payload.agent, payload.signal)
     if (injected === undefined) return decision
     return { kind: 'enter', messages: [...decision.messages, injected] }
@@ -900,15 +912,26 @@ export function apply(ctx: Context, config: Config = {}): void {
     // default of two could never afford "plan pre-review → classify → compare".
     let cycleReservation: Reservation | undefined
     if (!finalPreferred && !deliveryFastPath && decision === undefined && selected.autoRouteSemantic && (selected.autoVerifyMode === 'strict' || semanticRouteHint(snapshot))) {
-      const fingerprint = stableHash({ phase: 'semantic', from: evidence.taskStartSeq, to: admittedLastSeq, model: selected.provider + '/' + selected.model })
+      // Build the evidence view FIRST so the cycle's identity is its RENDERED EVIDENCE rather
+      // than the last event sequence: appending a narrative message changes admittedLastSeq but
+      // not one byte of the classifier prompt, and re-buying an identical classification is
+      // exactly what the cycle budget forbids. Rendering makes no model call, so a failure here
+      // costs nothing and must NOT steer — no attempt was consumed.
+      let view: SemanticRouteView
+      try {
+        const extracted = await extractTask(agent, evidence.taskStartSeq, admittedLastSeq, selected.autoVerifyMaxChars, signal)
+        // Build the prompt and the set of citable references from ONE bounded view: the budget
+        // can omit artifacts/checkpoints, and citing a dropped one is an invalid reference
+        // rather than a decision the classifier is allowed to make.
+        view = buildSemanticRouteView(extracted.problem, snapshot, selected.autoRouteMaxCandidates, selected.autoRouteMaxItemChars, selected.autoRouteMaxInputChars)
+      } catch (error) {
+        ctx.logger.warn('llm-verifier semantic routing could not build its evidence view: ' + (error instanceof Error ? error.message : String(error)))
+        return
+      }
+      const fingerprint = stableHash({ phase: 'semantic', model: selected.provider + '/' + selected.model, prompt: view.prompt })
       const reservation = autoRouter.reserve(agent, 'semantic', fingerprint, 1, policy)
       if (reservation) {
         try {
-          const extracted = await extractTask(agent, evidence.taskStartSeq, admittedLastSeq, selected.autoVerifyMaxChars, signal)
-          // Build the prompt and the set of citable references from ONE bounded view: the
-          // budget can omit artifacts/checkpoints, and citing a dropped one is an invalid
-          // reference rather than a decision the classifier is allowed to make.
-          const view = buildSemanticRouteView(extracted.problem, snapshot, selected.autoRouteMaxCandidates, selected.autoRouteMaxItemChars, selected.autoRouteMaxInputChars)
           // Shared by every outcome of this cycle: a promoted execution row keeps the same id.
           const cycle: RouteObservation = { cycleId: reservation.id, trigger: 'turn-stopping', stage: 'classification', destination: 'unresolved', attempt: reservation.attempt, reservedCalls: reservation.expectedCalls, ...viewObservation(view) }
           const classified = await classifyRoute(agent, view.prompt, signal, 'semantic', cycle)
@@ -1117,7 +1140,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         autoRouter.fail(agent, finalReservation, selected.autoVerifyMode === 'strict')
         // S04: the failure names the criteria that failed AND the interval the judge actually
         // read, and says so explicitly when it reported no breakdown or the bound omitted evidence.
-        agent.steer(createUserMessage({ content: [{ type: 'text', text: sanitizeVerifierText(automaticFeedback(result.score, result.baselineScore, result.winner, selected.autoVerifyThreshold, failed, { sessionId: result.sessionId, fromSeq: result.fromSeq, toSeq: result.toSeq, omittedCharacters: result.omittedCharacters }), MAX_ROUTE_FEEDBACK_CHARS) }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+        agent.steer(createUserMessage({ content: [{ type: 'text', text: sanitizeVerifierText(automaticFeedback(result.score, result.baselineScore, result.winner, selected.autoVerifyThreshold, failed, { sessionId: result.sessionId, fromSeq: result.fromSeq, toSeq: result.toSeq, omittedCharacters: result.omittedCharacters }, result.criteria.length), MAX_ROUTE_FEEDBACK_CHARS) }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
       }
     } catch (error) {
       autoRouter.fail(agent, finalReservation, selected.autoVerifyMode === 'strict')

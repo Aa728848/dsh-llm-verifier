@@ -82,6 +82,8 @@ export interface SelectResult {
     /** Set when every candidate was byte-identical: no pair was judged and every score is 0.5. */
     identical?: true;
 }
+/** Usage accumulated before an invocation failed; undefined when the error carries none. */
+export declare function partialStats(error: unknown): RunStats | undefined;
 /**
  * Deterministic A/B slot for one pivot-round pair, balanced by construction.
  *

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { VerifierClientConfig } from './caller.ts'
 import { ScoreCache, SingleFlight, type CachedPairScore } from './cache.ts'
-import { VerifierEngine, orientRoundPairs } from './engine.ts'
+import { VerifierEngine, orientRoundPairs, partialStats } from './engine.ts'
 import { pivotRoundPairs } from './core.ts'
 import { TopLogprobCapabilityCache } from './top-logprobs.ts'
 
@@ -410,6 +410,33 @@ describe('VerifierEngine N-judge ensemble', () => {
     expect(result.stats.channelFallbacks).toBe(1)
     // A downgrade is not a failure: the answer is usable and the usage is known.
     expect(result.stats.usageIncomplete).toBeUndefined()
+  })
+
+  it('keeps the usage of successful calls when a later criterion fails', async () => {
+    const promptOf = (options: any): string => {
+      const message = options.messages[0]
+      return typeof message.content === 'string' ? message.content : message.content.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('')
+    }
+    const criteria = [
+      { id: 'a', name: 'A', description: 'first requirement' },
+      { id: 'b', name: 'B', description: 'second requirement' },
+      { id: 'c', name: 'C', description: 'third requirement' },
+    ]
+    const llm = {
+      stream: (options: any) => promptOf(options).includes('third requirement')
+        ? (async function* () { throw new Error('judge exploded') })()
+        : streamOf(chunks('<score_A> A </score_A>\n<score_B> T </score_B>')),
+    }
+    // concurrency 1: the two successful criteria resolve before the third fails.
+    const engine = new VerifierEngine(clientConfig({ llm } as any), 1)
+    const error = await engine.compare({ problem: 'task', candidateA: 'AA', candidateB: 'BB', criteria, repeats: 1 }).catch(reason => reason)
+    const partial = partialStats(error)
+    // Two real requests completed with 7 input / 4 output tokens each, then the third died.
+    expect(partial?.calls).toBe(2)
+    expect(partial?.inputTokens).toBe(14)
+    expect(partial?.outputTokens).toBe(8)
+    expect(partial?.attempts).toBe(3)
+    expect(partial?.usageIncomplete).toBe(true)
   })
 
   it('All judges fail: compare rejects with the first error', async () => {

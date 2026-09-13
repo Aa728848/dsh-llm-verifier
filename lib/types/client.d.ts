@@ -65,6 +65,23 @@ export interface RunStats {
     estimatedCostUsd: number;
     topLogprobScores: number;
     explicitTagScores: number;
+    usageIncomplete?: boolean;
+    channelFallbacks?: number;
+}
+/** S05-A routing-cycle observation, as persisted on the record (all fields optional/lenient). */
+export interface RouteObservationView {
+    cycleId: string;
+    trigger: string;
+    stage: string;
+    destination: string;
+    attempt?: number;
+    reservedCalls?: number;
+    skipReason?: string;
+    canceled?: boolean;
+    usageIncomplete?: boolean;
+    evidenceKept?: number;
+    evidenceOmitted?: number;
+    evidenceChars?: number;
 }
 export interface InvocationRecord {
     id: string;
@@ -80,6 +97,7 @@ export interface InvocationRecord {
     model: string;
     stats: RunStats;
     verdict?: VerdictSummary;
+    route?: RouteObservationView;
 }
 interface VerifierRemote {
     session: {
