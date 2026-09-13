@@ -53,6 +53,75 @@ export type ReviewStage = 'proposal' | 'artifact';
  * as narrow as the artifact ones (2-4 narrow criteria beat one broad one).
  */
 export declare const PROPOSAL_CRITERIA: Criterion[];
+/**
+ * Upper bound on the findings one judge call may report.
+ *
+ * The plan fixes it at three: feedback that lists everything is indistinguishable from feedback that
+ * locates nothing, and every finding is charged against the 4000-character feedback budget.
+ */
+export declare const MAX_DIAGNOSTICS = 3;
+/** Upper bound on one finding's text and on its suggested verification step. */
+export declare const MAX_DIAGNOSTIC_CHARS = 400;
+export declare const MAX_DIAGNOSTIC_ACTION_CHARS = 300;
+/**
+ * One located finding from a judge call.
+ *
+ * Deliberately about LOCATION, not about scores: the score tags answer "how good", these answer
+ * "what exactly is missing and how would we settle it". `evidence` must be a token the judge was
+ * actually shown, so a hallucinated reference is dropped instead of being echoed back to the agent.
+ */
+export interface Diagnostic {
+    /** Criterion the finding belongs to (pairwise reviews); normalized to the name we offered. */
+    criterion?: string;
+    /** Checkpoint label the finding belongs to (`c1`..`cN`, progress reviews). */
+    checkpoint?: string;
+    /** Evidence token the judge was shown: `TASK`, `A`/`B`, or `c1`.. */
+    evidence: string;
+    /** The concrete thing missing or failing. */
+    finding: string;
+    /** The verification step that would settle it, when the judge named one. */
+    action?: string;
+}
+/**
+ * The optional-findings contract appended to every judge prompt.
+ *
+ * Placed AFTER the criterion (so the criterion is still the last varying element and per-criterion
+ * prefix caching keeps working) and BEFORE the score lines (so the verdict tags stay the final,
+ * parseable part of the answer). Deliberately "may", never "must": an invented finding is worse than
+ * no finding, and the parser drops anything it cannot verify.
+ * @param target - the location attribute this prompt can offer (`criterion` or `checkpoint`).
+ * @param evidence - the evidence tokens the judge may cite, exactly as rendered above.
+ * @returns The contract text.
+ */
+export declare function buildFindingContract(target: 'criterion' | 'checkpoint', evidence: readonly string[]): string;
+/**
+ * Parse the findings of one judge answer against what that prompt actually offered.
+ *
+ * FAIL-SOFT BY DESIGN, unlike the score tags: a malformed or unverifiable finding is DROPPED, never
+ * turned into a parse error, and never invented. The score contract stays fail-closed — a judge
+ * answer without a usable A–T verdict is still an error — but diagnostics are a bonus, and failing a
+ * whole verification because the judge wrote a sloppy extra line would punish the task, not the judge.
+ * @param text - the raw judge answer.
+ * @param visible - what the prompt offered: criterion names/ids, checkpoint labels, evidence tokens.
+ * @returns Up to {@link MAX_DIAGNOSTICS} verified findings, in the order the judge wrote them.
+ */
+export declare function parseDiagnostics(text: string, visible: {
+    criteria?: readonly string[];
+    checkpoints?: readonly string[];
+    evidence: readonly string[];
+}): Diagnostic[];
+/** Stable identity of one finding, for de-duplication across criteria/repeats/judges. */
+export declare function diagnosticKey(diagnostic: Diagnostic): string;
+/**
+ * Render findings as short feedback lines.
+ *
+ * The locator (criterion/checkpoint + evidence) comes first and always survives truncation: a finding
+ * the agent cannot place is not actionable, and the body is worthless without its location.
+ * @param diagnostics - verified findings.
+ * @param maxChars - budget for the whole block (0 renders nothing).
+ * @returns One line per finding, or '' when there is nothing to say.
+ */
+export declare function renderDiagnostics(diagnostics: readonly Diagnostic[], maxChars: number): string;
 /** Derive a criterion id from free text: lowercase, alphanumerics and underscores, max 40 chars. */
 export declare function slugCriterionId(text: string): string;
 /** Make an id unique against the ids already used, by appending _2, _3, ... */

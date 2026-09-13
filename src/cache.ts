@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { UsageStats } from './caller.ts'
+import type { Diagnostic } from './core.ts'
 
 export interface CachedPairScore {
   scoreA: number
@@ -9,6 +10,14 @@ export interface CachedPairScore {
   usage: UsageStats
   scoringMode: 'top-logprobs' | 'explicit-tag'
   createdAt: number
+  /**
+   * Findings the judge located for THIS exact prompt (P04), when it reported any.
+   *
+   * Part of the stored payload rather than the identity: the key is the rendered prompt hash, so an
+   * entry only ever answers the very same evidence it was produced from. Entries written before this
+   * field existed simply have none, which is also what a judge answer without findings yields.
+   */
+  diagnostics?: Diagnostic[]
 }
 
 interface CacheDocument {
@@ -34,7 +43,7 @@ function validUsage(value: unknown): value is UsageStats {
 function validEntry(value: unknown): value is CachedPairScore {
   if (typeof value !== 'object' || value === null) return false
   const row = value as Record<string, unknown>
-  return typeof row.scoreA === 'number' && Number.isFinite(row.scoreA) && row.scoreA >= 0 && row.scoreA <= 1 && typeof row.scoreB === 'number' && Number.isFinite(row.scoreB) && row.scoreB >= 0 && row.scoreB <= 1 && validUsage(row.usage) && (row.scoringMode === undefined || row.scoringMode === 'top-logprobs' || row.scoringMode === 'explicit-tag') && typeof row.createdAt === 'number' && Number.isFinite(row.createdAt) && row.createdAt >= 0
+  return typeof row.scoreA === 'number' && Number.isFinite(row.scoreA) && row.scoreA >= 0 && row.scoreA <= 1 && typeof row.scoreB === 'number' && Number.isFinite(row.scoreB) && row.scoreB >= 0 && row.scoreB <= 1 && validUsage(row.usage) && (row.scoringMode === undefined || row.scoringMode === 'top-logprobs' || row.scoringMode === 'explicit-tag') && typeof row.createdAt === 'number' && Number.isFinite(row.createdAt) && row.createdAt >= 0 && (row.diagnostics === undefined || Array.isArray(row.diagnostics))
 }
 
 /** Channel-independent single-flight: concurrent identical tasks share one promise; joiners are flagged so callers can avoid double-counting usage. */

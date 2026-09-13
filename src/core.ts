@@ -176,6 +176,150 @@ export const PROPOSAL_CRITERIA: Criterion[] = [
   },
 ]
 
+/**
+ * Upper bound on the findings one judge call may report.
+ *
+ * The plan fixes it at three: feedback that lists everything is indistinguishable from feedback that
+ * locates nothing, and every finding is charged against the 4000-character feedback budget.
+ */
+export const MAX_DIAGNOSTICS = 3
+
+/** Upper bound on one finding's text and on its suggested verification step. */
+export const MAX_DIAGNOSTIC_CHARS = 400
+export const MAX_DIAGNOSTIC_ACTION_CHARS = 300
+
+/**
+ * One located finding from a judge call.
+ *
+ * Deliberately about LOCATION, not about scores: the score tags answer "how good", these answer
+ * "what exactly is missing and how would we settle it". `evidence` must be a token the judge was
+ * actually shown, so a hallucinated reference is dropped instead of being echoed back to the agent.
+ */
+export interface Diagnostic {
+  /** Criterion the finding belongs to (pairwise reviews); normalized to the name we offered. */
+  criterion?: string
+  /** Checkpoint label the finding belongs to (`c1`..`cN`, progress reviews). */
+  checkpoint?: string
+  /** Evidence token the judge was shown: `TASK`, `A`/`B`, or `c1`.. */
+  evidence: string
+  /** The concrete thing missing or failing. */
+  finding: string
+  /** The verification step that would settle it, when the judge named one. */
+  action?: string
+}
+
+/**
+ * The optional-findings contract appended to every judge prompt.
+ *
+ * Placed AFTER the criterion (so the criterion is still the last varying element and per-criterion
+ * prefix caching keeps working) and BEFORE the score lines (so the verdict tags stay the final,
+ * parseable part of the answer). Deliberately "may", never "must": an invented finding is worse than
+ * no finding, and the parser drops anything it cannot verify.
+ * @param target - the location attribute this prompt can offer (`criterion` or `checkpoint`).
+ * @param evidence - the evidence tokens the judge may cite, exactly as rendered above.
+ * @returns The contract text.
+ */
+export function buildFindingContract(target: 'criterion' | 'checkpoint', evidence: readonly string[]): string {
+  const targetExample = target === 'criterion' ? 'criterion="NAME OF THE CRITERION YOU SCORED"' : 'checkpoint="c1"'
+  return [
+    '**Findings (optional, at most ' + MAX_DIAGNOSTICS + '):** when you can point at something specific, write one line per finding, before the score lines below, in exactly this shape:',
+    '<finding ' + targetExample + ' evidence="one of: ' + evidence.join(', ') + '" action="the command or check that would settle it">what is missing or failing</finding>',
+    'Use only the ' + target + ' value(s) and evidence labels shown in this prompt; never invent one. Omit every finding line when nothing is locatable — do not guess, and do not restate the whole task.',
+  ].join('\n')
+}
+
+const FINDING_PATTERN = /<finding\s+([^>]*)>([\s\S]*?)<\/finding>/giu
+const ATTRIBUTE_PATTERN = /([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]*)"/gu
+const KNOWN_FINDING_ATTRIBUTES = new Set(['criterion', 'checkpoint', 'evidence', 'action'])
+
+/**
+ * Parse the findings of one judge answer against what that prompt actually offered.
+ *
+ * FAIL-SOFT BY DESIGN, unlike the score tags: a malformed or unverifiable finding is DROPPED, never
+ * turned into a parse error, and never invented. The score contract stays fail-closed — a judge
+ * answer without a usable A–T verdict is still an error — but diagnostics are a bonus, and failing a
+ * whole verification because the judge wrote a sloppy extra line would punish the task, not the judge.
+ * @param text - the raw judge answer.
+ * @param visible - what the prompt offered: criterion names/ids, checkpoint labels, evidence tokens.
+ * @returns Up to {@link MAX_DIAGNOSTICS} verified findings, in the order the judge wrote them.
+ */
+export function parseDiagnostics(text: string, visible: { criteria?: readonly string[]; checkpoints?: readonly string[]; evidence: readonly string[] }): Diagnostic[] {
+  const criteria = new Map((visible.criteria ?? []).map(value => [value.toLowerCase(), value]))
+  const checkpoints = new Set(visible.checkpoints ?? [])
+  const evidence = new Set(visible.evidence)
+  const found: Diagnostic[] = []
+  for (const match of text.matchAll(FINDING_PATTERN)) {
+    if (found.length >= MAX_DIAGNOSTICS) break
+    const attributes: Record<string, string> = {}
+    let rejected = false
+    for (const attribute of (match[1] ?? '').matchAll(ATTRIBUTE_PATTERN)) {
+      const name = (attribute[1] ?? '').toLowerCase()
+      if (!KNOWN_FINDING_ATTRIBUTES.has(name) || attributes[name] !== undefined) { rejected = true; break }
+      attributes[name] = attribute[2] ?? ''
+    }
+    if (rejected) continue
+    const rawFinding = (match[2] ?? '').trim()
+    const evidenceToken = attributes.evidence ?? ''
+    if (!rawFinding || !evidence.has(evidenceToken)) continue
+    const criterionValue = attributes.criterion
+    const checkpointValue = attributes.checkpoint
+    // A target the prompt never offered cannot be cited; and when the prompt offered one kind, the
+    // other kind is not a license to skip it.
+    let criterion: string | undefined
+    if (criterionValue !== undefined) {
+      const canonical = criteria.get(criterionValue.trim().toLowerCase())
+      if (canonical === undefined) continue
+      criterion = canonical
+    }
+    let checkpoint: string | undefined
+    if (checkpointValue !== undefined) {
+      if (!checkpoints.has(checkpointValue.trim())) continue
+      checkpoint = checkpointValue.trim()
+    }
+    // A pairwise review offers criteria, a progress review offers checkpoints: require the one this
+    // prompt made available instead of accepting a finding that points at nothing.
+    if (criteria.size > 0 && checkpoint === undefined && criterion === undefined) continue
+    if (checkpoints.size > 0 && checkpoint === undefined) continue
+    const action = (attributes.action ?? '').trim()
+    found.push({
+      ...(criterion === undefined ? {} : { criterion }),
+      ...(checkpoint === undefined ? {} : { checkpoint }),
+      evidence: evidenceToken,
+      finding: rawFinding.length > MAX_DIAGNOSTIC_CHARS ? rawFinding.slice(0, MAX_DIAGNOSTIC_CHARS - 1) + '…' : rawFinding,
+      ...(action === '' ? {} : { action: action.length > MAX_DIAGNOSTIC_ACTION_CHARS ? action.slice(0, MAX_DIAGNOSTIC_ACTION_CHARS - 1) + '…' : action }),
+    })
+  }
+  return found
+}
+
+/** Stable identity of one finding, for de-duplication across criteria/repeats/judges. */
+export function diagnosticKey(diagnostic: Diagnostic): string {
+  return [diagnostic.criterion ?? '', diagnostic.checkpoint ?? '', diagnostic.evidence, diagnostic.finding].join('\u0000')
+}
+
+/**
+ * Render findings as short feedback lines.
+ *
+ * The locator (criterion/checkpoint + evidence) comes first and always survives truncation: a finding
+ * the agent cannot place is not actionable, and the body is worthless without its location.
+ * @param diagnostics - verified findings.
+ * @param maxChars - budget for the whole block (0 renders nothing).
+ * @returns One line per finding, or '' when there is nothing to say.
+ */
+export function renderDiagnostics(diagnostics: readonly Diagnostic[], maxChars: number): string {
+  if (diagnostics.length === 0 || maxChars < 64) return ''
+  const lines: string[] = []
+  for (const diagnostic of diagnostics) {
+    const where = diagnostic.criterion ?? diagnostic.checkpoint ?? ''
+    const locator = (where === '' ? '' : '[' + where + '] ') + '(evidence: ' + diagnostic.evidence + ') '
+    const action = diagnostic.action === undefined ? '' : ' — try: ' + diagnostic.action
+    const line = '- ' + locator + diagnostic.finding + action
+    lines.push(line)
+  }
+  const block = 'Located findings from the judge:\n' + lines.join('\n')
+  return block.length <= maxChars ? block : block.slice(0, Math.max(1, maxChars - 1)) + '…'
+}
+
 /** Derive a criterion id from free text: lowercase, alphanumerics and underscores, max 40 chars. */
 export function slugCriterionId(text: string): string {
   const slug = text.toLowerCase().replace(/[^a-z0-9]+/gu, '_').replace(/^_+|_+$/gu, '')
@@ -389,6 +533,7 @@ export function buildPairwisePrompt(problem: string, traceA: string, traceB: str
     '**Rating Scale:**\n' + SCALE_DESCRIPTION,
     '**Evaluation Guideline — ' + criterion.name + ':**\n' + criterion.description,
     'Score each ' + (proposal ? 'proposal' : 'trajectory') + ' ONLY on this specific criterion ("' + criterion.name + '"). Ignore other aspects that are not relevant to it.',
+    buildFindingContract('criterion', ['TASK', 'A', 'B']),
     'Reason it through first, then END your reply with exactly these two lines and nothing after them. Replace each placeholder with a single letter A-T, keeping the spaces around the letter exactly as shown:\n<score_A> LETTER_A_TO_T </score_A>\n<score_B> LETTER_A_TO_T </score_B>',
     'Begin your analysis now.',
   ].join('\n\n')
@@ -408,7 +553,8 @@ export function buildProgressPrompt(problem: string, steps: readonly string[], c
     "Calibration: effort, exploration, step count and confident narration are NOT progress — an agent that ran twenty commands without producing the right output deserves a score near A. Default to skepticism: a result with no real verification step should not exceed ~K, and even a verified-looking one should rarely exceed ~R unless the verification clearly matches the task's stated success criterion. Treat the agent's prose declarations (\"done\", \"all tests pass\") as ZERO evidence, and ground the score in the actions and the observed output you can see.",
     'Successive checkpoints do not have to rise: a trajectory committed to a wrong approach should plateau, and a regression should score lower than the state it broke.',
     'The checkpoints are:\n' + checkpoints.map((step, index) => '  Checkpoint ' + (index + 1) + ' = state right after Agent Step ' + step).join('\n'),
-    'Output EXACTLY these lines and nothing else:\n' + tags,
+    buildFindingContract('checkpoint', ['TASK', ...checkpoints.map((_, index) => 'c' + (index + 1))]),
+    'After any finding lines, output EXACTLY these lines and nothing else:\n' + tags,
   ].join('\n\n')
 }
 

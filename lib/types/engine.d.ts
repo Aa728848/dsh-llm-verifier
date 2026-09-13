@@ -1,7 +1,7 @@
 import { type UsageStats, type VerifierClientConfig, type VerifierImage } from './caller.ts';
 import { ScoreCache, SingleFlight, type CachedPairScore } from './cache.ts';
 import type { DecisionTrace } from './decisions.ts';
-import { DEFAULT_GROUND_TRUTH_NOTE, type Criterion, type ReviewStage } from './core.ts';
+import { DEFAULT_GROUND_TRUTH_NOTE, type Criterion, type Diagnostic, type ReviewStage } from './core.ts';
 export interface CompareOptions {
     problem: string;
     candidateA: string;
@@ -68,6 +68,14 @@ export interface CompareResult {
     agreement: number;
     /** Set when both sides were byte-identical: no model call was made and both sides score 0.5. */
     identical?: true;
+    /**
+     * Verified findings the judge located, de-duplicated and capped.
+     *
+     * Empty is the normal case and means "nothing locatable was reported" — never "nothing is wrong".
+     * A score served from the cache carries none: replaying a finding from an older run would present a
+     * past observation as current evidence.
+     */
+    diagnostics: Diagnostic[];
 }
 export interface SelectOptions {
     problem: string;
@@ -96,6 +104,8 @@ export interface SelectResult {
     judges: JudgeScore[];
     /** Set when every candidate was byte-identical: no pair was judged and every score is 0.5. */
     identical?: true;
+    /** Findings the judges located, aggregated across every judged pair (see {@link CompareResult.diagnostics}). */
+    diagnostics: Diagnostic[];
 }
 /**
  * Where an invocation records the usage it accumulated before it finally failed.
@@ -187,6 +197,7 @@ export declare class VerifierEngine {
         calls: number;
         stats: RunStats;
         judges: JudgeScore[];
+        diagnostics: Diagnostic[];
     }>;
     /**
      * Verdict for a candidate list whose entries are all byte-identical.

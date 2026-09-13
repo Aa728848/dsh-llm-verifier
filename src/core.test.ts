@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { automaticFeedback } from './auto.ts'
 import {
   CRITERIA_PRESETS,
   DEFAULT_CRITERIA,
@@ -12,8 +13,11 @@ import {
   evidenceNonce,
   extractProgressScore,
   extractScore,
+  MAX_DIAGNOSTIC_CHARS,
   PROPOSAL_CRITERIA,
   parseCriteriaMarkdown,
+  parseDiagnostics,
+  renderDiagnostics,
   pivotRoundPairs,
   rankScores,
   renderDelimitedBlock,
@@ -265,6 +269,75 @@ describe('criteria markdown', () => {
 
   it('keeps exactly one definition of the gate baseline', () => {
     expect(EMPTY_WORK_BASELINE).toBe('(No useful work or verification was performed.)')
+  })
+})
+
+/**
+ * P04: the judge may locate at most three findings, and the parser verifies every reference against
+ * what the prompt actually offered.
+ *
+ * The asymmetry with the score tags is deliberate: a missing A–T verdict is an error (fail closed),
+ * while a sloppy or unverifiable finding is DROPPED and the feedback says nothing was located. Failing
+ * a whole verification because the judge wrote an extra line would punish the task, not the judge.
+ */
+describe('judge findings', () => {
+  const pairwise = { criteria: ['Specification Adherence'], evidence: ['TASK', 'A', 'B'] }
+  const progress = { checkpoints: ['c1', 'c2'], evidence: ['TASK', 'c1', 'c2'] }
+
+  it('offers the contract in both prompts, after the criterion and before the score lines', () => {
+    const prompt = buildPairwisePrompt('task', 'A body', 'B body', DEFAULT_CRITERIA[0]!)
+    expect(prompt).toContain('<finding criterion="NAME OF THE CRITERION YOU SCORED" evidence="one of: TASK, A, B"')
+    expect(prompt.indexOf('**Evaluation Guideline')).toBeLessThan(prompt.indexOf('<finding criterion='))
+    expect(prompt.indexOf('<finding criterion=')).toBeLessThan(prompt.indexOf('<score_A> LETTER_A_TO_T'))
+    const track = buildProgressPrompt('task', ['step one', 'step two'], [1, 2])
+    expect(track).toContain('<finding checkpoint="c1" evidence="one of: TASK, c1, c2"')
+  })
+
+  it('parses a verified finding and keeps its locator', () => {
+    const parsed = parseDiagnostics('<finding criterion="Specification Adherence" evidence="A" action="run the parser test">the header is never validated</finding>', pairwise)
+    expect(parsed).toEqual([{ criterion: 'Specification Adherence', evidence: 'A', action: 'run the parser test', finding: 'the header is never validated' }])
+    // The criterion may be cited by id as well: both were offered to the judge.
+    expect(parseDiagnostics('<finding criterion="specification" evidence="B">x</finding>', { criteria: ['Specification Adherence', 'specification'], evidence: ['TASK', 'A', 'B'] })).toHaveLength(1)
+  })
+
+  it('drops anything it cannot verify instead of echoing it back to the agent', () => {
+    expect(parseDiagnostics('<finding criterion="Specification Adherence" evidence="A" note="x">y</finding>', pairwise)).toEqual([])
+    expect(parseDiagnostics('<finding criterion="Specification Adherence" evidence="c9">y</finding>', pairwise)).toEqual([])
+    expect(parseDiagnostics('<finding criterion="Invented" evidence="A">y</finding>', pairwise)).toEqual([])
+    expect(parseDiagnostics('<finding criterion="Specification Adherence" evidence="A">   </finding>', pairwise)).toEqual([])
+    // A finding with no target at all is not a location.
+    expect(parseDiagnostics('<finding evidence="A">y</finding>', pairwise)).toEqual([])
+  })
+
+  it('requires the target kind the prompt offered, and caps the list at three', () => {
+    // A progress prompt offers checkpoints: a criterion-only finding points at nothing it can place.
+    expect(parseDiagnostics('<finding criterion="Specification Adherence" evidence="c1">x</finding>', progress)).toEqual([])
+    expect(parseDiagnostics('<finding checkpoint="c2" evidence="c2">x</finding>', progress)).toHaveLength(1)
+    // An unknown checkpoint label is a hallucinated reference.
+    expect(parseDiagnostics('<finding checkpoint="c9" evidence="c1">x</finding>', progress)).toEqual([])
+    const many = Array.from({ length: 5 }, (_, index) => '<finding criterion="Specification Adherence" evidence="A">f' + index + '</finding>').join('\n')
+    expect(parseDiagnostics(many, pairwise)).toHaveLength(3)
+  })
+
+  it('bounds each finding and renders the locator first, inside the budget', () => {
+    const long = parseDiagnostics('<finding criterion="Specification Adherence" evidence="A">' + 'x'.repeat(600) + '</finding>', pairwise)
+    expect(long[0]!.finding.length).toBeLessThanOrEqual(MAX_DIAGNOSTIC_CHARS)
+    const rendered = renderDiagnostics([{ checkpoint: 'c2', evidence: 'c2', action: 'run it', finding: 'tests never ran' }], 400)
+    expect(rendered).toContain('[c2] (evidence: c2) tests never ran — try: run it')
+    expect(renderDiagnostics([{ evidence: 'A', finding: 'x' }], 64).length).toBeLessThanOrEqual(64)
+    expect(renderDiagnostics([], 400)).toBe('')
+  })
+
+  it('states that nothing was located rather than inventing a cause', () => {
+    const failed = [{ id: 'a', name: 'A', score: 0.1 }]
+    const quiet = automaticFeedback(0.1, 0, 'A', 0.65, failed, undefined, 1, [])
+    expect(quiet).toContain('did not report any located finding')
+    const located = automaticFeedback(0.1, 0, 'A', 0.65, failed, undefined, 1, [{ criterion: 'A', evidence: 'A', finding: 'the header is never validated' }])
+    expect(located).toContain('Located findings from the judge')
+    expect(located).toContain('[A] (evidence: A) the header is never validated')
+    expect(located).not.toContain('did not report any located finding')
+    // A verdict with no failing criterion says nothing about location at all.
+    expect(automaticFeedback(0.1, 0, 'A', 0.65, [], undefined, 1, [])).not.toContain('located finding')
   })
 })
 

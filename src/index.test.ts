@@ -440,6 +440,15 @@ describe('verifier_current_session', () => {
     ]) expect(definition.output.schema.properties[key], key).toBeDefined()
   })
 
+  it('surfaces located findings on the verdict and satisfies the schema', async () => {
+    const stream = () => textStream('reasoning\n<finding criterion="Specification Adherence" evidence="A" action="run the parser test">the header is never validated</finding>\n<score_A> Q </score_A>\n<score_B> T </score_B>')
+    const definition = assemble(JUDGE, { stream, sessions: [{ id: 'session-1', createdAt: 1 }] }).tools.get('verifier_current_session')!
+    const result = await definition.execute({}, sessionExec) as Record<string, any>
+    expect(result.diagnostics.length).toBeGreaterThan(0)
+    expect(result.diagnostics[0]).toMatchObject({ criterion: 'Specification Adherence', evidence: 'A', action: 'run the parser test', finding: 'the header is never validated' })
+    assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'current_session')
+  })
+
   it('renders a verdict that satisfies the declared output schema', async () => {
     const definition = assemble(JUDGE, { stream: scriptedStream(0, [], []) }).tools.get('verifier_current_session')!
     const result = await definition.execute({}, sessionExec) as Record<string, any>
@@ -1140,15 +1149,50 @@ describe('delivery-phase scheduling and tie feedback', () => {
 
   it('does not skip routing twice on the same finished state', async () => {
     const calls: Array<Record<string, unknown>> = []
-    const { handlers } = assemble(JUDGE, { stream: deliveryStream(calls), sessions: [{ id: 'agent-delivery', createdAt: 1 }] })
+    const { handlers, rpc } = assemble(JUDGE, { stream: deliveryStream(calls), sessions: [{ id: 'agent-delivery', createdAt: 1 }] })
     const steered: unknown[] = []
     const handle = handlers.get('agent/turn-stopping')!
     const events = deliveryEvents()
     await handle({ agent: agent(events, steered), signal: new AbortController().signal })
     await handle({ agent: agent(events, steered), signal: new AbortController().signal })
-    // The completion signal was consumed by the first boundary, so the second buys the
-    // progress route again instead of repeatedly skipping it.
-    expect(JSON.stringify(steered)).toContain('routing: track')
+    // The completion signal was consumed by the first boundary, so the second BUYS the progress route
+    // again instead of skipping it a second time. Under P04 that route then hands the boundary over to
+    // the final acceptance (nothing was locatable), so the observable fact is the purchase itself,
+    // not the wording of the steering message.
+    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ toolName: string; route?: { skipReason?: string } }> } }
+    expect(overview.value.recent.filter(row => row.route?.skipReason === 'delivery-phase')).toHaveLength(1)
+    expect(calls.some(entry => isTrackCall(String(entry.prompt)))).toBe(true)
+    // The boundary still ends with a real steer: the gate message, not a generic "keep going".
+    expect(JSON.stringify(steered)).toContain('Automatic verifier gate')
+  })
+
+  it('steers the located finding a track review reported instead of a generic continuation', async () => {
+    const prompts: string[] = []
+    const stream = (options: { messages: readonly unknown[] }) => {
+      const prompt = promptText(options)
+      prompts.push(prompt)
+      // A low progress score WITH a locatable finding: the boundary gets the finding, not a nudge.
+      if (prompt.includes('<c1>')) return textStream('reasoning\n<finding checkpoint="c1" evidence="c1" action="run the suite">the parser test is still failing</finding>\n<c1> A </c1>\n<c2> A </c2>')
+      return textStream('reasoning\n<score_A> T </score_A>\n<score_B> Q </score_B>')
+    }
+    const { handlers, rpc } = assemble(JUDGE, { stream, sessions: [{ id: 'agent-delivery', createdAt: 1 }] })
+    const steered: unknown[] = []
+    const handle = handlers.get('agent/turn-stopping')!
+    const events = deliveryEvents()
+    // First boundary consumes the delivery signal (final acceptance only); the second buys track.
+    await handle({ agent: agent(events, steered), signal: new AbortController().signal })
+    const afterFirst = steered.length
+    await handle({ agent: agent(events, steered), signal: new AbortController().signal })
+    const text = JSON.stringify(steered.slice(afterFirst))
+    expect(prompts.some(prompt => prompt.includes('<finding checkpoint="c1"'))).toBe(true)
+    expect(text).toContain('Located findings from the judge')
+    expect(text).toContain('[c1] (evidence: c1) the parser test is still failing')
+    expect(text).toContain('try: run the suite')
+    // P04: no generic instruction, and the boundary was NOT handed to the gate.
+    expect(text).not.toContain('Continue the unfinished work')
+    expect(text).not.toContain('Automatic verifier gate')
+    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ route?: { skipReason?: string } }> } }
+    expect(overview.value.recent.some(row => row.route?.skipReason === 'no-diagnostics')).toBe(false)
   })
 
   it('re-arms the fast path when a NEW verification run appears', async () => {

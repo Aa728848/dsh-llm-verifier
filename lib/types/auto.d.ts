@@ -1,5 +1,5 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
-import type { ReviewStage } from './core.ts';
+import { type Diagnostic, type ReviewStage } from './core.ts';
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict';
 export interface AutoVerifyPolicy {
     mode: AutoVerifyMode;
@@ -76,7 +76,7 @@ export declare function automaticFeedback(score: number, baselineScore: number, 
     fromSeq?: number;
     toSeq?: number;
     omittedCharacters?: number;
-}, reportedCriteria?: number): string;
+}, reportedCriteria?: number, diagnostics?: readonly Diagnostic[]): string;
 /** One automatic feedback message may not exceed this many characters, fixed wording included. */
 export declare const MAX_ROUTE_FEEDBACK_CHARS = 4000;
 /** Locator for one routed candidate: a label plus the identity/event position it can be found by. */

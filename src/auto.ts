@@ -2,7 +2,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 // Shared with the router so both agree on what opens a task; imported (type-only in the
 // other direction) rather than duplicated, because a drift here silently disables gating.
 import { latestDirectUserSeq } from './router.ts'
-import type { ReviewStage } from './core.ts'
+import { renderDiagnostics, type Diagnostic, type ReviewStage } from './core.ts'
 import { sanitizeVerifierText } from './session.ts'
 
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict'
@@ -262,8 +262,16 @@ export function sessionAccepted(evidence: { score: number; winner: 'A' | 'B' | '
   return failedAcceptanceCriteria(evidence.criteria, threshold).length === 0
 }
 
-export function automaticFeedback(score: number, baselineScore: number, winner: 'A' | 'B' | 'tie', threshold: number, failedCriteria: readonly AcceptanceCriterion[] = [], locator?: { sessionId?: string; fromSeq?: number; toSeq?: number; omittedCharacters?: number }, reportedCriteria?: number): string {
+export function automaticFeedback(score: number, baselineScore: number, winner: 'A' | 'B' | 'tie', threshold: number, failedCriteria: readonly AcceptanceCriterion[] = [], locator?: { sessionId?: string; fromSeq?: number; toSeq?: number; omittedCharacters?: number }, reportedCriteria?: number, diagnostics: readonly Diagnostic[] = []): string {
   const percent = (value: number) => (value * 100).toFixed(1) + '%'
+  // P04: located findings beat a generic "inspect the output yourself" — and when the judge reported
+  // none, saying so is better than inventing a cause the judge never named.
+  const located = renderDiagnostics(diagnostics, 1600)
+  const diagnosticLines = located === ''
+    ? failedCriteria.length > 0
+      ? ['The judge did not report any located finding for the failing criteria, so there is no specific cause to act on. The criteria named above are the only locator available: re-read each one against the observed output yourself.']
+      : []
+    : [located]
   return [
     '[Automatic verifier gate]',
     `The independent verifier did not clear this task for completion: evidence score ${percent(score)}, baseline ${percent(baselineScore)}, verdict ${winner}, required ${percent(threshold)}.`,
@@ -275,6 +283,7 @@ export function automaticFeedback(score: number, baselineScore: number, winner: 
       : reportedCriteria === 0
         ? ['The judge reported no per-criterion breakdown for this review, so there is no per-requirement locator to act on; the score and verdict above are the only evidence returned.']
         : []),
+    ...diagnosticLines,
     ...(winner !== 'A' ? ['The verdict did not favour the session over the empty-work baseline.'] : []),
     ...(locator === undefined
       ? []

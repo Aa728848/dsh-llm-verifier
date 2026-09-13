@@ -3,9 +3,32 @@ import { ScoreCache, SingleFlight, stableHash, type CachedPairScore } from './ca
 import type { DecisionTrace } from './decisions.ts'
 import {
   DEFAULT_CRITERIA, DEFAULT_GROUND_TRUTH_NOTE, PROPOSAL_CRITERIA, accumulatePairs, buildPairwisePrompt, buildProgressPrompt,
-  dedupeCriterionId, extractProgressScore, extractScore, pivotRoundPairs, rankScores, ringCycle, slugCriterionId,
-  topPivots, type Criterion, type ReviewStage,
+  dedupeCriterionId, diagnosticKey, extractProgressScore, extractScore, parseDiagnostics, pivotRoundPairs, rankScores,
+  ringCycle, slugCriterionId, topPivots, type Criterion, type Diagnostic, type ReviewStage,
 } from './core.ts'
+
+/** Evidence tokens one pairwise prompt shows the judge, exactly as the prompt lists them. */
+const PAIRWISE_EVIDENCE = ['TASK', 'A', 'B'] as const
+
+/**
+ * Cap on the findings ONE invocation reports, after de-duplication across criteria, repeats and judges.
+ *
+ * The per-call cap is {@link MAX_DIAGNOSTICS}; the default final acceptance is 3 criteria x 2 repeats,
+ * so the aggregate is deliberately a small multiple: the feedback budget (4000 characters) is the real
+ * limit, and a list that covers every criterion is not a location, it is a second rubric.
+ */
+const MAX_AGGREGATED_DIAGNOSTICS = 6
+
+/** Append findings in order, de-duplicated, never exceeding the aggregate cap. */
+function mergeDiagnostics(target: Diagnostic[], seen: Set<string>, incoming: readonly Diagnostic[] | undefined): void {
+  for (const diagnostic of incoming ?? []) {
+    if (target.length >= MAX_AGGREGATED_DIAGNOSTICS) return
+    const key = diagnosticKey(diagnostic)
+    if (seen.has(key)) continue
+    seen.add(key)
+    target.push(diagnostic)
+  }
+}
 
 export interface CompareOptions {
   problem: string
@@ -70,6 +93,14 @@ export interface CompareResult {
   agreement: number
   /** Set when both sides were byte-identical: no model call was made and both sides score 0.5. */
   identical?: true
+  /**
+   * Verified findings the judge located, de-duplicated and capped.
+   *
+   * Empty is the normal case and means "nothing locatable was reported" — never "nothing is wrong".
+   * A score served from the cache carries none: replaying a finding from an older run would present a
+   * past observation as current evidence.
+   */
+  diagnostics: Diagnostic[]
 }
 
 export interface SelectOptions {
@@ -100,6 +131,8 @@ export interface SelectResult {
   judges: JudgeScore[]
   /** Set when every candidate was byte-identical: no pair was judged and every score is 0.5. */
   identical?: true
+  /** Findings the judges located, aggregated across every judged pair (see {@link CompareResult.diagnostics}). */
+  diagnostics: Diagnostic[]
 }
 
 function average(values: readonly number[]): number { return values.reduce((sum, value) => sum + value, 0) / (values.length || 1) }
@@ -286,7 +319,7 @@ export class VerifierEngine {
     }
   }
 
-  private async scoreOne(client: VerifierClientConfig, options: CompareOptions, candidateA: string, candidateB: string, criterion: Criterion, repeat: number, signal?: AbortSignal): Promise<{ scores: readonly [number, number]; usage: UsageStats; scoringMode: 'top-logprobs' | 'explicit-tag'; hit: boolean; channelFallback: boolean }> {
+  private async scoreOne(client: VerifierClientConfig, options: CompareOptions, candidateA: string, candidateB: string, criterion: Criterion, repeat: number, signal?: AbortSignal): Promise<{ scores: readonly [number, number]; usage: UsageStats; scoringMode: 'top-logprobs' | 'explicit-tag'; hit: boolean; channelFallback: boolean; diagnostics: Diagnostic[] }> {
     const ground = options.groundTruthNote ?? DEFAULT_GROUND_TRUTH_NOTE
     const prompt = buildPairwisePrompt(options.problem, candidateA, candidateB, criterion, ground, this.framing(options))
     const imageKey = options.images?.map(image => stableHash([image.mediaType, Buffer.from(image.data).toString('base64')]))
@@ -310,7 +343,9 @@ export class VerifierEngine {
         // Traced here, not in scoreOne(): a cache hit or a merged in-flight call makes no
         // model call, and a snapshot that showed one anyway would be a fabrication.
         options.trace?.({ label: (options.traceLabelPrefix ?? '') + criterion.name + ' repeat ' + (repeat + 1), channel: completion.scoringMode, prompt, output: completion.text, score: scoreA })
-        return { scoreA, scoreB, usage: completion.usage, scoringMode: completion.scoringMode, createdAt: Date.now() }
+        // Parsed against exactly what this prompt offered; anything unverifiable is dropped.
+        const diagnostics = parseDiagnostics(completion.text, { criteria: [criterion.name, criterion.id], evidence: PAIRWISE_EVIDENCE })
+        return { scoreA, scoreB, usage: completion.usage, scoringMode: completion.scoringMode, diagnostics, createdAt: Date.now() }
       } catch (error) {
         // The response came back and was billed, but carried no usable score. Keep its usage
         // on the error so the failed row reports known requests and tokens, not zero.
@@ -319,7 +354,7 @@ export class VerifierEngine {
       }
     }
     const cache = this.cache
-    if (cache === undefined) { const value = await create(); return { scores: [value.scoreA, value.scoreB], usage: value.usage, scoringMode: value.scoringMode, hit: false, channelFallback: fellBack } }
+    if (cache === undefined) { const value = await create(); return { scores: [value.scoreA, value.scoreB], usage: value.usage, scoringMode: value.scoringMode, hit: false, channelFallback: fellBack, diagnostics: value.diagnostics } }
     // Registration happens in the synchronous segment before any await, so a request
     // that arrives while the first one is still resolving its channel prediction
     // still merges instead of duplicating the model call. The flight table is shared
@@ -328,7 +363,9 @@ export class VerifierEngine {
     const outcome = await this.flights.run(dedupeKey, async () => cache.getOrCreate(keyForMode(await predictScoringChannel(client)), create, value => keyForMode(value.scoringMode)))
     const landed = outcome.value
     const reused = outcome.joined || landed.hit
-    return { scores: [landed.value.scoreA, landed.value.scoreB], usage: reused ? emptyUsage() : landed.value.usage, scoringMode: landed.value.scoringMode, hit: reused, channelFallback: reused ? false : fellBack }
+    // Findings ride along with the cache entry: the key is the rendered prompt, so they describe the
+    // very evidence that produced this score. An entry written before P04 simply has none.
+    return { scores: [landed.value.scoreA, landed.value.scoreB], usage: reused ? emptyUsage() : landed.value.usage, scoringMode: landed.value.scoringMode, hit: reused, channelFallback: reused ? false : fellBack, diagnostics: landed.value.diagnostics ?? [] }
   }
 
   private async mapLimited<T, R>(items: readonly T[], worker: (item: T) => Promise<R>): Promise<R[]> {
@@ -381,6 +418,8 @@ export class VerifierEngine {
       judges,
       agreement: 1,
       identical: true,
+      // No judge ran, so nothing was located: an informational tie has nothing to report.
+      diagnostics: [],
     }
   }
 
@@ -433,6 +472,7 @@ export class VerifierEngine {
               scoringMode: res.scoringMode,
               hit: res.hit,
               channelFallback: res.channelFallback,
+              diagnostics: res.diagnostics,
             }
           } catch (error) {
             return {
@@ -475,10 +515,15 @@ export class VerifierEngine {
       }
       const leafScoreA = median(successful.map(r => r.scoreA))
       const leafScoreB = median(successful.map(r => r.scoreB))
-      return { criterion, repeat, leafScoreA, leafScoreB, judgeResults }
+      return { criterion, repeat, leafScoreA, leafScoreB, judgeResults, diagnostics: successful.flatMap(r => r.diagnostics) }
     })
 
     const jobOutcomes = [...await run(warm), ...await run(rest)]
+    // Findings are located information, not a score: they are aggregated across criteria, repeats and
+    // judges but de-duplicated and capped, and they never enter the score arithmetic.
+    const diagnostics: Diagnostic[] = []
+    const diagnosticSeen = new Set<string>()
+    for (const row of jobOutcomes) mergeDiagnostics(diagnostics, diagnosticSeen, row.diagnostics)
 
     const byCriterion = criteria.map(criterion => {
       const rows = jobOutcomes.filter(row => row.criterion.id === criterion.id)
@@ -543,6 +588,7 @@ export class VerifierEngine {
       stats: this.finishStats(stats),
       judges,
       agreement,
+      diagnostics,
     }
   }
 
@@ -553,6 +599,7 @@ export class VerifierEngine {
     judgeErrors: Array<string | undefined>
     judgeCalls: number[]
     stats: RunStats
+    diagnostics: Diagnostic[]
   }> {
     const unique = [...new Map(pairs.map(pair => [pair[0] + ',' + pair[1], pair])).values()]
     // Aggregated inside each worker so a pair that fails still reports what the other pairs
@@ -563,10 +610,13 @@ export class VerifierEngine {
     const judgeErrors = new Array<string | undefined>(this.clients.length).fill(undefined)
     const judgeCalls = new Array<number>(this.clients.length).fill(0)
     const stats = blankStats()
+    const diagnostics: Diagnostic[] = []
+    const diagnosticSeen = new Set<string>()
     const recordPair = (a: number, b: number, result: CompareResult): void => {
       const pairKey = a + ',' + b
       rewards.set(pairKey, [result.scoreA, result.scoreB])
       mergeRunStats(stats, result.stats)
+      mergeDiagnostics(diagnostics, diagnosticSeen, result.diagnostics)
       for (let k = 0; k < this.clients.length; k++) {
         const js = result.judges[k]!
         judgeCalls[k] += js.calls
@@ -603,10 +653,10 @@ export class VerifierEngine {
         throw error
       }
     })
-    return { rewards, judgeRewards, judgeOk, judgeErrors, judgeCalls, stats: this.finishStats(stats) }
+    return { rewards, judgeRewards, judgeOk, judgeErrors, judgeCalls, stats: this.finishStats(stats), diagnostics }
   }
 
-  async track(problem: string, steps: readonly string[], checkpoints: readonly number[], repeats = 2, signal?: AbortSignal, images?: readonly VerifierImage[], trace?: DecisionTrace): Promise<{ scores: number[]; perRepeat: number[][]; calls: number; stats: RunStats; judges: JudgeScore[] }> {
+  async track(problem: string, steps: readonly string[], checkpoints: readonly number[], repeats = 2, signal?: AbortSignal, images?: readonly VerifierImage[], trace?: DecisionTrace): Promise<{ scores: number[]; perRepeat: number[][]; calls: number; stats: RunStats; judges: JudgeScore[]; diagnostics: Diagnostic[] }> {
     if (!steps.length || !checkpoints.length) throw new Error('llm-verifier: steps and checkpoints must not be empty')
     for (const checkpoint of checkpoints) if (!Number.isSafeInteger(checkpoint) || checkpoint < 1 || checkpoint > steps.length) throw new Error('llm-verifier: each checkpoint must be an integer between 1 and steps.length')
     const prompt = buildProgressPrompt(problem, steps, checkpoints)
@@ -628,11 +678,16 @@ export class VerifierEngine {
               // multiply the record past its budget, and the primary is what the verdict
               // reports.
               if (k === 0) trace?.({ label: 'progress repeat ' + (repeatIndex + 1) + '/' + repeats + (this.clients.length > 1 ? ' judge 1/' + this.clients.length : ''), channel: completion.scoringMode, prompt, output: completion.text, score: scores[scores.length - 1] })
+              // The prompt offered the checkpoint labels c1..cN and the task block as citable
+              // evidence; anything else the judge cites is dropped by the parser.
+              const labels = checkpoints.map((_, index) => 'c' + (index + 1))
+              const diagnostics = parseDiagnostics(completion.text, { checkpoints: labels, evidence: ['TASK', ...labels] })
               return {
                 k,
                 ok: true as const,
                 completion,
                 scores,
+                diagnostics,
               }
             } catch (error) {
               // The response came back and was billed; a failed progress parse must keep its usage.
@@ -677,14 +732,25 @@ export class VerifierEngine {
         throw firstFail.error
       }
 
-      return checkpoints.map((_, cIndex) => median(successful.map(r => r.scores[cIndex]!)))
+      const diagnostics: Diagnostic[] = []
+      const diagnosticSeen = new Set<string>()
+      for (const row of successful) mergeDiagnostics(diagnostics, diagnosticSeen, row.diagnostics)
+      return { scores: checkpoints.map((_, cIndex) => median(successful.map(r => r.scores[cIndex]!))), diagnostics }
     }
     // Every repeat sends the SAME prompt, so the first repeat warms the provider prefix cache for
     // the others; fanning all repeats out at once left every call cold. The repeat count is
     // unchanged — only the order, and therefore the cache hits, change.
     const runs: number[][] = []
-    if (repeatIndices.length > 0) runs.push(...await this.mapLimited(repeatIndices.slice(0, 1), runRepeat))
-    runs.push(...await this.mapLimited(repeatIndices.slice(1), runRepeat))
+    const diagnostics: Diagnostic[] = []
+    const diagnosticSeen = new Set<string>()
+    const collect = (outcomes: Array<{ scores: number[]; diagnostics: Diagnostic[] }>): void => {
+      for (const outcome of outcomes) {
+        runs.push(outcome.scores)
+        mergeDiagnostics(diagnostics, diagnosticSeen, outcome.diagnostics)
+      }
+    }
+    if (repeatIndices.length > 0) collect(await this.mapLimited(repeatIndices.slice(0, 1), runRepeat))
+    collect(await this.mapLimited(repeatIndices.slice(1), runRepeat))
 
     const scores = checkpoints.map((_, index) => average(runs.map(run => run[index]!)))
     const judges: JudgeScore[] = this.clients.map((client, k) => {
@@ -711,7 +777,7 @@ export class VerifierEngine {
       }
     })
 
-    return { scores, perRepeat: runs, calls: stats.calls, stats: this.finishStats(stats), judges }
+    return { scores, perRepeat: runs, calls: stats.calls, stats: this.finishStats(stats), judges, diagnostics }
   }
 
   /**
@@ -738,6 +804,7 @@ export class VerifierEngine {
       stats: blankStats(),
       judges: this.clients.map(client => ({ provider: client.provider, model: client.model, label: judgeLabel(client), ok: true, calls: 0, scores: [...scores], ranking: [...ranking] })),
       identical: true,
+      diagnostics: [],
     }
   }
 
@@ -779,6 +846,7 @@ export class VerifierEngine {
       calls: result.calls,
       stats: result.stats,
       judges,
+      diagnostics: result.diagnostics,
     }
   }
 
@@ -797,13 +865,13 @@ export class VerifierEngine {
         scores: [1],
         ranking: [0],
       }))
-      return { index: 0, best: options.candidates[0]!, scores: [1], ranking: [0], pivots: [0], comparisons: 0, calls: 0, stats: blankStats(), judges }
+      return { index: 0, best: options.candidates[0]!, scores: [1], ranking: [0], pivots: [0], comparisons: 0, calls: 0, stats: blankStats(), judges, diagnostics: [] }
     }
     if (options.candidates.length === 2) {
       // ringCycle(2) would judge the single unordered pair in both directions; play it
       // once, in the orientation orientPair() picks so the slot is not always candidate 0.
       const single = orientPair(0, 1)
-      const { rewards, judgeRewards, judgeOk, judgeErrors, judgeCalls, stats } = await this.scorePairs(options, [single], signal)
+      const { rewards, judgeRewards, judgeOk, judgeErrors, judgeCalls, stats, diagnostics } = await this.scorePairs(options, [single], signal)
       const wins = [0, 0]; const counts = [0, 0]
       accumulatePairs([single], rewards, wins, counts)
       const ranked = rankScores(wins, counts); const index = ranked[0]!.index
@@ -832,7 +900,7 @@ export class VerifierEngine {
           ranking: jRanked.map(v => v.index),
         }
       })
-      return { index, best: options.candidates[index]!, scores: wins.map((value, candidate) => value / (counts[candidate] || 1)), ranking: ranked.map(value => value.index), pivots: [], comparisons: 1, calls: stats.calls, stats, judges }
+      return { index, best: options.candidates[index]!, scores: wins.map((value, candidate) => value / (counts[candidate] || 1)), ranking: ranked.map(value => value.index), pivots: [], comparisons: 1, calls: stats.calls, stats, judges, diagnostics }
     }
     const ring = ringCycle(options.candidates.length, options.seed ?? 0)
     const ringScores = await this.scorePairs(options, ring, signal)
@@ -894,7 +962,11 @@ export class VerifierEngine {
       }
     })
 
-    return { index, best: options.candidates[index]!, scores: Array.from({ length: options.candidates.length }, (_, candidate) => wins[candidate]! / (counts[candidate] || 1)), ranking: ranked.map(value => value.index), pivots, comparisons: ring.length + rounds.length, calls: stats.calls, stats: this.finishStats(stats), judges }
+    const diagnostics: Diagnostic[] = []
+    const diagnosticSeen = new Set<string>()
+    mergeDiagnostics(diagnostics, diagnosticSeen, ringScores.diagnostics)
+    mergeDiagnostics(diagnostics, diagnosticSeen, roundScores.diagnostics)
+    return { index, best: options.candidates[index]!, scores: Array.from({ length: options.candidates.length }, (_, candidate) => wins[candidate]! / (counts[candidate] || 1)), ranking: ranked.map(value => value.index), pivots, comparisons: ring.length + rounds.length, calls: stats.calls, stats: this.finishStats(stats), judges, diagnostics }
   }
 }
 

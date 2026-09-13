@@ -442,7 +442,7 @@ task ─┬─ 生成 N 份候选（会话模型，temperature 1.0，maxTokens 1
 ```text
 3 个以上同组真实候选 → verifier_select → steering 实施胜出候选
 恰好 2 个同组真实候选 → verifier_compare → steering 实施胜出候选
-已有多个进度快照/检查点 → verifier_track → 最新检查点未达阈值则 steering 继续
+已有多个进度快照/检查点 → verifier_track → 观察记录：可定位的未完成项才 steering，否则直接转最终验收
 候选决策和进度阶段完成 → verifier_current_session → 最终交付验收
 ```
 
@@ -521,6 +521,21 @@ Workflow 候选在被记录后的**下一步主模型请求之前**就会评审�
 **记账**：原回复由宿主计费一次；插件单独把**额外生成 + 裁判**合并成**一条**统计行（`verifier_compare`，phase `process`，`route.trigger = llm-stream`），并在 `route` 观测里区分 `replayed`（`original` / `candidate` / `none`）、`generatedCalls`、`judgeCalls` 与 `sameCandidate`。备选胜出只代表「这次替换了」，**不代表**已经执行或质量提升。过程周期一旦成功比较就会设置该任务的最终验收要求；即使保留原候选也不表示任务完成。
 
 **已知代价**：输出要等原回复完成（可能还要等一次生成与比较）才可见，这段串行等待计入延迟；这部分延迟与调用成本必须由真实任务对照评估，不能由钩子存在推导出来。
+
+### 定位诊断（Findings）与 smart 调度（P04）
+
+判官在**同一次调用**里可以额外给出**至多 3 条**定位诊断（不额外购买「解释模型」）：
+
+```text
+<finding criterion="Specification Adherence" evidence="A" action="run the parser test">the header is never validated</finding>
+```
+
+- 契约写在判据之后、评分标记之前，所以既有 `<score_A>` / `<c1>` 解析完全不受影响（**评分仍 fail closed**）。
+- **引用必须真的出现过**：`evidence` 只能是该提示词渲染过的 `TASK` / `A` / `B`（比较）或 `TASK` / `c1..cN`（进度）；`criterion` 必须是本次评分的那条判据（名称或 id），`checkpoint` 必须是渲染过的检查点标签。属性多余、引用不存在、正文为空、目标缺失的条目**一律丢弃**，绝不回显给 Agent。
+- 解析是 **fail-soft**：丢条目不会让整次验收失败（`<score_A>` 缺失仍然报错）。一条都没有时，反馈明确写「判官没有给出可定位的原因」，**不编造原因**；抓取到的条目会连同「criterion/checkpoint + evidence + 建议验证动作」一起进入最终验收反馈与 track 的续步消息（整体仍受 4000 字符上限约束）。
+- 命中评分缓存时诊断随缓存条目一起返回（缓存键就是渲染后的提示词，条目只回答它自己那份证据）。
+
+**smart 调度**（strict 不引入）：`track` 从「判定」降级为「观察」——最新检查点达到阈值，或分数偏低但**没有任何可定位诊断**时，同一停止边界不再发一句泛化的「继续未完成的工作」，而是直接进入最终验收（该边界上真正的判定）；有可定位诊断时只发这些诊断。低进度**不会**跳过必须进行的最终验收，预算/取消/freshness 检查一律沿用原路径；smart 下若该边界既不满足验收资格也拿不到诊断（没有可交给门控的东西），仍会保留原来的续步提示，不会让任务失去任何指引。这项调度是**实验性**的：是否长期保留由 P05 的真实对照决定。
 
 ## 缓存、重试与遥测统计
 
