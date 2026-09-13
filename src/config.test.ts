@@ -391,6 +391,24 @@ describe('config - settings payload seam', () => {
     expect(resolved.judges.map(judge => judge.maxTokens)).toEqual([32768, 32768, 32768, 32768])
   })
 
+  it('carries the criteria preset across the settings schema, JSON boundary and resolveConfig', () => {
+    // The host validates the stored section with the schema and the RPC carries plain JSON, so the
+    // new keys must survive Config -> JSON -> Config -> resolveConfig, not just resolveConfig.
+    const payload = JSON.parse(JSON.stringify(Config({ provider: 'deepseek-official', model: 'deepseek-flash', criteriaPreset: 'ops', criteriaFile: ' criteria/ops.md ' })))
+    expect(payload.criteriaPreset).toBe('ops')
+    expect(payload.criteriaFile).toBe(' criteria/ops.md ')
+    const resolved = resolveConfig(payload)
+    expect(resolved.criteriaPreset).toBe('ops')
+    // The schema preserves what the user typed; resolveConfig is what trims.
+    expect(resolved.criteriaFile).toBe('criteria/ops.md')
+    // Every selectable value round-trips, and unset stays on the historical default.
+    for (const preset of ['coding', 'debug', 'research', 'ops', 'writing', 'custom'] as const) {
+      expect(resolveConfig(Config({ criteriaPreset: preset })).criteriaPreset).toBe(preset)
+    }
+    expect(Config({}).criteriaPreset).toBe('coding')
+    expect(resolveConfig({}).criteriaFile).toBe('')
+  })
+
   it('rejects the section the settings page blocks: a duplicate of the primary judge', () => {
     const drafts: ExtraJudgeDraft[] = [{ provider: 'deepseek-official', model: 'deepseek-flash' }]
     const payload = JSON.parse(JSON.stringify(serializeExtraJudges(drafts))) as NonNullable<Config['extraJudges']>

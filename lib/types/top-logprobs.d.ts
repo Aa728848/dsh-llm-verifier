@@ -1,6 +1,25 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { CompletionLogprobs } from './core.ts';
 import type { UsageStats, VerifierImage } from './caller.ts';
+/**
+ * The two scoring channels are the logprob expectation (this file) and the explicit tag reply
+ * (caller.ts). Upstream has a THIRD one worth knowing about before inventing anything new:
+ * when an open-model server does not emit the score tags at all, it prefills the tag itself and
+ * constrains the next token to the twenty scale letters, then reads that token's distribution
+ * (llm-as-a-verifier `_score_tags_by_prefill`: vLLM/SGLang `continue_final_message` plus
+ * `structured_outputs`). That turns ANY OpenAI-compatible server into a distribution-scoring
+ * judge, which is strictly more informative than our explicit-tag channel's single sampled letter
+ * — it is why upstream can run K=1 and we average repeats instead.
+ *
+ * NOT implemented here, deliberately: the direct transport below speaks to whichever
+ * OpenAI-compatible endpoint a provider declares, and the prefill/grammar parameters are
+ * vLLM/SGLang extensions that a normal endpoint rejects. Two preconditions before adding it:
+ * (1) the DSH stream adapter exposes prefill or a constrained-decoding option, or the route is
+ * known to be a local inference server; (2) the capability probe can detect support at runtime and
+ * degrade to explicit tags — NEVER keyed off a provider or model name (AGENTS.md rule 7). If it
+ * lands, it belongs in `callTopLogprobs` as an opt-in third mode, and `autoTrackRepeats` could
+ * then drop.
+ */
 export interface TopLogprobRoute {
     baseURL: string;
     apiKey?: string;

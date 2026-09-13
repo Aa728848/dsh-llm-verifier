@@ -1,6 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { apply } from './index.ts'
+
+const tempDirs: string[] = []
+function tempDir(): string { const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-assembly-')); tempDirs.push(dir); return dir }
+afterEach(() => { for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 
 /**
  * Assembly-level contract for the four registered tools.
@@ -9,7 +16,7 @@ import { apply } from './index.ts'
  * reject a model-driven call BEFORE any model/topic work happens, both of which
  * were previously uncovered (every other module has a sibling spec).
  */
-function assemble(config: Record<string, unknown> = {}) {
+function assemble(config: Record<string, unknown> = {}, options: { root?: string; initiator?: unknown } = {}) {
   const tools = new Map<string, { output: { schema: { properties: Record<string, unknown> } }; execute: (args: unknown, exec: unknown) => Promise<unknown> }>()
   const warnings: string[] = []
   const rpc = new Map<string, (endpoint: string, payload: unknown) => unknown>()
@@ -18,9 +25,9 @@ function assemble(config: Record<string, unknown> = {}) {
     get() { return undefined },
     logger: { warn(value: unknown) { warnings.push(String(value)) }, info() {}, error() {}, debug() {} },
     tools: { register(definition: never) { tools.set((definition as unknown as { name: string }).name, definition as never) } },
-    agents: { currentInitiator() { return undefined } },
+    agents: { currentInitiator() { return options.initiator } },
     llm: { resolveCallConfig: async () => ({}) },
-    attachments: {}, sessionPersistence: {},
+    attachments: {}, sessionPersistence: { root: options.root ?? tempDir() },
     // Older hosts answer statistics over the plugin RPC channel; capturing the handler
     // lets the payload contract be tested without any host I/O.
     connection: { rpc: { handle(channel: string, handler: (endpoint: string, payload: unknown) => unknown) { rpc.set(channel, handler) } } },
@@ -64,6 +71,42 @@ describe('plugin assembly', () => {
     expect(await handler!('statistics', { fromMs: 10, toMs: 5 })).toMatchObject({ ok: false, error: { message: expect.stringMatching(/finite and increasing/) } })
     expect(await handler!('statistics', 'not-an-object')).toMatchObject({ ok: false, error: { message: expect.stringMatching(/must be an object/) } })
     expect(await handler!('other', {})).toMatchObject({ ok: false, error: { message: expect.stringMatching(/unknown llm-verifier endpoint/) } })
+  })
+
+  it('dispatches the judge probe with no agent, with the coding rubric by default, and reports judge failures', async () => {
+    // No initiator: the probe must say why it cannot run instead of pretending to have probed.
+    const anonymous = assemble()
+    expect(await anonymous.rpc.get('/llm-verifier')!('probe', undefined)).toMatchObject({ ok: false, error: { message: expect.stringMatching(/agent-owned topic/) } })
+
+    // With an agent the probe runs for real: the stub has no llm.stream, so the single judge must
+    // come back as a REPORTED failure — not a crash, and not a silent success.
+    const { rpc } = assemble({}, { initiator: exec.agent })
+    const outcome = await rpc.get('/llm-verifier')!('probe', undefined) as { ok: boolean; value: { judges: Array<Record<string, unknown>>; rubric: Record<string, unknown> } }
+    expect(outcome.ok).toBe(true)
+    expect(outcome.value.rubric).toMatchObject({ source: 'coding', count: 3 })
+    expect(outcome.value.judges).toHaveLength(1)
+    expect(outcome.value.judges[0]).toMatchObject({ ok: false })
+  })
+
+  it('resolves the configured rubric through the probe, and degrades a broken custom file instead of failing', async () => {
+    const research = assemble({ criteriaPreset: 'research' }, { initiator: exec.agent })
+    const researched = await research.rpc.get('/llm-verifier')!('probe', undefined) as { value: { rubric: Record<string, unknown> } }
+    expect(researched.value.rubric).toMatchObject({ source: 'research', count: 3 })
+
+    // A custom file that does not exist must fall back to coding WITH the reason, not throw.
+    const missing = assemble({ criteriaPreset: 'custom', criteriaFile: join(tempDir(), 'nope.md') }, { initiator: exec.agent })
+    const degraded = await missing.rpc.get('/llm-verifier')!('probe', undefined) as { ok: boolean; value: { rubric: Record<string, unknown> } }
+    expect(degraded.ok).toBe(true)
+    expect(degraded.value.rubric).toMatchObject({ source: 'fallback', count: 3 })
+    expect(String(degraded.value.rubric.error)).toMatch(/ENOENT|no such file/u)
+
+    // A real file is parsed, and its note and criteria reach the probe. The stub judge then fails,
+    // but only AFTER the rubric was resolved — which is what this asserts.
+    const file = join(tempDir(), 'rubric.md')
+    writeFileSync(file, '# Rubric\n\n## Criteria\n\n### Only One\n\nScore the only criterion.\n')
+    const custom = assemble({ criteriaPreset: 'custom', criteriaFile: file }, { initiator: exec.agent })
+    const parsed = await custom.rpc.get('/llm-verifier')!('probe', undefined) as { value: { rubric: Record<string, unknown> } }
+    expect(parsed.value.rubric).toMatchObject({ source: 'custom', count: 1 })
   })
 
   it('survives an unavailable settings service and an unregistered connection', () => {
