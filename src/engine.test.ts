@@ -993,10 +993,10 @@ describe('review stage', () => {
  * Located findings have to name the object the CALLER knows, not the slot of one internal round.
  */
 describe('finding identity across slots and pairs', () => {
-  /** A judge that always locates the same defect in slot A of whatever it was shown. */
-  function findingStream(finding: string): (options: any) => AsyncIterable<any[]> {
+  /** A judge that always locates the same defect in one slot of whatever it was shown. */
+  function findingStream(finding: string, evidence = 'A'): (options: any) => AsyncIterable<any[]> {
     return function () {
-      const text = '<finding criterion="' + DEFAULT_CRITERIA[0]!.name + '" evidence="A">' + finding + '</finding>\n<score_A> T </score_A>\n<score_B> A </score_B>'
+      const text = '<finding criterion="' + DEFAULT_CRITERIA[0]!.name + '" evidence="' + evidence + '">' + finding + '</finding>\n<score_A> T </score_A>\n<score_B> A </score_B>'
       return streamOf(chunks(text))
     }
   }
@@ -1029,6 +1029,24 @@ describe('finding identity across slots and pairs', () => {
     expect(result.diagnostics.length).toBeGreaterThan(0)
     // A selection has no A/B slots the caller ever saw: every finding must name a candidate.
     for (const diagnostic of result.diagnostics) expect(diagnostic.evidence).toMatch(/^candidate [123]$/)
+  })
+
+  it('maps a deduplicated selection finding back onto the caller candidate numbering', async () => {
+    // [PLAN-A, PLAN-A, PLAN-B] is deduplicated to [PLAN-A, PLAN-B] before the tournament, and
+    // orientPair(0, 1) keeps that order, so slot B is the caller's THIRD candidate. The scores were
+    // already expanded back onto the caller's list; without the same remap the finding claimed
+    // "candidate 2", which is a DIFFERENT (duplicate) entry of the caller's list.
+    const engine = new VerifierEngine(clientConfig({ llm: { stream: findingStream('missing verification', 'B') } as any }), 4)
+    const result = await engine.select({
+      problem: 'Pick the better plan.',
+      candidates: ['PLAN-A', 'PLAN-A', 'PLAN-B'],
+      criteria: [DEFAULT_CRITERIA[0]!],
+      repeats: 1,
+    })
+    expect(result.diagnostics).toHaveLength(1)
+    expect(result.diagnostics[0]!.evidence).toBe('candidate 3')
+    // The compressed candidates were expanded too: a score exists for every caller entry.
+    expect(result.scores).toHaveLength(3)
   })
 })
 

@@ -234,6 +234,23 @@ function locatePairDiagnostic(diagnostic: Diagnostic, a: number, b: number): Dia
   if (diagnostic.evidence === 'B') return { ...diagnostic, evidence: 'candidate ' + (b + 1) }
   return diagnostic
 }
+
+/**
+ * Renumber one deduplicated selection's finding onto the caller's original candidate list.
+ *
+ * {@link locatePairDiagnostic} numbers the DISTINCT candidates the tournament judged; the caller
+ * passed a list that may repeat entries, so `candidate 2` of the compressed list can be
+ * `candidate 3` of the caller's. Anything that is not a candidate reference is left alone.
+ * @param diagnostic - one aggregated finding.
+ * @param originals - distinct index -> the caller's first index of that candidate.
+ * @returns The finding, renumbered when it names a candidate.
+ */
+function remapCandidateDiagnostic(diagnostic: Diagnostic, originals: readonly number[]): Diagnostic {
+  const match = /^candidate (\d+)$/u.exec(diagnostic.evidence)
+  if (match === null) return diagnostic
+  const original = originals[Number(match[1]) - 1]
+  return original === undefined ? diagnostic : { ...diagnostic, evidence: 'candidate ' + (original + 1) }
+}
 function unorderedPair(a: number, b: number): string { return a < b ? a + ',' + b : b + ',' + a }
 
 /**
@@ -847,11 +864,13 @@ export class VerifierEngine {
    */
   private async selectUnique(options: SelectOptions, signal?: AbortSignal): Promise<SelectResult> {
     const unique: string[] = []
+    /** unique index -> the caller's FIRST index of that candidate (the inverse of `representative`). */
+    const originals: number[] = []
     const representative: number[] = []
     const seen = new Map<string, number>()
     for (const candidate of options.candidates) {
       let index = seen.get(candidate)
-      if (index === undefined) { index = unique.length; unique.push(candidate); seen.set(candidate, index) }
+      if (index === undefined) { index = unique.length; unique.push(candidate); seen.set(candidate, index); originals.push(representative.length) }
       representative.push(index)
     }
     const result = await this.select({ ...options, candidates: unique }, signal)
@@ -862,6 +881,12 @@ export class VerifierEngine {
       const judgeScores = expand(judge.scores)
       return { ...judge, scores: judgeScores, ...(judge.ranking === undefined ? {} : { ranking: rankByScore(judgeScores) }) }
     })
+    // The tournament numbered the DISTINCT candidates. The caller never saw that list, so a finding
+    // has to be renumbered onto the original indices exactly like the scores and rankings above —
+    // otherwise "candidate 2" of a deduplicated list points at a different entry of the caller's.
+    const diagnostics: Diagnostic[] = []
+    const diagnosticSeen = new Set<string>()
+    for (const diagnostic of result.diagnostics) mergeDiagnostics(diagnostics, diagnosticSeen, [remapCandidateDiagnostic(diagnostic, originals)])
     return {
       index: options.candidates.indexOf(result.best),
       best: result.best,
@@ -872,7 +897,7 @@ export class VerifierEngine {
       calls: result.calls,
       stats: result.stats,
       judges,
-      diagnostics: result.diagnostics,
+      diagnostics,
     }
   }
 

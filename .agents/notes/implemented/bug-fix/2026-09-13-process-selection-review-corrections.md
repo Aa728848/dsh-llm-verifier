@@ -74,3 +74,32 @@ Status: implemented
 - `PairwisePromptOptions.context` 是通用能力：任何 `compare`/`select` 调用（含 `best_of_n` 之外的自定义编排）都可以传上下文；省略时提示词与缓存键逐位不变，**不需要**升 `cache.ts` 的 `version`（`promptHash` 覆盖渲染后的文本）。
 - 测试：`core.test.ts`（context 块、nonce、逐位兼容、`swapDiagnosticEvidence`）、`engine.test.ts`（换位轮诊断映射、锦标赛候选身份）、`router.test.ts`（每任务一次、**同一会话第二个任务可购买**、受路由额度约束）、`process-selection.test.ts`（原子动作、实测总量、脱敏、上下文包、开关关闭/取消/清理在途、生成与裁判失败用量）、`index.test.ts`（真实钩子：第二个任务购买、判官提示词已脱敏且含约束/失败证据/工具定义、胜者原样回放敏感串）。`pnpm run verify:release` 与 `pnpm run typecheck:local` 均通过。
 - 仍未完成（与本批次无关，保持记录）：P05 的真实标注样本与四组对照、M0 的目标 0.1.5 发行版真机契约验证、并发双 Agent 串票实测、图片块回放的无损性证明。
+
+## 补充修订（第二轮复核）
+
+第一轮修正合并后，同一复核流程又复现了三处遗漏：
+
+1. **异步等待之后的开关检查缺失。** 第一轮只在进入 `handle` 时、以及生成/比较之后检查活状态，但 `policy()`、`store.begin()` 与 `report()` 都是异步的。复现一：在 `policy`/`store.begin` 的等待期间关闭开关，仍会新增一次备选生成。复现二：在 `report` 的等待期间关闭开关，此时**还没有任何块交给宿主**，却仍回放备选。
+2. **长轨迹仍然挤掉关键上下文。** 三节上下文拼接后只做一次限长，而轨迹是时间序：一次自前向后的截断等于保留**最旧**的内容、删掉最近的失败运行、系统约束与工具定义，并且仍返回 `ok: true`。
+3. **去重后的诊断编号没有还原。** `selectUnique` 把分数与排名展开回调用方的原候选列表，却直接返回压缩列表的 `diagnostics`：输入 `[A, A, B]` 时 B 的缺陷被写成 `candidate 2`（压缩列表的第二项），实际应是 `candidate 3`。
+
+### 决定
+
+- **在每个异步等待之后重读活状态。** `handle` 在 `store.begin` 成功后、**第一次新增模型调用之前**再调一次 `staleReason()`（命中记 `generatedCalls: 0` 并回放原回复）；在 `await this.report(...)` 之后、**首个 `yield` 之前**再调一次，命中就回放原回复并补一条告警。后一处无法同时改写已经写就的统计行——统计行描述的是"做出了什么决策"，告警描述的是"该决策没有被交付"；这一取舍写进了 AGENTS。
+- **三节各自分摊预算（`boundContextSection`）。** 标签与分隔符的真实开销先从上下文预算里扣除，余量用 `itemBudget(节数, maxItemChars, 余量)` 均分；执行证据保留**尾部**并附省略说明，工具定义保留开头；`REQUEST CONSTRAINTS` 先脱敏、再按**脱敏后**长度与分得份额比较，超出即 `ok: false`（约束是判断依据，不是可裁剪的参考材料）。各分节结果保证 ≤ 份额，因此总量检查成为纯断言。
+- **`selectUnique` 补一次身份映射。** 构造 `originals`（去重索引 → 调用方首个索引），聚合前用 `remapCandidateDiagnostic()` 把 `candidate N` 改写为原列表编号并重新按 `diagnosticKey` 去重。
+
+### 备选方案
+
+1. **在第一次检查之后就把 phase 控制器注册到更早的位置（连 `policy()` 之前），靠 abort 覆盖这些窗口。** 不采用（本轮）：注册点前移会让 `no-process-budget`/`store-unavailable` 这些提前 return 的路径需要额外的清理分支，而显式的 `staleReason()` 检查更直接、可单测；abort 通道已经保留给设置变更与 `agent/disposed`。
+2. **把统计行推迟到首个 `yield` 之后再写。** 不采用。`report` 本身就是那个异步等待，把它移到 `yield` 之后等于让"已交付"的行依赖宿主是否把生成器抽干。
+3. **靠"再写一条更正的统计行"来保持记录一致。** 不采用。同一周期会出现两行，看板与离线汇总都要额外规则才能读；一条告警已足够说明"记录了决策但没有交付"。
+4. **约束超预算时只截断并注明。** 不采用。候选是拿这份（被裁剪的）约束判出来的，裁剪本身会改变结论，回退原回复是唯一不误导的选择。
+5. **三节共享一次截断，但把轨迹放到最后。** 不采用。顺序变化不改本质：任一节都可能独占全部预算，而约束恰恰是最不该被挤掉的一节。
+6. **在 `select` 里直接返回调用方编号（把 `originals` 下沉到 `scorePairs`）。** 不采用。`scorePairs` 只认识它自己的候选数组，去重是 `selectUnique` 一层的事实，映射应留在知道两个列表的那一层。
+
+### 验证
+
+- `process-selection.test.ts`：长轨迹保留 `RECENT-FAILURE`、旧开头与约束/工具定义同时可见；约束超份额时回退；`policy` 等待期间关闭开关不生成；`store.begin` 等待期间关闭开关不生成；`report`(`store.finish`) 等待期间关闭开关时回放原回复并告警（该行仍记 `candidate-selected`，因为决策确实做出过）。
+- `engine.test.ts`：`[PLAN-A, PLAN-A, PLAN-B]` 的槽位 B 缺陷编号为 `candidate 3`（去重前的位置），三个不同候选的编号回归不变。
+- `pnpm run verify:release`（typecheck + 测试 + 重建 `lib/`）与 `pnpm run typecheck:local` 通过；重建后 `lib/` 与源码零差异。

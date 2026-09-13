@@ -263,6 +263,34 @@ export function buildAlternativeRequest(options: GenerateOptions, signal: AbortS
  * @param budget - characters this candidate may occupy.
  * @returns The rendered block body.
  */
+/** Section labels of the process comparison's `CONTEXT` block, in reading order. */
+const EVIDENCE_LABEL = 'RECENT EXECUTION EVIDENCE'
+const CONSTRAINTS_LABEL = 'REQUEST CONSTRAINTS'
+const TOOLS_LABEL = 'AVAILABLE TOOLS'
+
+/**
+ * Bound ONE optional context section inside its own share of the comparison budget.
+ *
+ * The execution trace is chronological, so its HEAD is the OLDEST material: a single truncation of
+ * the joined context threw the recent failure runs away and kept a stale opening — the exact
+ * opposite of what the judge needs. The trace therefore keeps its most RECENT characters; the tool
+ * digest keeps its beginning, which is where the tools the next action may call live.
+ * @param label - the section's label.
+ * @param body - the section's redaction-pending body.
+ * @param share - characters this section may occupy, omission notice included.
+ * @param sanitize - redact + bound one piece of untrusted text.
+ * @returns The bounded body, never longer than `share`.
+ */
+function boundContextSection(label: string, body: string, share: number, sanitize: (text: string, maxChars: number) => string): string {
+  if (share < 1) return ''
+  if (label !== EVIDENCE_LABEL || body.length <= share) return sanitize(body, share)
+  const notice = '[Earlier ' + (body.length - share) + ' characters omitted; showing the most recent evidence]\n'
+  if (notice.length >= share) return body.slice(-share)
+  const recent = sanitize(body.slice(-(share - notice.length)), share - notice.length)
+  const composed = notice + recent
+  return composed.length <= share ? composed : composed.slice(0, Math.max(1, share - 1)) + '…'
+}
+
 /** Fixed labels of one rendered candidate view; they count against the measured budget. */
 const CANDIDATE_ACTIONS_HEADER = 'Tool calls:\n'
 const CANDIDATE_TEXT_HEADER = '\n\nReply text:\n'
@@ -347,22 +375,53 @@ export function buildProcessView(input: ProcessViewInput): ProcessView {
   }
   const task = input.sanitize(input.task, input.maxItemChars).trim()
   if (task === '') return { ok: false, reason: 'the task statement is empty after redaction' }
-  const sections: string[] = []
-  if (input.evidence !== undefined && input.evidence.trim() !== '') sections.push('RECENT EXECUTION EVIDENCE:\n' + input.evidence.trim())
-  if (input.constraints !== undefined && input.constraints.trim() !== '') sections.push('REQUEST CONSTRAINTS:\n' + input.constraints.trim())
-  if (input.tools !== undefined && input.tools.trim() !== '') sections.push('AVAILABLE TOOLS:\n' + input.tools.trim())
-  const context = sections.length === 0 ? undefined : input.sanitize(sections.join('\n\n'), input.maxItemChars).trim()
+  const contextCap = input.maxInputChars - task.length
+  if (contextCap < 0) {
+    return { ok: false, reason: 'the task alone is ' + task.length + ' characters against a ' + input.maxInputChars + '-character total; replaying the original reply' }
+  }
+  const sections: Array<{ label: string; body: string }> = []
+  const evidence = input.evidence === undefined ? '' : input.evidence.trim()
+  const constraints = input.constraints === undefined ? '' : input.constraints.trim()
+  const tools = input.tools === undefined ? '' : input.tools.trim()
+  if (evidence !== '') sections.push({ label: EVIDENCE_LABEL, body: evidence })
+  if (constraints !== '') sections.push({ label: CONSTRAINTS_LABEL, body: constraints })
+  if (tools !== '') sections.push({ label: TOOLS_LABEL, body: tools })
+  // Every section gets its OWN share of the context budget, plus the exact label/separator overhead:
+  // truncating the joined body (the old behaviour) let a long chronological trace eat the whole
+  // budget from the FRONT and delete the recent failure runs, the constraints and the tool
+  // definitions — the judge then scored the task with none of the material this cycle exists for.
+  const overhead = sections.reduce((sum, section) => sum + section.label.length + 2, 0) + 2 * Math.max(0, sections.length - 1)
+  const share = sections.length === 0 ? 0 : itemBudget(sections.length, input.maxItemChars, Math.max(0, contextCap - overhead))
+  // One character of headroom over the per-item cap: a piece the sanitizer had to truncate is
+  // therefore still longer than the cap, so a truncated constraint can never pass for a complete one.
+  const atomicCap = Math.max(1, Math.floor(input.maxItemChars)) + 1
+  const rendered: string[] = []
+  for (const section of sections) {
+    if (section.label === CONSTRAINTS_LABEL) {
+      // The constraints the request was made under are NOT optional context: a candidate judged
+      // against a clipped constraint set is judged against the clipping. Redact first, then compare
+      // the REDACTED length — redaction can lengthen a body — and refuse the cycle when it is over.
+      const redacted = input.sanitize(section.body, atomicCap)
+      if (redacted.length > share) {
+        return { ok: false, reason: 'the request constraints need ' + redacted.length + ' characters but the process comparison can give them ' + share + '; replaying the original reply' }
+      }
+      rendered.push(section.label + ':\n' + redacted)
+      continue
+    }
+    rendered.push(section.label + ':\n' + boundContextSection(section.label, section.body, share, input.sanitize))
+  }
+  const context = rendered.length === 0 ? undefined : rendered.join('\n\n').trim()
   const fixed = task.length + (context === undefined ? 0 : context.length)
   if (fixed > input.maxInputChars) {
-    return { ok: false, reason: 'the task and its constraints need ' + fixed + ' characters but the process comparison budget is ' + input.maxInputChars + '; replaying the original reply' }
+    return { ok: false, reason: 'the task and its context need ' + fixed + ' characters but the process comparison budget is ' + input.maxInputChars + '; replaying the original reply' }
   }
   const perCandidate = itemBudget(2, input.maxItemChars, input.maxInputChars - fixed)
   // One character of headroom over the per-item cap: a piece the sanitizer had to truncate is
   // therefore still longer than the per-item cap, so it can never pass for a complete action.
-  const atomicCap = Math.max(1, Math.floor(input.maxItemChars)) + 1
+  const atomicCapForCandidate = atomicCap
   const render = (candidate: { text: string; actions: readonly string[] }): string | undefined => renderCandidateView({
-    text: input.sanitize(candidate.text, atomicCap),
-    actions: candidate.actions.map(action => input.sanitize(action, atomicCap)),
+    text: input.sanitize(candidate.text, atomicCapForCandidate),
+    actions: candidate.actions.map(action => input.sanitize(action, atomicCapForCandidate)),
   }, perCandidate)
   const candidateA = render(input.original)
   if (candidateA === undefined) return { ok: false, reason: 'candidate A has more tool-call text than the ' + perCandidate + '-character candidate budget; replaying the original reply' }
@@ -699,6 +758,16 @@ export class ProcessSelector {
     if (options.signal?.aborted) linkAbort()
     options.signal?.addEventListener('abort', linkAbort, { once: true })
     try {
+      // The policy read and the cycle-log write are BOTH async: the switch may have been turned off,
+      // the turn cancelled or the task replaced while they were in flight. Check again here — before
+      // the first added model call — because the check that admitted the reservation is already stale.
+      const staleBeforeGeneration = this.staleReason(intent, phase)
+      if (staleBeforeGeneration !== undefined) {
+        router.fail(intent.agent as RoutedAgent, reservation, false)
+        for (const chunk of original) yield chunk
+        await this.report({ intent, reservation, observation, startedAt, outcome: staleBeforeGeneration, replayed: 'original', generatedCalls: 0, judgeCalls: 0, sameCandidate: false, usage: blankProcessStats(), ...(staleBeforeGeneration === 'canceled' ? { error: 'the process-selection phase was cancelled' } : {}) })
+        return
+      }
       let alternative: BufferedCandidate
       const request = buildAlternativeRequest(options, phase.signal)
       this.internal.add(request as object)
@@ -823,9 +892,22 @@ export class ProcessSelector {
       const replaced = compared.winner === 'B'
       observation.replayed = replaced ? 'candidate' : 'original'
       await this.report({ intent, reservation, observation, startedAt, outcome: replaced ? 'candidate-selected' : compared.winner === 'tie' ? 'tie' : 'original-selected', replayed: replaced ? 'candidate' : 'original', generatedCalls: 1, judgeCalls: compared.calls, sameCandidate: false, usage, compare: compared })
-      // Once the decision is recorded the winner is replayed as ONE piece: a reply is never switched
-      // halfway through because the settings changed during the reveal.
-      if (replaced) { for (const chunk of alternative.chunks) yield chunk; return }
+      // The report awaited the cycle log and the statistics row, so re-read the live state once more
+      // IMMEDIATELY before the first chunk leaves this generator: nothing has been yielded yet, and a
+      // switch turned off (or a cancellation) during the accounting must still leave the host with the
+      // original reply. The row above describes the decision; this is what the host actually receives.
+      if (replaced) {
+        const staleBeforeReplay = this.staleReason(intent, phase)
+        if (staleBeforeReplay !== undefined) {
+          this.deps.logger.warn('llm-verifier process selection: the selected alternative was recorded but the cycle became ' + staleBeforeReplay + ' before its first chunk; replaying the original reply')
+          for (const chunk of original) yield chunk
+          return
+        }
+        // Once the first chunk is out the winner is replayed as ONE piece: a reply is never switched
+        // halfway through because the settings changed during the reveal.
+        for (const chunk of alternative.chunks) yield chunk
+        return
+      }
       for (const chunk of original) yield chunk
     } finally {
       clearTimeout(timer)

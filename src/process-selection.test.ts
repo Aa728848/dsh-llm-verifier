@@ -203,6 +203,36 @@ describe('bounded process comparison view', () => {
     expect(total).toBeLessThanOrEqual(1000)
   })
 
+  it('keeps the recent failure, the constraints and the tools when the trace is long', () => {
+    // The old behaviour truncated the JOINED context from the front, so a long chronological trace
+    // deleted the failure runs that triggered the cycle, the request constraints and the tool
+    // definitions — and still returned ok:true. Each section now owns a share of the budget and the
+    // trace keeps its RECENT characters.
+    const view = buildProcessView({
+      ...base,
+      task: 't',
+      maxItemChars: 400,
+      maxInputChars: 2000,
+      evidence: 'OLD-STALE-BEGINNING ' + 'x'.repeat(3000) + ' RECENT-FAILURE',
+      constraints: 'Never touch production.',
+      tools: renderToolDigest([{ name: 'pwsh', description: 'Run a command' }]),
+    })
+    expect(view.ok).toBe(true)
+    if (!view.ok) return
+    expect(view.context).toContain('RECENT-FAILURE')
+    expect(view.context).not.toContain('OLD-STALE-BEGINNING')
+    expect(view.context).toContain('Never touch production.')
+    expect(view.context).toContain('pwsh')
+    expect(view.context).toContain('characters omitted; showing the most recent evidence')
+  })
+
+  it('declines the cycle when the required constraints cannot fit their share', () => {
+    const view = buildProcessView({ ...base, task: 't', maxItemChars: 100, maxInputChars: 1000, constraints: 'c'.repeat(500) })
+    expect(view.ok).toBe(false)
+    if (view.ok) return
+    expect(view.reason).toContain('constraints')
+  })
+
   it('declines the cycle when a candidate action cannot fit the split candidate budget', () => {
     const view = buildProcessView({
       ...base,
@@ -569,6 +599,60 @@ describe('process cycle execution', () => {
     // The 10 input tokens the alternative reported plus the 20 the judge already spent.
     expect(report?.usage.inputTokens).toBe(30)
     expect(report?.usage.calls).toBe(4)
+  })
+
+  it('re-checks the live switch after the policy read, before generating', async () => {
+    // The settings can be turned off while the policy promise is in flight; generating then would
+    // buy a reply nobody wants.
+    const flag = { active: true }
+    let generated = false
+    const h = harness({
+      settings: mutableSettings(flag),
+      policy: async () => { flag.active = false; return { mode: 'smart' } as RouterPolicy },
+      stream: () => { generated = true; return streamOf(textChunks('alternative')) },
+    })
+    const { chunks, report } = await run(h, { original: textChunks('ORIGINAL') })
+    expect(generated).toBe(false)
+    expect(chunks).toEqual(textChunks('ORIGINAL'))
+    expect(report?.outcome).toBe('switch-off')
+    expect(report?.generatedCalls).toBe(0)
+    expect(h.reserved).toHaveLength(1)
+  })
+
+  it('re-checks the live switch after the cycle log write, before generating', async () => {
+    const flag = { active: true }
+    let generated = false
+    let began = false
+    const h = harness({
+      settings: mutableSettings(flag),
+      store: () => ({ begin: async () => { began = true; flag.active = false; return true }, finish: async () => {}, lookup: async () => ({ ok: true, purchased: false }) }) as unknown as ProcessCycleStore,
+      stream: () => { generated = true; return streamOf(textChunks('alternative')) },
+    })
+    const { chunks, report } = await run(h, { original: textChunks('ORIGINAL') })
+    expect(began).toBe(true)
+    expect(generated).toBe(false)
+    expect(chunks).toEqual(textChunks('ORIGINAL'))
+    expect(report?.outcome).toBe('switch-off')
+    expect(h.failed).toBe(1)
+  })
+
+  it('does not replay the alternative when the switch is turned off during the accounting', async () => {
+    // The report awaits the cycle log and the statistics row; nothing has been yielded yet, so a
+    // switch turned off in that window must still leave the host with the original reply.
+    const flag = { active: true }
+    let finished = false
+    const h = harness({
+      settings: mutableSettings(flag),
+      store: () => ({ begin: async () => true, finish: async () => { finished = true; flag.active = false }, lookup: async () => ({ ok: true, purchased: false }) }) as unknown as ProcessCycleStore,
+      compare: async () => compareResult('B'),
+    })
+    const { chunks, report } = await run(h, { original: textChunks('ORIGINAL') })
+    expect(finished).toBe(true)
+    expect(chunks).toEqual(textChunks('ORIGINAL'))
+    // The row documents the decision that was made; the warning documents that it was not delivered.
+    expect(report?.outcome).toBe('candidate-selected')
+    expect(h.committed).toBe(1)
+    expect(h.warnings.some(w => w.includes('replaying the original reply'))).toBe(true)
   })
 
   it('declines the cycle when a tool action cannot fit the comparison view', async () => {
