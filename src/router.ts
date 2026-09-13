@@ -163,11 +163,12 @@ export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceInd
   // Track the rolling view of team tasks across the session
   const currentTeamTasks = new Map<string, TeamTaskItem>()
   let narration: { seq: number; text: string } | undefined
-  // Tool names each wrapper call (a `run_code` program) dispatched, keyed by the
-  // wrapper's callId. Session V3 carries rootCallId on the dispatch event, which is the
-  // only reliable parent link: the wrapper's own result text is a concatenation of its
-  // sub-results, so the tool name of the wrapper says nothing about what it did.
-  const dispatchedTools = new Map<string, Set<string>>()
+  // What each wrapper call (a `run_code` program) dispatched, keyed by the wrapper's
+  // callId: how many sub-calls it made and whether any of them produced evidence.
+  // Session V3 carries rootCallId on the dispatch event, which is the only reliable
+  // parent link: the wrapper's own result text is a concatenation of its sub-results,
+  // so the tool name of the wrapper says nothing about what it did.
+  const dispatchedWork = new Map<string, { count: number; evidence: boolean }>()
 
   for (const rawEvent of relevant) {
     const event = rawEvent as unknown as { type: string; seq: number; data: any }
@@ -192,9 +193,10 @@ export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceInd
       const data = event.data as { rootCallId?: string; subCallId?: string; name: string; isError?: boolean; content?: readonly ContentBlock[] }
       const rootCallId = typeof data.rootCallId === 'string' && data.rootCallId ? data.rootCallId : undefined
       if (rootCallId) {
-        const names = dispatchedTools.get(rootCallId) ?? new Set<string>()
-        names.add(data.name)
-        dispatchedTools.set(rootCallId, names)
+        const entry = dispatchedWork.get(rootCallId) ?? { count: 0, evidence: false }
+        entry.count += 1
+        if (isEvidenceOutput(data.name, Array.isArray(data.content) ? blockText(data.content) : '')) entry.evidence = true
+        dispatchedWork.set(rootCallId, entry)
       }
       const isOk = data.isError !== true && (!Array.isArray(data.content) || data.content.every(b => (b as { isError?: boolean }).isError !== true))
       if (isOk) {
@@ -208,11 +210,12 @@ export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceInd
   for (const [callId, call] of calls) {
     const result = results.get(callId)
     if (!result) continue
-    // A wrapper that dispatched nothing but bookkeeping carries only their payloads
-    // (typically the todo list echoed straight back), so it is bookkeeping too. Its
-    // nested dispatches stay in the index under their own names, so real work done by
-    // the same program is still available as evidence.
-    if (onlyBookkeepingDispatches(dispatchedTools.get(callId))) continue
+    // A wrapper whose every dispatch was bookkeeping/coordination carries only their
+    // payloads (the todo list, or a "started subagent" acknowledgement, echoed straight
+    // back), so it is coordination too. Its nested dispatches stay in the index under
+    // their own names, so real work done by the same program is still available.
+    const dispatched = dispatchedWork.get(callId)
+    if (dispatched !== undefined && dispatched.count > 0 && !dispatched.evidence) continue
     paired.set(callId, { name: call.data.name, callSeq: call.seq, resultSeq: result.seq, text: blockText(result.data.message.content) })
   }
   return { problemSeq: taskStartSeq, calls: paired, todos, teamTasks, narration }
@@ -282,13 +285,47 @@ function canonicalTodoSnapshots(index: EvidenceIndex): Array<{ seq: number; todo
  */
 const BOOKKEEPING_TOOLS = new Set([
   'todo_write', 'create_goal', 'get_goal', 'update_goal', 'interrupt_agent', 'list_agents', 'exit_plan_mode', 'skill', 'present',
+  'job_list', 'job_kill', 'list_subagent_models', 'send_message',
 ])
 
-/** Whether a wrapper's dispatches were all bookkeeping; undefined/empty means it dispatched nothing. */
-function onlyBookkeepingDispatches(names: ReadonlySet<string> | undefined): boolean {
-  if (names === undefined || names.size === 0) return false
-  for (const name of names) if (!BOOKKEEPING_TOOLS.has(name)) return false
-  return true
+/**
+ * The plugin's own verdict tools.
+ *
+ * They must stay in the evidence index — {@link successfulExplicitKinds} reads it so an
+ * explicit route is not re-run automatically — but they are never rendered as observed
+ * work output: a judge grading progress from an earlier verdict would be grading itself,
+ * and a stale "passed" would grade as if the work behind it still stood.
+ */
+const VERIFIER_EVIDENCE_TOOLS = new Set(['verifier_compare', 'verifier_select', 'verifier_track', 'verifier_current_session'])
+
+/** Tools that return either a child's report (evidence) or a bare start acknowledgement (not evidence). */
+const SUBAGENT_TOOLS = new Set(['subagent', 'subagent_fork'])
+
+/**
+ * Start acknowledgement of a background child.
+ *
+ * `subagent`/`subagent_fork` cannot be excluded by name: a foreground call returns the
+ * child's report, a background one returns exactly `started subagent <childId>` (or
+ * `started background subagent job <id>`), which hides the output the child was asked to
+ * produce while looking like the newest "observed" result of the task.
+ */
+const CHILD_START_ACKNOWLEDGEMENT = /^started (?:background )?subagent\b/u
+
+/**
+ * Whether one settled tool result is evidence of work rather than coordination output.
+ *
+ * Single definition for every site that renders or offers evidence, so the checkpoint
+ * picker and the semantic router cannot disagree about what counts — the same
+ * disagreement produced the K-cap loop described on {@link BOOKKEEPING_TOOLS}.
+ * @param name - tool name that produced the result.
+ * @param text - rendered result text.
+ * @returns True when the result may be shown to a judge as observed output.
+ */
+function isEvidenceOutput(name: string, text: string): boolean {
+  if (BOOKKEEPING_TOOLS.has(name) || VERIFIER_EVIDENCE_TOOLS.has(name)) return false
+  const body = text.trim()
+  if (!body) return false
+  return !(SUBAGENT_TOOLS.has(name) && CHILD_START_ACKNOWLEDGEMENT.test(body))
 }
 
 /**
@@ -303,7 +340,8 @@ function onlyBookkeepingDispatches(names: ReadonlySet<string> | undefined): bool
  * snapshot they wrote, so their own result repeats it while displacing the real
  * output produced just before them (a live session attached `create_goal`,
  * `update_goal` and `interrupt_agent` output to checkpoints that had already run
- * the task's test suite).
+ * the task's test suite). Coordination results are skipped by the same rule — see
+ * {@link isEvidenceOutput} — because they are also written after the work.
  * @param index - evidence index of the current task.
  * @param seq - checkpoint sequence number, or `Infinity` for the current state.
  * @param budget - maximum characters the evidence may occupy.
@@ -314,7 +352,7 @@ function checkpointEvidence(index: EvidenceIndex, seq: number, budget: number, c
   if (budget < 64) return ''
   let latest: EvidenceCall | undefined
   for (const pair of index.calls.values()) {
-    if (BOOKKEEPING_TOOLS.has(pair.name) || !pair.text.trim()) continue
+    if (!isEvidenceOutput(pair.name, pair.text)) continue
     if (pair.resultSeq <= seq && (latest === undefined || pair.resultSeq > latest.resultSeq)) latest = pair
   }
   if (latest === undefined) return ''
@@ -499,9 +537,10 @@ export function buildSemanticRoutePrompt(problem: string, events: readonly Sessi
   let used = 0
   let omitted = 0
   for (const [callId, pair] of [...index.calls.entries()].reverse()) {
-    // Bookkeeping results are not alternatives to anything; offering them let the
-    // classifier cite e.g. two goal/agent-control calls as competing candidates.
-    if (BOOKKEEPING_TOOLS.has(pair.name)) continue
+    // Bookkeeping and coordination results are not alternatives to anything; offering
+    // them let the classifier cite e.g. two goal/agent-control calls as competing
+    // candidates, or a previous verdict as an artifact of work.
+    if (!isEvidenceOutput(pair.name, pair.text)) continue
     const text = sanitizeVerifierText(pair.text, maxItemChars)
     if (artifacts.length > 0 && used + text.length > maxInputChars) { omitted += 1; continue }
     used += text.length
@@ -559,10 +598,10 @@ export function semanticDecision(output: SemanticRouteOutput, events: readonly S
   const perItem = itemBudget(output.candidateCallIds.length, maxItemChars, maxInputChars)
   const candidates = output.candidateCallIds.map((callId, i) => {
     const pair = index.calls.get(callId)
-    // Bookkeeping calls are not candidates (they were never offered to the classifier);
+    // Non-evidence calls are not candidates (they were never offered to the classifier);
     // a citation of one is an invalid reference, so the whole decision is rejected
     // instead of comparing metadata as if it were alternative work.
-    if (!pair || BOOKKEEPING_TOOLS.has(pair.name)) return undefined
+    if (!pair || !isEvidenceOutput(pair.name, pair.text)) return undefined
     return { id: callId, groupId: 'semantic', label: pair.name + ' ' + (i + 1), content: sanitizeVerifierText(pair.text, perItem), callId, fromSeq: pair.callSeq, toSeq: pair.resultSeq }
   }).filter((candidate): candidate is CandidateArtifact => candidate !== undefined)
   if (candidates.length !== output.candidateCallIds.length) return undefined

@@ -187,6 +187,62 @@ describe('production structured routing', () => {
     expect(decision.steps[1]).not.toContain('presented: 1')
   })
 
+  it('never attaches coordination output as checkpoint evidence', () => {
+    // The same rule as `present`, applied to the rest of the agent's own control
+    // surface: every one of these runs AFTER the work, so as the newest result it hides
+    // the verification run and the judge caps the checkpoint at K — the ceiling its own
+    // prompt sets for "no real verification" — against the 0.8 progress threshold.
+    const value = session()
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    tool(value, 'pwsh', 'verify', 'TYPECHECK_EXIT=0\nTests 309 passed')
+    tool(value, 'job_list', 'jobs', '(no background jobs)')
+    tool(value, 'job_kill', 'kill', 'requested cancellation of job job-1')
+    tool(value, 'send_message', 'send', '{"messageId":"m1"}')
+    tool(value, 'list_subagent_models', 'models', 'antigravity/gemini-3.8-flash — Gemini 3.8 Flash')
+    // A previous verdict is not observed work output either: grading progress from it
+    // would be the judge grading itself.
+    tool(value, 'verifier_current_session', 'verdict', '{"winner":"A","score":1,"baselineScore":0,"threshold":0.65}')
+    tool(value, 'subagent', 'child', 'started subagent 042f004d-fe19-4ccb-8b98-f08a00b32e87')
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind !== 'track') return
+    expect(decision.steps[1]).toContain('309 passed')
+    for (const marker of ['(no background jobs)', 'requested cancellation', 'messageId', 'Gemini 3.8 Flash', '"baselineScore"', 'started subagent']) {
+      expect(decision.steps[1], marker).not.toContain(marker)
+    }
+  })
+
+  it('keeps a foreground subagent report as checkpoint evidence', () => {
+    // Only the start acknowledgement is coordination. A foreground child returns the
+    // report it was asked for, which for delegated work is the deliverable itself.
+    const value = session()
+    value.append('todo/write', { todos: [{ content: 'Investigate', status: 'in_progress' }, { content: 'Report', status: 'pending' }] })
+    tool(value, 'subagent', 'child', 'Report: the mapper drops image parts when resolveRequestImages is undefined.')
+    value.append('todo/write', { todos: [{ content: 'Investigate', status: 'completed' }, { content: 'Report', status: 'completed' }] })
+    const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind !== 'track') return
+    expect(decision.steps[1]).toContain('the mapper drops image parts')
+  })
+
+  it('treats a wrapper that only started a background child as coordination', () => {
+    // In the PTC preset the picked result is the wrapper's own text, so the
+    // acknowledgement has to be recognised on the dispatch as well.
+    const value = session()
+    tool(value, 'pwsh', 'verify', 'all tests passed: 91 passed')
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    value.append('tool/call', { turn: 1, step: 1, callId: 'wrap' as never, name: 'run_code', arguments: '{}' })
+    value.append('tool/ptc-dispatch' as never, { rootCallId: 'wrap', subCallId: 'wrap:ptc:1', name: 'subagent', arguments: '{}', isError: false, content: [{ type: 'text', text: 'started subagent 042f004d' }] } as never)
+    value.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'wrap' as never, content: [{ type: 'text', text: 'started subagent 042f004d' }], isError: false }) }, { surfaceOp: 'append' })
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind !== 'track') return
+    expect(decision.steps[1]).toContain('all tests passed')
+    expect(decision.steps[1]).not.toContain('started subagent')
+  })
+
   it('keeps a wrapper that dispatched real work', () => {
     const value = session()
     value.append('tool/call', { turn: 1, step: 1, callId: 'wrap' as never, name: 'run_code', arguments: '{}' })
@@ -262,11 +318,17 @@ describe('semantic evidence references', () => {
     tool(value, 'create_goal', 'goal', '{"goal":{"id":"g1","phase":"active"}}')
     tool(value, 'skill', 'skill', 'loaded review skill body')
     tool(value, 'present', 'present', 'Presented C:\\repo\\src\\mapper.ts')
+    tool(value, 'job_list', 'jobs', '(no background jobs)')
+    tool(value, 'verifier_current_session', 'verdict', '{"winner":"A","score":1}')
+    tool(value, 'subagent', 'child-bg', 'started subagent 042f004d')
     const prompt = buildSemanticRoutePrompt('pick the better one', value.events, 8, 20000, 60000)
     expect(prompt).toContain('candidate A from a real subagent')
     expect(prompt).not.toContain('"phase":"active"')
     expect(prompt).not.toContain('loaded review skill body')
     expect(prompt).not.toContain('Presented C:')
+    expect(prompt).not.toContain('(no background jobs)')
+    expect(prompt).not.toContain('"winner":"A"')
+    expect(prompt).not.toContain('started subagent')
   })
 
   it('rejects a semantic decision that cites bookkeeping evidence', () => {
