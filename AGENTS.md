@@ -49,7 +49,7 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 
 ## 硬性规矩
 
-1. **改 `src/` 必须 `pnpm run build` 并连同 `lib/` 一起提交**。`lib/` 是入库产物，宿主加载它；只提交源码会让线上行为与源码脱节。`build` 末尾还会刷新「已安装该插件的 profile 副本」（`scripts/sync-installed-profiles.mjs`）：profile 里那份是安装时的硬链接副本，`build` 重建 `lib/` 后它是旧 inode，而**常规 `pnpm install` / `--force` / 重新 `add` 都不会重建链接**（实测），只有删掉该目录再装才行——这一步已并入 `build`，无 profile 时 no-op（CI 不受影响）。
+1. **改 `src/` 必须 `pnpm run build` 并连同 `lib/` 一起提交**。`lib/` 是入库产物，宿主加载它；只提交源码会让线上行为与源码脱节。`build` 末尾还会刷新「已安装该插件的 profile 副本」（`scripts/sync-installed-profiles.mjs`）：profile 里那份是安装时的硬链接副本，`build` 重建 `lib/` 后它是旧 inode，而**常规 `pnpm install` / `--force` / 重新 `add` 都不会重建链接**（实测），只有删掉该目录再装才行——这一步已并入 `build`，且在装完后会**自动解除硬链接（`breakHardlinks`）**：在 Windows NTFS 上，文件索引号（FileId）> 2^53 会导致 Node `stat.ino` 精度截断发生碰撞，若留有硬链接（`nlink > 1`）会导致 `node-tar` 误判硬链接并生成 0 字节损坏文件，致使 `npm publish` 报 `415 Hard link is not allowed` 拒绝发布；解除硬链接保证两端各为独立文件（`nlink = 1`），无 profile 时 no-op（CI 不受影响）。
 2. **提交前跑 `pnpm run verify:release`**。提交信息用英文 conventional commits（`fix:` / `feat:` / `chore:`），版本号单独一次 `chore: bump ...`。
 3. **`sanitizeVerifierText` 的返回值必须 ≤ `maxChars`**，截断提示文字也算在预算内——`boundDecision` 用它做硬上限，超一个字符就会把整条自动路由丢掉。
 4. **凡进入提示词的证据都要限长**：单项 + 总量，自动路径与显式工具路径都要。新增字段时先问"它有没有上限、超了会怎样"。自动 `track` 的检查点数还要遵守 `router.ts` 的 `MAX_ROUTED_CHECKPOINTS`。**任何新增候选/检查点来源都必须走 `itemBudget()` 分摊总预算**，保持"Σ items ≤ autoRouteMaxInputChars 且单项 ≤ autoRouteMaxItemChars"，不要再用裸 `maxItemChars` 逐项截断——否则 `boundDecision` 会把整条决策丢掉（`index.ts` 现在会记一条 `dropped-over-budget` 并告警，但门控已经不生效了）。语义路由的 `buildSemanticRouteView` 还要按**实际渲染文本**计量（TASK/ARTIFACT/CHECKPOINT 分隔块与真实 ID 都算），不能用固定开销估算。

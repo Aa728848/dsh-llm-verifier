@@ -14,7 +14,7 @@
  * Usage: node scripts/sync-installed-profiles.mjs [--check] [--home <DSH_HOME>]
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -45,8 +45,42 @@ function installedProfiles() {
   return found
 }
 
+/**
+ * Break hard links in a directory or file by rewriting any file that has nlink > 1.
+ *
+ * On Windows, pnpm creates hard links for local file: dependencies. When nlink > 1 and the NTFS 64-bit
+ * FileId exceeds Number.MAX_SAFE_INTEGER (2^53), Node's `stat.ino` loses precision and different
+ * files collide on the same ino. When `node-tar` (used by `npm pack` / `npm publish`) encounters
+ * nlink > 1, it deduplicates by dev:ino and wrongly treats colliding files as hard links (typeflag '1',
+ * 0-byte payload). npm registry rejects tarballs with hard links (415 Hard link is not allowed).
+ * Breaking the hard links keeps nlink = 1 on both sides and prevents npm publish failures.
+ */
+function breakHardlinks(target) {
+  try {
+    const stat = statSync(target)
+    if (stat.isDirectory()) {
+      let entries
+      try { entries = readdirSync(target, { withFileTypes: true }) } catch { return }
+      for (const entry of entries) {
+        breakHardlinks(join(target, entry.name))
+      }
+    } else if (stat.isFile() && stat.nlink > 1) {
+      const content = readFileSync(target)
+      unlinkSync(target)
+      writeFileSync(target, content, { mode: stat.mode })
+    }
+  } catch { /* ignore permission or missing path errors */ }
+}
+
+function ensureRepoHasNoHardlinks() {
+  for (const item of ['lib', 'src', 'scripts', 'cordis.patch.yml', 'README.md', 'LICENSE', 'package.json']) {
+    breakHardlinks(join(repo, item))
+  }
+}
+
 const profiles = installedProfiles()
 if (profiles.length === 0) {
+  ensureRepoHasNoHardlinks()
   console.log('sync-installed-profiles: no profile installs ' + name + ' (nothing to refresh)')
   process.exit(0)
 }
@@ -66,6 +100,7 @@ for (const profile of profiles) {
     // Removing the entry is what makes pnpm re-create it from the freshly built files.
     rmSync(installed, { recursive: true, force: true })
     execFileSync('cmd', ['/c', 'pnpm install'], { cwd: profile, stdio: 'ignore' })
+    breakHardlinks(installed)
     refreshed += 1
     console.log('sync-installed-profiles: refreshed ' + installed)
   } catch (error) {
@@ -73,4 +108,6 @@ for (const profile of profiles) {
     console.log('! sync-installed-profiles: could not refresh ' + installed + ' — ' + (error instanceof Error ? error.message : String(error)))
   }
 }
+ensureRepoHasNoHardlinks()
 console.log('sync-installed-profiles: ' + refreshed + ' of ' + profiles.length + ' profile(s) refreshed')
+
