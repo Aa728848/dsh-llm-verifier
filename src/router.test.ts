@@ -1233,25 +1233,48 @@ describe('recovery signal inspection', () => {
 })
 
 /**
- * The process cycle draws on its own attempt counter (one per task), while still consuming the
- * shared model-call budget and preserving the final-acceptance floor.
+ * The process cycle is capped at one per TASK and draws on the shared route allowance, while still
+ * consuming the shared model-call budget and preserving the final-acceptance floor.
  */
 describe('process cycle reservations', () => {
-  const processPolicy: RouterPolicy = { ...policy, maxProcessPerTask: 1, maxProcessPerSession: 1, minFinalModelCalls: 6, maxModelCallsPerTask: 40 }
-  it('grants exactly one cycle per task and leaves routing untouched', () => {
+  const processPolicy: RouterPolicy = { ...policy, maxProcessPerTask: 1, minFinalModelCalls: 6, maxModelCallsPerTask: 40 }
+  it('grants exactly one cycle per task and still leaves routing an attempt', () => {
     const value = session()
     const agent = { id: value.id, session: value }
     const router = new AutoVerifierRouter()
     const cycle = router.reserve(agent, 'process', 'p1', 7, processPolicy)!
     expect(cycle).toBeDefined()
-    // The allowance is its own counter: a second cycle is refused even though route attempts remain.
+    // One per task: a second cycle is refused even though the route allowance is untouched.
     expect(router.reserve(agent, 'process', 'p2', 7, processPolicy)).toBeUndefined()
     expect(router.hasProcessAttempt(agent)).toBe(true)
     // One reservation at a time, exactly like every other phase.
     expect(router.reserve(agent, 'process', 'p2', 7, processPolicy)).toBeUndefined()
     expect(router.commit(agent, cycle, 9)).toBe(true)
-    // Routing and the final gate still have their own attempts.
+    // The cycle consumed one ROUTE attempt too, and routing still has attempts left.
     expect(router.reserve(agent, 'compare', 'c1', 6, processPolicy)).toBeDefined()
+  })
+
+  it('does not cap the session at one cycle: a second task can buy its own', () => {
+    const value = session()
+    const agent = { id: value.id, session: value }
+    const router = new AutoVerifierRouter()
+    const first = router.reserve(agent, 'process', 'p1', 7, processPolicy)!
+    expect(router.commit(agent, first, 9)).toBe(true)
+    value.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'A second task' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+    // A new task resets the per-task process counter; the session route allowance is the bound.
+    expect(router.hasProcessAttempt(agent)).toBe(false)
+    expect(router.reserve(agent, 'process', 'p2', 7, processPolicy)).toBeDefined()
+  })
+
+  it('is bounded by the existing route allowance', () => {
+    const value = session()
+    const agent = { id: value.id, session: value }
+    const router = new AutoVerifierRouter()
+    const tight: RouterPolicy = { ...processPolicy, maxRoutePerTask: 1 }
+    const route = router.reserve(agent, 'compare', 'c1', 1, tight)!
+    expect(router.commit(agent, route, 4)).toBe(true)
+    // The route allowance is spent, and a process cycle draws on that same allowance.
+    expect(router.reserve(agent, 'process', 'p1', 1, tight)).toBeUndefined()
   })
 
   it('keeps the final-acceptance floor when the cycle would spend into it', () => {

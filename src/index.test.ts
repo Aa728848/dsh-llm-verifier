@@ -833,6 +833,95 @@ describe('P06 process selection through the real hooks', () => {
     const second = await runOnce()
     expect(second).toEqual(originalChunks())
   })
+
+  it('buys its own cycle for a second task of the same session', async () => {
+    // The plan allows ONE cycle per task, bounded by the shared route allowance — not one per
+    // session. A private per-session process counter made the second task unable to buy at all.
+    const calls: string[] = []
+    const { handlers } = assemble({ ...JUDGE, autoProcessSelection: true }, { stream: stubStream(calls), sessions: [{ id: 'agent-p06', createdAt: 1 }] })
+    const events: unknown[] = [...stuck()]
+    const target = { ...agent(events) }
+    const preStep = handlers.get('agent/pre-step')!
+    const stream = handlers.get('llm/stream')!
+    const runOnce = async () => {
+      await preStep({ agent: target, signal: new AbortController().signal, messages: [], step: 2 }, () => ({ kind: 'enter', messages: [] }))
+      const chunks: unknown[] = []
+      for await (const chunk of stream(markAgentLoopRequest({ provider: 'p', model: 'm', messages: [], sessionId: 'agent-p06' as never }), async function* () { yield* originalChunks() }) as AsyncIterable<unknown>) chunks.push(chunk)
+      return chunks
+    }
+    expect((await runOnce()).some(chunk => JSON.stringify(chunk).includes('ALTERNATIVE-REPLY'))).toBe(true)
+    // A NEW direct task, again stuck in two consecutive failed verification runs.
+    events.push(user(10, 'Now fix the lexer.'), call(11, 't3', 'pwsh'), failed(12, 't3', 'Tests 4 failed'), call(13, 't4', 'pwsh'), failed(14, 't4', 'Tests 5 failed'))
+    expect((await runOnce()).some(chunk => JSON.stringify(chunk).includes('ALTERNATIVE-REPLY'))).toBe(true)
+    expect(calls.filter(entry => entry === 'generation')).toHaveLength(2)
+  })
+
+  it('sends a redacted, bounded view carrying constraints, failure evidence and tool definitions', async () => {
+    const prompts: string[] = []
+    const secret = 'api_key=sk-live-9f3a2b'
+    const stream = (options: { messages: readonly unknown[] }) => {
+      const prompt = promptText(options)
+      if (prompt.includes('**Evaluation Guideline')) {
+        prompts.push(prompt)
+        const letter = (block: string) => block.includes('ALTERNATIVE-REPLY') ? 'A' : 'T'
+        return textStream('reasoning\n<score_A> ' + letter(section(prompt, 'PROPOSAL_A')) + ' </score_A>\n<score_B> ' + letter(section(prompt, 'PROPOSAL_B')) + ' </score_B>')
+      }
+      return textStream('ALTERNATIVE-REPLY deploy with ' + secret)
+    }
+    const { handlers } = assemble({ ...JUDGE, autoProcessSelection: true }, { stream, sessions: [{ id: 'agent-p06', createdAt: 1 }] })
+    const target = agent(stuck())
+    await handlers.get('agent/pre-step')!({ agent: target, signal: new AbortController().signal, messages: [], step: 2 }, () => ({ kind: 'enter', messages: [] }))
+    const main = markAgentLoopRequest({
+      provider: 'session-provider',
+      model: 'session-model',
+      messages: [],
+      sessionId: 'agent-p06' as never,
+      system: 'Never touch production.',
+      tools: [{ name: 'pwsh', description: 'Run a command', parameters: { properties: { command: {} } } }] as never,
+    })
+    const chunks: unknown[] = []
+    for await (const chunk of handlers.get('llm/stream')!(main, () => streamOf(originalChunks())) as AsyncIterable<unknown>) chunks.push(chunk)
+    expect(prompts.length).toBeGreaterThan(0)
+    const judgePrompt = prompts[0]!
+    // The candidate reply is untrusted input: the credential must be masked before it is judged.
+    expect(judgePrompt).not.toContain('sk-live-9f3a2b')
+    expect(judgePrompt).toContain('[REDACTED]')
+    // The judge can only judge "does the next step address the real failure" with these.
+    expect(judgePrompt).toContain('Never touch production.')
+    expect(judgePrompt).toContain('pwsh(command): Run a command')
+    expect(judgePrompt).toContain('Tests 2 failed')
+    // Only the JUDGE view is sanitized: the winning reply is replayed exactly as the model sent it.
+    expect(chunks.some(chunk => JSON.stringify(chunk).includes('sk-live-9f3a2b'))).toBe(true)
+  })
+
+  it('measures the rendered evidence against the configured total instead of estimating it', async () => {
+    // The repro: a 1000-character total was exceeded by more than double because the task was not
+    // counted at all. Every evidence block the judge actually saw must now fit that total.
+    const prompts: string[] = []
+    const stream = (options: { messages: readonly unknown[] }) => {
+      const prompt = promptText(options)
+      if (prompt.includes('**Evaluation Guideline')) {
+        prompts.push(prompt)
+        const letter = (block: string) => block.includes('ALTERNATIVE-REPLY') ? 'A' : 'T'
+        return textStream('reasoning\n<score_A> ' + letter(section(prompt, 'PROPOSAL_A')) + ' </score_A>\n<score_B> ' + letter(section(prompt, 'PROPOSAL_B')) + ' </score_B>')
+      }
+      return textStream('ALTERNATIVE-REPLY ' + 'y'.repeat(5000))
+    }
+    const { handlers } = assemble({ ...JUDGE, autoProcessSelection: true, autoRouteMaxItemChars: 100, autoRouteMaxInputChars: 1000 }, { stream, sessions: [{ id: 'agent-p06', createdAt: 1 }] })
+    const target = agent(stuck())
+    await handlers.get('agent/pre-step')!({ agent: target, signal: new AbortController().signal, messages: [], step: 2 }, () => ({ kind: 'enter', messages: [] }))
+    const chunks: unknown[] = []
+    for await (const chunk of handlers.get('llm/stream')!(markAgentLoopRequest({ provider: 'p', model: 'm', messages: [], sessionId: 'agent-p06' as never }), () => streamOf(originalChunks())) as AsyncIterable<unknown>) chunks.push(chunk)
+    // Six judge calls: three proposal criteria x two repeats. Every one of them must fit.
+    expect(prompts.length).toBeGreaterThan(0)
+    for (const prompt of prompts) {
+      const evidence = section(prompt, 'TASK').length + section(prompt, 'CONTEXT').length + section(prompt, 'PROPOSAL_A').length + section(prompt, 'PROPOSAL_B').length
+      expect(evidence).toBeLessThanOrEqual(1000)
+    }
+    // The prose was clipped (never the whole 5000-character reply), and the cycle still decided.
+    expect(section(prompts[0]!, 'PROPOSAL_B')).toContain('ALTERNATIVE-REPLY')
+    expect(section(prompts[0]!, 'PROPOSAL_B').length).toBeLessThan(200)
+  })
 })
 
 describe('automatic gate lifecycle', () => {

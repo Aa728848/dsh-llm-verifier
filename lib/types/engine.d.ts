@@ -23,6 +23,11 @@ export interface CompareOptions {
     reviewStage?: ReviewStage;
     /** Task domain for the prompt's role sentence; normally the criteria preset id. */
     domain?: string;
+    /**
+     * Optional reference context rendered as a separate data-only block between the task and the
+     * two candidates (P06's bounded process evidence pack). Omitted renders nothing.
+     */
+    context?: string;
 }
 export interface CriterionResult {
     id: string;
@@ -91,6 +96,8 @@ export interface SelectOptions {
     reviewStage?: ReviewStage;
     /** Task domain for the prompt's role sentence; normally the criteria preset id. */
     domain?: string;
+    /** Reference context shown to every pair; see {@link CompareOptions.context}. */
+    context?: string;
 }
 export interface SelectResult {
     index: number;

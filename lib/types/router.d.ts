@@ -99,14 +99,15 @@ export interface RouterPolicy {
     maxFinalPerTask: number;
     maxFinalPerSession: number;
     /**
-     * Process-selection cycles (P06) allowed within one task / one session.
+     * Process-selection cycles (P06) allowed within one task.
      *
-     * A separate counter for the same reason routing and the final gate are separate: one process
-     * cycle is the whole P06 budget, and it must not be able to starve the route attempts the rest
-     * of the plugin needs. Optional; treated as 0 when absent.
+     * One cycle per task, and — per the plan — no private session counter: a process cycle IS a
+     * routing cycle for allowance purposes, so it consumes the SAME task/session route attempts as
+     * compare/select/track. A separate per-session process cap used to make the second task of a
+     * session unable to buy its own cycle even though the session's route allowance was untouched.
+     * Optional; treated as 0 when absent.
      */
     maxProcessPerTask?: number;
-    maxProcessPerSession?: number;
     maxModelCallsPerTask: number;
     maxModelCallsPerSession: number;
     maxInputChars: number;
@@ -249,6 +250,19 @@ export interface RecoverySignal {
  * @returns The signal, or undefined when the condition does not hold.
  */
 export declare function inspectRecoverySignal(events: readonly SessionEvent[]): RecoverySignal | undefined;
+/**
+ * Per-item character budget for a decision with a known item count.
+ *
+ * boundDecision() enforces the COMBINED cap, so spending maxItemChars per item
+ * drops the whole decision as soon as the items are numerous or large. Splitting
+ * the combined budget keeps both caps satisfied by construction; a single item
+ * still gets the full maxItemChars.
+ * @param count - number of items that will be rendered.
+ * @param maxItemChars - hard per-item cap enforced by boundDecision().
+ * @param maxInputChars - hard combined cap enforced by boundDecision().
+ * @returns The per-item character budget, never below 1.
+ */
+export declare function itemBudget(count: number, maxItemChars: number, maxInputChars: number): number;
 /**
  * Upper bound on the checkpoints rendered into one routed track decision.
  *

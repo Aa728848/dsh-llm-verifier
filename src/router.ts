@@ -102,14 +102,15 @@ export interface RouterPolicy {
   maxFinalPerTask: number
   maxFinalPerSession: number
   /**
-   * Process-selection cycles (P06) allowed within one task / one session.
+   * Process-selection cycles (P06) allowed within one task.
    *
-   * A separate counter for the same reason routing and the final gate are separate: one process
-   * cycle is the whole P06 budget, and it must not be able to starve the route attempts the rest
-   * of the plugin needs. Optional; treated as 0 when absent.
+   * One cycle per task, and — per the plan — no private session counter: a process cycle IS a
+   * routing cycle for allowance purposes, so it consumes the SAME task/session route attempts as
+   * compare/select/track. A separate per-session process cap used to make the second task of a
+   * session unable to buy its own cycle even though the session's route allowance was untouched.
+   * Optional; treated as 0 when absent.
    */
   maxProcessPerTask?: number
-  maxProcessPerSession?: number
   maxModelCallsPerTask: number
   maxModelCallsPerSession: number
   maxInputChars: number
@@ -154,7 +155,6 @@ interface RouterState {
   processAttempts: number
   sessionRouteAttempts: number
   sessionFinalAttempts: number
-  sessionProcessAttempts: number
   taskModelCalls: number
   sessionModelCalls: number
   completed: Set<string>
@@ -826,7 +826,7 @@ function checkpointEvidence(index: EvidenceIndex, seq: number, budget: number, c
  * @param maxInputChars - hard combined cap enforced by boundDecision().
  * @returns The per-item character budget, never below 1.
  */
-function itemBudget(count: number, maxItemChars: number, maxInputChars: number): number {
+export function itemBudget(count: number, maxItemChars: number, maxInputChars: number): number {
   return Math.max(1, Math.min(maxItemChars, Math.floor(maxInputChars / Math.max(1, count))))
 }
 
@@ -1303,7 +1303,7 @@ export class AutoVerifierRouter {
     const taskStartSeq = latestDirectUserSeq(sessionEvents(agent.session))
     if (taskStartSeq === undefined) return undefined
     const id = String(agent.id)
-    const state = this.states.get(id) ?? { taskStartSeq, routeAttempts: 0, finalAttempts: 0, processAttempts: 0, sessionRouteAttempts: 0, sessionFinalAttempts: 0, sessionProcessAttempts: 0, taskModelCalls: 0, sessionModelCalls: 0, completed: new Set(), failed: new Set(), finalPreferred: false, strictBlocked: false }
+    const state = this.states.get(id) ?? { taskStartSeq, routeAttempts: 0, finalAttempts: 0, processAttempts: 0, sessionRouteAttempts: 0, sessionFinalAttempts: 0, taskModelCalls: 0, sessionModelCalls: 0, completed: new Set(), failed: new Set(), finalPreferred: false, strictBlocked: false }
     // A new task resets its own attempt and model-call counters, but never the session counters.
     if (state.taskStartSeq !== taskStartSeq) { state.taskStartSeq = taskStartSeq; state.routeAttempts = 0; state.finalAttempts = 0; state.processAttempts = 0; state.taskModelCalls = 0; state.completed.clear(); state.failed.clear(); state.inFlight = undefined; state.finalRequiredFromSeq = undefined; state.finalPreferred = false; state.strictBlocked = false; state.deliveryConsumed = undefined; this.exhaustedNotices.delete(id) }
     this.states.set(id, state)
@@ -1314,31 +1314,39 @@ export class AutoVerifierRouter {
     if (policy.mode === 'manual') return undefined
     const state = this.state(agent)
     if (!state || state.inFlight || state.completed.has(fingerprint)) return undefined
-    // Routing, the final gate and the P06 process cycle draw on SEPARATE attempt counters, so no
-    // amount of one can leave another without an attempt of its own.
+    // Each phase owns its PER-TASK attempt counter: routing, the final gate and the P06 process
+    // cycle cannot starve one another (the gate is mandatory once armed).
     const final = phase === 'final'
     const process = phase === 'process'
     const attempts = final ? state.finalAttempts : process ? state.processAttempts : state.routeAttempts
-    const sessionAttempts = final ? state.sessionFinalAttempts : process ? state.sessionProcessAttempts : state.sessionRouteAttempts
     const maxTask = final ? policy.maxFinalPerTask : process ? policy.maxProcessPerTask ?? 0 : policy.maxRoutePerTask
-    const maxSession = final ? policy.maxFinalPerSession : process ? policy.maxProcessPerSession ?? 0 : policy.maxRoutePerSession
-    if (attempts >= maxTask || sessionAttempts >= maxSession) return undefined
+    if (attempts >= maxTask) return undefined
+    // The SESSION bound is not per phase: a process cycle draws on the same task/session ROUTE
+    // allowance as every other routed decision, which is exactly the plan's "one process cycle per
+    // task, further limited by the existing route quota". A private per-session process counter
+    // used to make the second task of a session unable to buy its own cycle.
+    if (final) {
+      if (state.sessionFinalAttempts >= policy.maxFinalPerSession) return undefined
+    } else if (state.routeAttempts >= policy.maxRoutePerTask || state.sessionRouteAttempts >= policy.maxRoutePerSession) {
+      return undefined
+    }
     // Routing must leave the final acceptance affordable. Reserving the floor here is
     // what stops a legitimate-looking route (e.g. 90 calls under a 96-call task cap)
     // from arming `finalRequiredFromSeq` with only 6 calls left when 12 are needed.
     const floor = final ? 0 : policy.minFinalModelCalls ?? 0
     if (state.taskModelCalls + expectedCalls + floor > policy.maxModelCallsPerTask) return undefined
     if (state.sessionModelCalls + expectedCalls + floor > policy.maxModelCallsPerSession) return undefined
-    const reservation: Reservation = { id: this.instance + '-' + (++this.serial), phase, fingerprint, taskStartSeq: state.taskStartSeq, expectedCalls, attempt: (final ? state.finalAttempts : state.routeAttempts) + 1 }
+    const reservation: Reservation = { id: this.instance + '-' + (++this.serial), phase, fingerprint, taskStartSeq: state.taskStartSeq, expectedCalls, attempt: attempts + 1 }
     state.inFlight = reservation
     if (final) {
       state.finalAttempts += 1; state.sessionFinalAttempts += 1
       // The reservation honors the preference; a later failure must not keep routing
       // disabled for the rest of the task.
       state.finalPreferred = false
-    } else if (process) {
-      state.processAttempts += 1; state.sessionProcessAttempts += 1
     } else {
+      // A process cycle is a routed decision for allowance purposes: it consumes the task and
+      // session route attempts on top of its own one-per-task process counter.
+      if (process) state.processAttempts += 1
       state.routeAttempts += 1; state.sessionRouteAttempts += 1
     }
     state.taskModelCalls += expectedCalls

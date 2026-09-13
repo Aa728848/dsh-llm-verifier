@@ -4,7 +4,7 @@ import type { DecisionTrace } from './decisions.ts'
 import {
   DEFAULT_CRITERIA, DEFAULT_GROUND_TRUTH_NOTE, PROPOSAL_CRITERIA, accumulatePairs, buildPairwisePrompt, buildProgressPrompt,
   dedupeCriterionId, diagnosticKey, extractProgressScore, extractScore, parseDiagnostics, pivotRoundPairs, rankScores,
-  ringCycle, slugCriterionId, topPivots, type Criterion, type Diagnostic, type ReviewStage,
+  ringCycle, slugCriterionId, swapDiagnosticEvidence, topPivots, type Criterion, type Diagnostic, type ReviewStage,
 } from './core.ts'
 
 /** Evidence tokens one pairwise prompt shows the judge, exactly as the prompt lists them. */
@@ -51,6 +51,11 @@ export interface CompareOptions {
   reviewStage?: ReviewStage
   /** Task domain for the prompt's role sentence; normally the criteria preset id. */
   domain?: string
+  /**
+   * Optional reference context rendered as a separate data-only block between the task and the
+   * two candidates (P06's bounded process evidence pack). Omitted renders nothing.
+   */
+  context?: string
 }
 export interface CriterionResult { id: string; name: string; scoreA: number; scoreB: number }
 export interface RunStats extends UsageStats {
@@ -117,6 +122,8 @@ export interface SelectOptions {
   reviewStage?: ReviewStage
   /** Task domain for the prompt's role sentence; normally the criteria preset id. */
   domain?: string
+  /** Reference context shown to every pair; see {@link CompareOptions.context}. */
+  context?: string
 }
 
 export interface SelectResult {
@@ -215,6 +222,18 @@ function attachBilled(error: unknown, usage: UsageStats): void {
 }
 /** Candidate indices best-first by score, ties broken by index. */
 function rankByScore(scores: readonly number[]): number[] { return Array.from({ length: scores.length }, (_, index) => index).sort((a, b) => (scores[b] ?? 0) - (scores[a] ?? 0) || a - b) }
+
+/**
+ * Rewrite one pair's `A`/`B` finding into the tournament's candidate identity.
+ *
+ * The label is 1-based on purpose: the automatic selection feedback locates candidates as `[N]`,
+ * and the tool result is read by the same agent that reads that feedback.
+ */
+function locatePairDiagnostic(diagnostic: Diagnostic, a: number, b: number): Diagnostic {
+  if (diagnostic.evidence === 'A') return { ...diagnostic, evidence: 'candidate ' + (a + 1) }
+  if (diagnostic.evidence === 'B') return { ...diagnostic, evidence: 'candidate ' + (b + 1) }
+  return diagnostic
+}
 function unorderedPair(a: number, b: number): string { return a < b ? a + ',' + b : b + ',' + a }
 
 /**
@@ -312,10 +331,11 @@ export class VerifierEngine {
    * @param options - the comparison's options.
    * @returns Stage and domain to forward to {@link buildPairwisePrompt}.
    */
-  private framing(options: CompareOptions): { stage?: ReviewStage; domain?: string } {
+  private framing(options: CompareOptions): { stage?: ReviewStage; domain?: string; context?: string } {
     return {
       ...(options.reviewStage === undefined ? {} : { stage: options.reviewStage }),
       ...(options.domain === undefined ? {} : { domain: options.domain }),
+      ...(options.context === undefined ? {} : { context: options.context }),
     }
   }
 
@@ -472,7 +492,9 @@ export class VerifierEngine {
               scoringMode: res.scoringMode,
               hit: res.hit,
               channelFallback: res.channelFallback,
-              diagnostics: res.diagnostics,
+              // This round rendered the swapped slots; the scores are mapped back above, so the
+              // findings must be too, or a defect in the caller's A is reported against B.
+              diagnostics: swapped ? res.diagnostics.map(swapDiagnosticEvidence) : res.diagnostics,
             }
           } catch (error) {
             return {
@@ -616,7 +638,10 @@ export class VerifierEngine {
       const pairKey = a + ',' + b
       rewards.set(pairKey, [result.scoreA, result.scoreB])
       mergeRunStats(stats, result.stats)
-      mergeDiagnostics(diagnostics, diagnosticSeen, result.diagnostics)
+      // A pair's findings reference ITS two slots. A tournament ranks N candidates, so the slots
+      // are rewritten into the original candidate identity before they are aggregated: reporting
+      // "evidence B" for a pair the caller never saw as A/B points the agent at the wrong object.
+      mergeDiagnostics(diagnostics, diagnosticSeen, result.diagnostics.map(diagnostic => locatePairDiagnostic(diagnostic, a, b)))
       for (let k = 0; k < this.clients.length; k++) {
         const js = result.judges[k]!
         judgeCalls[k] += js.calls
@@ -643,6 +668,7 @@ export class VerifierEngine {
           trace: options.trace,
           ...(options.reviewStage === undefined ? {} : { reviewStage: options.reviewStage }),
           ...(options.domain === undefined ? {} : { domain: options.domain }),
+          ...(options.context === undefined ? {} : { context: options.context }),
         }, signal)
         recordPair(a, b, result)
       } catch (error) {

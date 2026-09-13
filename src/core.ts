@@ -200,7 +200,13 @@ export interface Diagnostic {
   criterion?: string
   /** Checkpoint label the finding belongs to (`c1`..`cN`, progress reviews). */
   checkpoint?: string
-  /** Evidence token the judge was shown: `TASK`, `A`/`B`, or `c1`.. */
+  /**
+   * Evidence reference the judge was shown.
+   *
+   * `TASK`, `A`/`B` (a pairwise review) or `c1`.. (a progress review). A tournament rewrites
+   * the per-pair `A`/`B` into the original candidate identity (`candidate 3`) so a finding can
+   * never direct the agent at the wrong object once a pair has been oriented or swapped.
+   */
   evidence: string
   /** The concrete thing missing or failing. */
   finding: string
@@ -295,6 +301,21 @@ export function parseDiagnostics(text: string, visible: { criteria?: readonly st
 /** Stable identity of one finding, for de-duplication across criteria/repeats/judges. */
 export function diagnosticKey(diagnostic: Diagnostic): string {
   return [diagnostic.criterion ?? '', diagnostic.checkpoint ?? '', diagnostic.evidence, diagnostic.finding].join('\u0000')
+}
+
+/**
+ * Map one pairwise finding's slot reference back to the caller's slots.
+ *
+ * `compare` swaps the two candidates for its odd repeats to cancel position preference, but it
+ * already maps the SCORES back; a finding that kept the swapped slot would tell the agent that
+ * candidate A's defect belongs to candidate B — the exact wrong object to fix.
+ * @param diagnostic - a finding parsed from one (possibly swapped) round.
+ * @returns The finding with `A`/`B` restored to the caller's order.
+ */
+export function swapDiagnosticEvidence(diagnostic: Diagnostic): Diagnostic {
+  if (diagnostic.evidence === 'A') return { ...diagnostic, evidence: 'B' }
+  if (diagnostic.evidence === 'B') return { ...diagnostic, evidence: 'A' }
+  return diagnostic
 }
 
 /**
@@ -456,7 +477,7 @@ export function extractScore(completion: CompletionLogprobs, tag: string): numbe
   return (letterValue(letter) - 1) / (GRANULARITY - 1)
 }
 
-/** Optional stage/domain framing for one pairwise prompt. */
+/** Optional stage/domain/context framing for one pairwise prompt. */
 export interface PairwisePromptOptions {
   /** Which review stage the two sides belong to; omitted means the historical artifact wording. */
   stage?: ReviewStage
@@ -469,6 +490,14 @@ export interface PairwisePromptOptions {
    * be judging a coding agent.
    */
   domain?: string
+  /**
+   * Optional reference context (constraints, recent failure evidence, tool definitions).
+   *
+   * Rendered as its own delimited, data-only block between the task and the two candidates, using
+   * the SAME nonce as every other block of this prompt. Omitted or blank renders nothing, which
+   * keeps the historical prompt byte-identical for every existing caller.
+   */
+  context?: string
 }
 
 /** Role sentence for a completed-artifact review of a coding task (the historical wording). */
@@ -518,7 +547,11 @@ function evaluatorRole(options: PairwisePromptOptions): string {
  * @returns The rendered prompt.
  */
 export function buildPairwisePrompt(problem: string, traceA: string, traceB: string, criterion: Criterion, groundTruthNote = DEFAULT_GROUND_TRUTH_NOTE, options: PairwisePromptOptions = {}): string {
-  const token = evidenceNonce(problem, traceA, traceB)
+  const context = options.context?.trim()
+  // The nonce is content-derived over every data block. The context joins it only when it is
+  // actually rendered, so a caller that passes nothing keeps the historical prompt — and its
+  // score cache entry — byte-for-byte.
+  const token = context === undefined || context === '' ? evidenceNonce(problem, traceA, traceB) : evidenceNonce(problem, context, traceA, traceB)
   const proposal = options.stage === 'proposal'
   const tagA = proposal ? 'PROPOSAL_A' : 'TRAJECTORY_A'
   const tagB = proposal ? 'PROPOSAL_B' : 'TRAJECTORY_B'
@@ -528,6 +561,7 @@ export function buildPairwisePrompt(problem: string, traceA: string, traceB: str
     UNTRUSTED_EVIDENCE_NOTE,
     ...(proposal ? [PROPOSAL_STAGE_NOTE] : []),
     '**Task:**\n' + renderDelimitedBlock('TASK', token, problem),
+    ...(context === undefined || context === '' ? [] : ['**Reference context (constraints, evidence, tool definitions):**\n' + renderDelimitedBlock('CONTEXT', token, context)]),
     '**' + (proposal ? 'Proposal A' : 'Trajectory A') + ':**\n' + renderDelimitedBlock(tagA, token, traceA),
     '**' + (proposal ? 'Proposal B' : 'Trajectory B') + ':**\n' + renderDelimitedBlock(tagB, token, traceB),
     '**Rating Scale:**\n' + SCALE_DESCRIPTION,

@@ -5,11 +5,12 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { isAgentLoopRequest, markAgentLoopRequest, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   PROCESS_CANDIDATE_CAP_CHARS, PROCESS_INTENT_TTL_MS, ProcessCycleStore, ProcessSelector,
-  buildAlternativeRequest, candidateIdentity, finishKind, measureChunk, renderCandidate, renderCandidateView,
-  usageFromChunks, type ProcessCycleReport, type ProcessIntent, type ProcessSelectorDeps,
+  buildAlternativeRequest, buildProcessView, candidateIdentity, finishKind, measureChunk, renderCandidate,
+  renderCandidateView, renderToolDigest, usageFromChunks, type ProcessCycleReport, type ProcessIntent, type ProcessSelectorDeps,
 } from './process-selection.ts'
 import type { AutoVerifierRouter, Reservation, RouterPolicy } from './router.ts'
-import { emptyUsage } from './caller.ts'
+import { attachUsage, emptyUsage } from './caller.ts'
+import { sanitizeVerifierText } from './session.ts'
 
 const tempDirs: string[] = []
 function tempPath(name = 'process.json'): string { const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-process-')); tempDirs.push(dir); return join(dir, name) }
@@ -79,10 +80,11 @@ function harness(overrides: Partial<ProcessSelectorDeps> = {}, storeFile = tempP
   } as unknown as AutoVerifierRouter
   const deps: ProcessSelectorDeps = {
     settings: () => ({ active: true, smart: true, timeoutMs: 5000, maxItemChars: 20_000, maxInputChars: 60_000 }),
+    sanitize: (text, maxChars) => sanitizeVerifierText(text, maxChars),
     policy: async () => ({ mode: 'smart' } as RouterPolicy),
     router: () => router,
     store: () => store,
-    taskStatement: async () => 'Fix the failing parser test.',
+    taskStatement: async () => ({ problem: 'Fix the failing parser test.', evidence: 'TRACE: Tests 2 failed' }),
     current: () => true,
     stream: () => streamOf(textChunks('alternative')),
     compare: async () => compareResult('A'),
@@ -137,11 +139,96 @@ describe('candidate rendering', () => {
     expect(usageFromChunks(textChunks('x')).calls).toBe(1)
   })
 
-  it('bounds one candidate view to its budget without dropping the actions', () => {
-    const candidate = { text: 'prose'.repeat(50), actions: ['pwsh({"command":"' + 'x'.repeat(200) + '"})'] }
-    const view = renderCandidateView(candidate, 120)
-    expect(view.length).toBe(120)
-    expect(view).toContain('[tool-call] pwsh')
+  it('keeps a fitting action complete and truncates only the prose', () => {
+    const candidate = { text: 'prose'.repeat(50), actions: ['pwsh({"command":"ls"})'] }
+    const view = renderCandidateView(candidate, 120)!
+    expect(view.length).toBeLessThanOrEqual(120)
+    // The action is an indivisible unit: it must appear in full, not clipped mid-argument.
+    expect(view).toContain('[tool-call] pwsh({"command":"ls"})')
+    expect(view).toContain('…')
+  })
+
+  it('refuses a candidate whose actions cannot be shown in full', () => {
+    // A truncated call is a DIFFERENT action from the one the host would execute, so the view is
+    // refused instead of being scored: the caller replays the original reply.
+    const candidate = { text: 'prose', actions: ['pwsh({"command":"' + 'x'.repeat(200) + '"})'] }
+    expect(renderCandidateView(candidate, 120)).toBeUndefined()
+    // Exactly at the budget is still a complete action.
+    const action = 'pwsh({"command":"ls"})'
+    const exact = renderCandidateView({ text: '', actions: [action] }, 'Tool calls:\n[tool-call] '.length + action.length + '\n\nReply text:\n'.length + 1)
+    expect(exact).toContain(action)
+  })
+})
+
+describe('bounded process comparison view', () => {
+  const base = {
+    task: 'Fix the failing parser test.',
+    original: { text: 'ORIGINAL', actions: [] as string[] },
+    alternative: { text: 'ALTERNATIVE', actions: [] as string[] },
+    maxItemChars: 20_000,
+    maxInputChars: 60_000,
+    sanitize: (text: string, maxChars: number) => sanitizeVerifierText(text, maxChars),
+  }
+
+  it('redacts a secret before it can reach the judge prompt', () => {
+    // The candidate replies are untrusted input like any other: masking only the saved snapshot
+    // would still send the live credential in the comparison prompt.
+    const secret = 'api_key=sk-live-9f3a2b'
+    const view = buildProcessView({
+      ...base,
+      original: { text: 'Deploy with ' + secret, actions: ['pwsh({"command":"echo ' + secret + '"})'] },
+      alternative: { text: 'Do not deploy yet', actions: [] },
+    })
+    expect(view.ok).toBe(true)
+    if (!view.ok) return
+    const rendered = JSON.stringify(view)
+    expect(rendered).not.toContain('sk-live-9f3a2b')
+    expect(rendered).toContain('[REDACTED]')
+  })
+
+  it('measures the rendered total against the combined budget and declines when it cannot fit', () => {
+    // 1000 characters configured in total: the old per-candidate split sent the task plus two
+    // candidates and exceeded it by more than double.
+    const tight = { ...base, maxItemChars: 20_000, maxInputChars: 1000 }
+    const tooLong = buildProcessView({ ...tight, task: 't'.repeat(4000) })
+    expect(tooLong.ok).toBe(false)
+    if (tooLong.ok) return
+    expect(tooLong.reason).toContain('1000')
+
+    const fits = buildProcessView({ ...tight, task: 'short task', evidence: 'e'.repeat(300) })
+    expect(fits.ok).toBe(true)
+    if (!fits.ok) return
+    expect(fits.context).toContain('e'.repeat(300))
+    const total = fits.problem.length + (fits.context?.length ?? 0) + fits.candidateA.length + fits.candidateB.length
+    expect(total).toBeLessThanOrEqual(1000)
+  })
+
+  it('declines the cycle when a candidate action cannot fit the split candidate budget', () => {
+    const view = buildProcessView({
+      ...base,
+      maxInputChars: 1000,
+      original: { text: 'plan', actions: ['pwsh({"command":"' + 'x'.repeat(2000) + '"})'] },
+    })
+    expect(view.ok).toBe(false)
+    if (view.ok) return
+    expect(view.reason).toContain('candidate A')
+  })
+
+  it('carries the constraints, the recent failure evidence and the tool digest into the context', () => {
+    const view = buildProcessView({
+      ...base,
+      evidence: 'TRACE: Tests 2 failed',
+      constraints: 'You must never touch production.',
+      tools: renderToolDigest([{ name: 'pwsh', description: 'Run a   command', parameters: { properties: { command: {} } } }]),
+    })
+    expect(view.ok).toBe(true)
+    if (!view.ok) return
+    expect(view.context).toContain('RECENT EXECUTION EVIDENCE')
+    expect(view.context).toContain('Tests 2 failed')
+    expect(view.context).toContain('REQUEST CONSTRAINTS')
+    expect(view.context).toContain('never touch production')
+    expect(view.context).toContain('AVAILABLE TOOLS')
+    expect(view.context).toContain('pwsh(command): Run a command')
   })
 })
 
@@ -392,6 +479,112 @@ describe('process cycle execution', () => {
     expect(report?.outcome).toBe('candidate-selected')
     expect(chunks).toEqual(boundary)
     expect(report?.generatedCalls).toBe(1)
+  })
+
+  const mutableSettings = (flag: { active: boolean }) => () => ({ active: flag.active, smart: true, timeoutMs: 5000, maxItemChars: 20_000, maxInputChars: 60_000 })
+
+  it('stops before buying anything when the switch was turned off while the reply was streaming', async () => {
+    const flag = { active: true }
+    let generated = false
+    const h = harness({
+      settings: mutableSettings(flag),
+      stream: () => { generated = true; return streamOf(textChunks('alternative')) },
+    })
+    flag.active = false
+    const { chunks, report } = await run(h, { original: textChunks('ORIGINAL') })
+    expect(chunks).toEqual(textChunks('ORIGINAL'))
+    expect(generated).toBe(false)
+    expect(report?.outcome).toBe('switch-off')
+    expect(h.reserved).toHaveLength(0)
+  })
+
+  it('does not hand the host the alternative when the switch is turned off during the comparison', async () => {
+    const flag = { active: true }
+    const h = harness({ settings: mutableSettings(flag), compare: async () => { flag.active = false; return compareResult('B') } })
+    const { chunks, report } = await run(h, { original: textChunks('ORIGINAL') })
+    expect(chunks).toEqual(textChunks('ORIGINAL'))
+    expect(report?.outcome).toBe('switch-off')
+    expect(report?.replayed).toBe('original')
+    expect(h.committed).toBe(0)
+    expect(h.failed).toBe(1)
+  })
+
+  it('treats an already-aborted parent signal as a cancel before any reservation', async () => {
+    const controller = new AbortController()
+    controller.abort(new Error('cancelled'))
+    const options = markedRequest()
+    options.signal = controller.signal
+    let generated = false
+    const h = harness({ stream: () => { generated = true; return streamOf(textChunks('alternative')) } })
+    const chunks = await collect(h.selector.handle(options, () => streamOf(textChunks('ORIGINAL')), intent()))
+    expect(chunks).toEqual(textChunks('ORIGINAL'))
+    expect(generated).toBe(false)
+    expect(h.reserved).toHaveLength(0)
+    expect(h.reports[h.reports.length - 1]?.outcome).toBe('canceled')
+  })
+
+  it('cancels an in-flight cycle when the session is cleared', async () => {
+    let entered: () => void = () => {}
+    const compared = new Promise<void>(resolve => { entered = resolve })
+    let release: () => void = () => {}
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const h = harness({ compare: async () => { entered(); await gate; return compareResult('B') } })
+    const pending = collect(h.selector.handle(markedRequest(), () => streamOf(textChunks('ORIGINAL')), intent()))
+    await compared
+    h.selector.clear('agent-1')
+    release()
+    const chunks = await pending
+    expect(chunks).toEqual(textChunks('ORIGINAL'))
+    expect(h.reports[h.reports.length - 1]?.outcome).toBe('canceled')
+  })
+
+  it('keeps the usage a failed generation already reported', async () => {
+    const h = harness({
+      stream: () => (async function* () {
+        yield { type: 'usage', usage: { inputTokens: 123, outputTokens: 7 } } as StreamChunk
+        throw new Error('generation exploded')
+      })(),
+    })
+    const { chunks, report } = await run(h, { original: textChunks('ORIGINAL') })
+    expect(chunks).toEqual(textChunks('ORIGINAL'))
+    expect(report?.outcome).toBe('generation-failed')
+    expect(report?.usage.inputTokens).toBe(123)
+    expect(report?.usage.outputTokens).toBe(7)
+    expect(report?.usage.usageIncomplete).toBe(true)
+  })
+
+  it('folds the judge usage a failed comparison reported before it threw', async () => {
+    const h = harness({
+      compare: async () => {
+        const error = new Error('judge exploded')
+        attachUsage(error, { ...emptyUsage(), calls: 3, attempts: 3, inputTokens: 20, outputTokens: 5, cacheHits: 0, cacheMisses: 3, estimatedCostUsd: 0, topLogprobScores: 0, explicitTagScores: 3 })
+        throw error
+      },
+    })
+    const { chunks, report } = await run(h, { original: textChunks('ORIGINAL') })
+    expect(chunks).toEqual(textChunks('ORIGINAL'))
+    expect(report?.outcome).toBe('comparison-failed')
+    expect(report?.judgeCalls).toBe(3)
+    expect(report?.observation.judgeCalls).toBe(3)
+    // The 10 input tokens the alternative reported plus the 20 the judge already spent.
+    expect(report?.usage.inputTokens).toBe(30)
+    expect(report?.usage.calls).toBe(4)
+  })
+
+  it('declines the cycle when a tool action cannot fit the comparison view', async () => {
+    let comparisons = 0
+    const h = harness({
+      settings: () => ({ active: true, smart: true, timeoutMs: 5000, maxItemChars: 100, maxInputChars: 1000 }),
+      stream: () => streamOf(toolCallChunks('c2', 'pwsh', '{"command":"' + 'x'.repeat(2000) + '"}')),
+      compare: async () => { comparisons += 1; return compareResult('B') },
+    })
+    const original = toolCallChunks('c1', 'pwsh', '{"command":"ls"}')
+    const { chunks, report } = await run(h, { original })
+    expect(comparisons).toBe(0)
+    expect(chunks).toEqual(original)
+    expect(report?.outcome).toBe('view-over-budget')
+    expect(report?.error).toContain('candidate B')
+    expect(h.failed).toBe(1)
   })
 })
 

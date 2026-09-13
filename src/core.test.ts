@@ -23,6 +23,7 @@ import {
   renderDelimitedBlock,
   ringCycle,
   slugCriterionId,
+  swapDiagnosticEvidence,
   topPivots,
 } from './core.ts'
 
@@ -328,6 +329,16 @@ describe('judge findings', () => {
     expect(renderDiagnostics([], 400)).toBe('')
   })
 
+  it('maps a swapped round finding back to the caller\'s slots', () => {
+    // `compare` swaps the two candidates on odd repeats to cancel position preference. The scores
+    // are mapped back; a finding that kept the swapped slot would name the WRONG candidate.
+    expect(swapDiagnosticEvidence({ criterion: 'A', evidence: 'A', finding: 'x' }).evidence).toBe('B')
+    expect(swapDiagnosticEvidence({ criterion: 'A', evidence: 'B', finding: 'x' }).evidence).toBe('A')
+    // A progress finding has no slots to swap.
+    expect(swapDiagnosticEvidence({ checkpoint: 'c1', evidence: 'c1', finding: 'x' })).toEqual({ checkpoint: 'c1', evidence: 'c1', finding: 'x' })
+    expect(swapDiagnosticEvidence({ criterion: 'A', evidence: 'TASK', finding: 'x' }).evidence).toBe('TASK')
+  })
+
   it('states that nothing was located rather than inventing a cause', () => {
     const failed = [{ id: 'a', name: 'A', score: 0.1 }]
     const quiet = automaticFeedback(0.1, 0, 'A', 0.65, failed, undefined, 1, [])
@@ -366,6 +377,21 @@ describe('review stage framing', () => {
     expect(buildPairwisePrompt('task', 'A body', 'B body', criterion, DEFAULT_GROUND_TRUTH_NOTE, { stage: 'artifact', domain: 'coding' })).toBe(base)
     // An unknown domain must not fall back to claiming a coding agent either.
     expect(buildPairwisePrompt('task', 'A body', 'B body', criterion, DEFAULT_GROUND_TRUTH_NOTE, { domain: 'custom' })).toBe(base)
+  })
+
+  it('renders an optional reference context as its own nonce-terminated data block', () => {
+    const without = buildPairwisePrompt('task', 'A body', 'B body', criterion)
+    // Absent or blank context must leave the historical prompt — and its cache entry — untouched.
+    expect(buildPairwisePrompt('task', 'A body', 'B body', criterion, undefined, { context: undefined })).toBe(without)
+    expect(buildPairwisePrompt('task', 'A body', 'B body', criterion, undefined, { context: '   ' })).toBe(without)
+    const withContext = buildPairwisePrompt('task', 'A body', 'B body', criterion, undefined, { context: 'Never touch production.' })
+    expect(withContext).toContain('<<<CONTEXT:')
+    expect(withContext).toContain('Never touch production.')
+    // The context shares the prompt's nonce, so its own text cannot close the data region early.
+    expect(sectionOf(withContext, 'CONTEXT')).toBe(sectionOf(buildPairwisePrompt('task', 'A body', 'B body', criterion, undefined, { context: 'Never touch production.' }), 'CONTEXT'))
+    expect(sectionOf(withContext, 'CONTEXT')).not.toBe(sectionOf(buildPairwisePrompt('other task', 'A body', 'B body', criterion, undefined, { context: 'Never touch production.' }), 'CONTEXT'))
+    // Only the evidence grew: the verdict contract is untouched.
+    expect(withContext).toContain('<score_A> LETTER_A_TO_T </score_A>')
   })
 
   it('frames a proposal comparison as unexecuted and relabels the blocks', () => {

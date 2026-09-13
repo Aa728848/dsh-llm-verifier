@@ -989,3 +989,46 @@ describe('review stage', () => {
   })
 })
 
+/**
+ * Located findings have to name the object the CALLER knows, not the slot of one internal round.
+ */
+describe('finding identity across slots and pairs', () => {
+  /** A judge that always locates the same defect in slot A of whatever it was shown. */
+  function findingStream(finding: string): (options: any) => AsyncIterable<any[]> {
+    return function () {
+      const text = '<finding criterion="' + DEFAULT_CRITERIA[0]!.name + '" evidence="A">' + finding + '</finding>\n<score_A> T </score_A>\n<score_B> A </score_B>'
+      return streamOf(chunks(text))
+    }
+  }
+
+  it('maps a swapped round finding back to the caller slots, not to the other candidate', async () => {
+    const engine = new VerifierEngine(clientConfig({ llm: { stream: findingStream('the header is never validated') } as any }), 4)
+    const result = await engine.compare({
+      problem: 'Review the parser fix.',
+      candidateA: 'CANDIDATE-A',
+      candidateB: 'CANDIDATE-B',
+      criteria: [DEFAULT_CRITERIA[0]!],
+      repeats: 2,
+    })
+    // Repeat 0 shows the caller's A in slot A; repeat 1 swaps the slots, so the same "slot A"
+    // finding must come back as the caller's B. Without the mapping both would claim evidence A.
+    expect(result.diagnostics.map(diagnostic => diagnostic.evidence).sort()).toEqual(['A', 'B'])
+    expect(result.diagnostics.every(diagnostic => diagnostic.finding === 'the header is never validated')).toBe(true)
+    // Scores are still the caller's: the mapping must not touch arithmetic.
+    expect(result.diagnostics).toHaveLength(2)
+  })
+
+  it('rewrites a tournament pair finding into the original candidate identity', async () => {
+    const engine = new VerifierEngine(clientConfig({ llm: { stream: findingStream('missing verification') } as any }), 4)
+    const result = await engine.select({
+      problem: 'Pick the better plan.',
+      candidates: ['CANDIDATE-0', 'CANDIDATE-1', 'CANDIDATE-2'],
+      criteria: [DEFAULT_CRITERIA[0]!],
+      repeats: 1,
+    })
+    expect(result.diagnostics.length).toBeGreaterThan(0)
+    // A selection has no A/B slots the caller ever saw: every finding must name a candidate.
+    for (const diagnostic of result.diagnostics) expect(diagnostic.evidence).toMatch(/^candidate [123]$/)
+  })
+})
+

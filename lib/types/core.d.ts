@@ -75,7 +75,13 @@ export interface Diagnostic {
     criterion?: string;
     /** Checkpoint label the finding belongs to (`c1`..`cN`, progress reviews). */
     checkpoint?: string;
-    /** Evidence token the judge was shown: `TASK`, `A`/`B`, or `c1`.. */
+    /**
+     * Evidence reference the judge was shown.
+     *
+     * `TASK`, `A`/`B` (a pairwise review) or `c1`.. (a progress review). A tournament rewrites
+     * the per-pair `A`/`B` into the original candidate identity (`candidate 3`) so a finding can
+     * never direct the agent at the wrong object once a pair has been oriented or swapped.
+     */
     evidence: string;
     /** The concrete thing missing or failing. */
     finding: string;
@@ -112,6 +118,16 @@ export declare function parseDiagnostics(text: string, visible: {
 }): Diagnostic[];
 /** Stable identity of one finding, for de-duplication across criteria/repeats/judges. */
 export declare function diagnosticKey(diagnostic: Diagnostic): string;
+/**
+ * Map one pairwise finding's slot reference back to the caller's slots.
+ *
+ * `compare` swaps the two candidates for its odd repeats to cancel position preference, but it
+ * already maps the SCORES back; a finding that kept the swapped slot would tell the agent that
+ * candidate A's defect belongs to candidate B — the exact wrong object to fix.
+ * @param diagnostic - a finding parsed from one (possibly swapped) round.
+ * @returns The finding with `A`/`B` restored to the caller's order.
+ */
+export declare function swapDiagnosticEvidence(diagnostic: Diagnostic): Diagnostic;
 /**
  * Render findings as short feedback lines.
  *
@@ -162,7 +178,7 @@ export declare function renderDelimitedBlock(tag: string, token: string, content
 export declare const UNTRUSTED_EVIDENCE_NOTE: string;
 export declare function normalizeScoreLetter(token: string): string | undefined;
 export declare function extractScore(completion: CompletionLogprobs, tag: string): number;
-/** Optional stage/domain framing for one pairwise prompt. */
+/** Optional stage/domain/context framing for one pairwise prompt. */
 export interface PairwisePromptOptions {
     /** Which review stage the two sides belong to; omitted means the historical artifact wording. */
     stage?: ReviewStage;
@@ -175,6 +191,14 @@ export interface PairwisePromptOptions {
      * be judging a coding agent.
      */
     domain?: string;
+    /**
+     * Optional reference context (constraints, recent failure evidence, tool definitions).
+     *
+     * Rendered as its own delimited, data-only block between the task and the two candidates, using
+     * the SAME nonce as every other block of this prompt. Omitted or blank renders nothing, which
+     * keeps the historical prompt byte-identical for every existing caller.
+     */
+    context?: string;
 }
 /**
  * One pairwise prompt focused on a single criterion.

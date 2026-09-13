@@ -19,7 +19,7 @@ import { type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm';
 import { type UsageStats } from './caller.ts';
 import { type Criterion } from './core.ts';
 import { type CompareResult, type RunStats } from './engine.ts';
-import type { AutoVerifierRouter, RouterPolicy } from './router.ts';
+import { type AutoVerifierRouter, type RouterPolicy } from './router.ts';
 import type { RouteObservation } from './statistics.ts';
 /**
  * Buffered characters allowed per candidate stream.
@@ -102,21 +102,37 @@ export interface ProcessCompareRequest {
     /** Agent owning the topic the comparison runs under. */
     agent: unknown;
     problem: string;
+    /** Bounded reference context (constraints, recent failure evidence, tool definitions). */
+    context?: string;
     candidateA: string;
     candidateB: string;
     criteria: readonly Criterion[];
     repeats: number;
     signal: AbortSignal;
 }
+/** What the judge is told about the task: the statement plus the evidence behind the failure. */
+export interface ProcessTaskEvidence {
+    problem: string;
+    /** Bounded, redacted trace of the task so far, including the failed verification runs. */
+    evidence?: string;
+}
 export interface ProcessSelectorDeps {
     settings(): ProcessSelectionSettings;
+    /**
+     * Redact and bound one piece of untrusted text.
+     *
+     * The SAME sanitizer every other judge input goes through, and applied before the view is
+     * measured: a candidate reply is untrusted input like any other and may contain a credential the
+     * configured patterns mask.
+     */
+    sanitize(text: string, maxChars: number): string;
     /** The routing policy in force, including the final-acceptance floor and the process allowance. */
     policy(): Promise<RouterPolicy>;
     router(): AutoVerifierRouter;
     /** Durable cycle log of one topic. */
     store(agent: unknown): ProcessCycleStore;
-    /** Newest session state, used for staleness and for the comparison's task statement. */
-    taskStatement(agent: unknown, fromSeq: number, signal: AbortSignal): Promise<string>;
+    /** Newest session state, used for staleness and for the comparison's task evidence. */
+    taskStatement(agent: unknown, fromSeq: number, signal: AbortSignal): Promise<ProcessTaskEvidence>;
     /** Whether the intent's task is still the session's current task. */
     current(intent: ProcessIntent): boolean;
     /** Independent dispatch for the alternative reply (a fresh request object). */
@@ -171,18 +187,94 @@ export declare function usageFromChunks(chunks: readonly StreamChunk[]): UsageSt
  */
 export declare function buildAlternativeRequest(options: GenerateOptions, signal: AbortSignal): GenerateOptions;
 /**
- * Render one bounded candidate view for the judge.
+ * Render one bounded candidate view for the judge, or refuse when its actions cannot fit.
  *
- * The whole evidence budget is split across the two candidates, so the combined request can never
- * exceed it and \`boundDecision\`-style dropping cannot silently disable the comparison.
+ * The tool calls are ATOMIC: a truncated call is not a shorter action, it is a different one, and
+ * scoring it would grade the original reply against something the host will never execute — only
+ * the winning reply's buffered chunks are replayed verbatim. So when the action block does not fit
+ * the candidate's budget the whole view is refused and the caller falls back to the original reply,
+ * recording the length reason. Only the PROSE (which is not executed) is truncated, with a visible
+ * marker.
  * @param candidate - prose and actions of one reply.
  * @param budget - characters this candidate may occupy.
- * @returns The rendered block body.
+ * @returns The rendered block body, or undefined when its actions cannot be shown in full.
  */
 export declare function renderCandidateView(candidate: {
     text: string;
     actions: readonly string[];
-}, budget: number): string;
+}, budget: number): string | undefined;
+/**
+ * Everything the judge needs about the task besides the two replies.
+ *
+ * The judge has to answer "does this next step address the REAL failure?", which needs the task,
+ * the constraints the request was made under and the execution evidence behind the failure — not
+ * just the user's question. Every piece is bounded and redacted by {@link buildProcessView}.
+ */
+export interface ProcessEvidencePack {
+    /** Task statement of the current task. */
+    task: string;
+    /** Recent execution evidence (the trajectory, including the failed verification runs). */
+    evidence?: string;
+    /** The original request's system constraints, when it declared any. */
+    constraints?: string;
+    /** Digest of the tools the original request could call, when it declared any. */
+    tools?: string;
+}
+export interface ProcessViewInput extends ProcessEvidencePack {
+    original: {
+        text: string;
+        actions: readonly string[];
+    };
+    alternative: {
+        text: string;
+        actions: readonly string[];
+    };
+    maxItemChars: number;
+    maxInputChars: number;
+    /** Redact and bound one piece of untrusted text before it reaches a judge. */
+    sanitize(text: string, maxChars: number): string;
+}
+/** A bounded, redacted comparison view, or the reason it could not be built. */
+export type ProcessView = {
+    ok: true;
+    problem: string;
+    context?: string;
+    candidateA: string;
+    candidateB: string;
+} | {
+    ok: false;
+    reason: string;
+};
+/**
+ * Build the bounded, redacted comparison view of one process cycle.
+ *
+ * Three boundaries are enforced here, and exceeding any of them declines the cycle instead of
+ * sending incomplete evidence:
+ *
+ * 1. every piece is redacted with the plugin's sanitizer BEFORE it is measured, so a secret that
+ *    sanitizeVerifierText masks can never reach the judge prompt through a candidate reply;
+ * 2. the task and its context must fit the combined input budget (a candidate scored against a
+ *    truncated constraint set measures the truncation, not the candidate);
+ * 3. the remaining budget is split across the two candidates with itemBudget, and a candidate whose
+ *    actions cannot be shown in full is refused (see renderCandidateView).
+ *
+ * The TOTAL is measured on the rendered text, never estimated, so the view can never exceed
+ * maxInputChars.
+ * @param input - the evidence pack plus both replies and the live bounds.
+ * @returns The view, or the specific length reason it was refused.
+ */
+export declare function buildProcessView(input: ProcessViewInput): ProcessView;
+/**
+ * One bounded digest of the tools the original request could call.
+ *
+ * The judge sees `[tool-call] name(arguments)` for every action; without the definitions it cannot
+ * tell whether `pwsh({"command":"..."})` is the task's verification command or an unrelated probe.
+ * Only names, parameter names and one-line descriptions are shown — full schemas would swamp the
+ * evidence budget for no decision value.
+ * @param tools - the original request's tool definitions, when it declared any.
+ * @returns The digest, or undefined when there is nothing to show.
+ */
+export declare function renderToolDigest(tools: readonly unknown[] | undefined): string | undefined;
 /** One durable purchase record; the sidecar exists so a plugin reload cannot buy the cycle twice. */
 export interface ProcessCycleRecord {
     cycleId: string;
@@ -245,13 +337,25 @@ export declare class ProcessSelector {
     private readonly intents;
     /** Requests this plugin dispatched itself (the alternative reply): never a selection subject. */
     private readonly internal;
+    /**
+     * Phase controllers of the cycles currently in flight, one per session.
+     *
+     * Holding them is what makes "turn the switch off / cancel / dispose" take effect on a cycle
+     * that already started: aborting the phase stops the alternative dispatch, the comparison and
+     * the replay, and the buffered original reply is handed back instead.
+     */
+    private readonly cycles;
     constructor(deps: ProcessSelectorDeps);
     /** Register (or replace) the pending intent of one session. */
     register(intent: ProcessIntent): void;
-    /** Drop a session's pending intent (new task, settings change, disposal). */
+    /** Drop a session's pending intent and cancel its in-flight cycle (new task, disposal). */
     clear(sessionId: string): void;
-    /** Drop every pending intent (settings change, host shutdown). */
+    /** Drop every pending intent and cancel every in-flight cycle (settings change, shutdown). */
     clearAll(): void;
+    /** Cancel one session's in-flight cycle; it replays the buffered original reply instead. */
+    private abort;
+    /** Whether the LIVE settings still permit the request-level path. */
+    private live;
     /** Whether a session already has an intent waiting for its next request. */
     pending(sessionId: string): boolean;
     /**
@@ -271,12 +375,27 @@ export declare class ProcessSelector {
      * \`next()\` is called exactly once. The original reply is buffered first; only after it is
      * complete and inside the cap is the alternative generated, and only a judge-selected winner is
      * replayed. Every decline replays the buffered original verbatim.
+     *
+     * The live state — the settings switch, the turn signal and the current task — is re-read before
+     * every purchase, before the comparison and before the winner is committed, and a settings change
+     * or a disposal aborts the cycle through {@link ProcessSelector.clearAll}.
      * @param options - the matched main request.
      * @param next - the downstream dispatch (called once).
      * @param intent - the consumed intent.
      * @returns The chunks the host will consume.
      */
     handle(options: GenerateOptions, next: () => AsyncIterable<StreamChunk>, intent: ProcessIntent): AsyncGenerator<StreamChunk>;
+    /**
+     * Why the cycle must fall back to the buffered original reply RIGHT NOW.
+     *
+     * Re-read at every decision point instead of sampled once: the switch can be turned off, the turn
+     * cancelled or the task replaced while a generation or a comparison is in flight, and a late
+     * alternative must never reach the new task.
+     * @param intent - the consumed intent of this cycle.
+     * @param phase - the cycle's phase controller.
+     * @returns The outcome to record, or undefined while the cycle is still current.
+     */
+    private staleReason;
     /** Record a cycle that never reached (or consumed) a reservation. */
     private skip;
     /** Record a purchased cycle and stamp its durable outcome. */
