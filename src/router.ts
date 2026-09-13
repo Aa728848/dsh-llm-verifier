@@ -1,7 +1,7 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { stableHash } from './cache.ts'
-import { evidenceNonce, renderDelimitedBlock } from './core.ts'
+import { evidenceNonce, renderDelimitedBlock, type ReviewStage } from './core.ts'
 import type { AutoVerifyMode } from './auto.ts'
 import { sanitizeVerifierText, sessionEvents } from './session.ts'
 
@@ -52,6 +52,14 @@ export interface CandidateArtifact {
   callId: string
   fromSeq: number
   toSeq: number
+  /**
+   * Which review stage this artifact belongs to.
+   *
+   * A candidate set that was reviewed as an unexecuted proposal must not suppress the SAME
+   * content later arriving with real execution evidence: those are different questions about
+   * different objects. Trusted workflow v1 envelopes and semantic candidates are artifacts.
+   */
+  reviewStage: ReviewStage
 }
 
 interface RouteBase { source: 'structured' | 'semantic'; confidence: number; reason: string; fingerprint: string }
@@ -347,7 +355,7 @@ export function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceInd
   return { problemSeq: taskStartSeq, calls: paired, todos, teamTasks, narration }
 }
 
-function parseTrustedWorkflow(value: unknown, callId: string, callSeq: number, resultSeq: number, maxCandidates: number, maxItemChars: number, maxInputChars: number): CandidateArtifact[] {
+function parseTrustedWorkflow(value: unknown, callId: string, callSeq: number, resultSeq: number, maxCandidates: number, maxItemChars: number, maxInputChars: number, reviewStage: ReviewStage = 'artifact'): CandidateArtifact[] {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return []
   const envelope = value as Record<string, unknown>
   if (envelope.protocol !== 'dsh-verifier-candidates' || envelope.version !== TRUSTED_WORKFLOW_VERSION || typeof envelope.groupId !== 'string' || !envelope.groupId.trim() || !Array.isArray(envelope.candidates)) return []
@@ -362,7 +370,7 @@ function parseTrustedWorkflow(value: unknown, callId: string, callSeq: number, r
     if (row.status !== 'completed' || typeof row.id !== 'string' || !row.id.trim() || seen.has(row.id.trim()) || typeof row.content !== 'string' || !row.content.trim()) return []
     const id = row.id.trim(); seen.add(id)
     const label = typeof row.label === 'string' && row.label.trim() ? row.label.trim() : id
-    candidates.push({ id, groupId, label: sanitizeVerifierText(label, Math.min(120, perItem)), content: sanitizeVerifierText(row.content, perItem), identity: sanitizeVerifierText(row.content, 1_000_000_000), callId, fromSeq: callSeq, toSeq: resultSeq })
+    candidates.push({ id, groupId, label: sanitizeVerifierText(label, Math.min(120, perItem)), content: sanitizeVerifierText(row.content, perItem), identity: sanitizeVerifierText(row.content, 1_000_000_000), callId, fromSeq: callSeq, toSeq: resultSeq, reviewStage })
   }
   return candidates.length >= 2 ? candidates : []
 }
@@ -370,6 +378,26 @@ function parseTrustedWorkflow(value: unknown, callId: string, callSeq: number, r
 /** Content identity of a candidate set, independent of labels and container order. */
 function candidateSetKey(contents: readonly string[]): string {
   return stableHash([...contents].map(content => sanitizeVerifierText(content, 1_000_000_000)).sort())
+}
+
+/**
+ * Stage-qualified identity of one reviewed candidate set.
+ *
+ * The stage is part of the identity on purpose: when the same content later arrives with real
+ * execution evidence, it is a different object being asked a different question, and the earlier
+ * proposal review must not suppress it. An explicit call that omits `review_stage` counts as
+ * `artifact`, so every historical call keeps exactly the meaning it had.
+ * @param stage - the review stage the candidate set belongs to.
+ * @param contents - redacted, untruncated candidate contents.
+ * @returns A stable fingerprint for de-duplication.
+ */
+function reviewKey(stage: ReviewStage, contents: readonly string[]): string {
+  return stage + '\u0000' + candidateSetKey(contents)
+}
+
+/** The review stage one explicit call declared; omitted means the historical artifact semantics. */
+function explicitReviewStage(row: Record<string, unknown>): ReviewStage {
+  return row.review_stage === 'proposal' ? 'proposal' : 'artifact'
 }
 
 interface ExplicitReviews {
@@ -398,12 +426,13 @@ function explicitReviewKeys(events: readonly SessionEvent[]): ExplicitReviews {
     try { parsed = JSON.parse(pair.args) } catch { continue }
     if (typeof parsed !== 'object' || parsed === null) continue
     const row = parsed as Record<string, unknown>
+    const stage = explicitReviewStage(row)
     if (pair.name === 'verifier_select' && Array.isArray(row.candidates) && row.candidates.every(value => typeof value === 'string')) {
       const contents = row.candidates as string[]
-      if (contents.length >= 3) reviews.select.add(candidateSetKey(contents))
-      else if (contents.length === 2) reviews.compare.add(candidateSetKey(contents))
+      if (contents.length >= 3) reviews.select.add(reviewKey(stage, contents))
+      else if (contents.length === 2) reviews.compare.add(reviewKey(stage, contents))
     } else if (pair.name === 'verifier_compare' && typeof row.candidate_a === 'string' && typeof row.candidate_b === 'string') {
-      reviews.compare.add(candidateSetKey([row.candidate_a, row.candidate_b]))
+      reviews.compare.add(reviewKey(stage, [row.candidate_a, row.candidate_b]))
     }
   }
   return reviews
@@ -838,7 +867,9 @@ export function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandi
   // hide a newer one that had never been routed.
   groups.sort((a, b) => b[0]!.toSeq - a[0]!.toSeq)
   for (const candidates of groups) {
-    const key = candidateSetKey(candidates.map(candidate => candidate.identity))
+    // The stage is part of the de-duplication credential: an envelope reviewed as an unexecuted
+    // proposal must not suppress the same content arriving later WITH execution evidence.
+    const key = reviewKey(candidates[0]!.reviewStage, candidates.map(candidate => candidate.identity))
     if (candidates.length >= 3) {
       if (reviewed.select.has(key)) continue
       const decision: SelectRouteDecision = { kind: 'select', source: 'structured', confidence: 1, reason: 'trusted workflow candidate envelope', fingerprint: stableHash({ kind: 'select', candidates }), candidates }
@@ -1093,21 +1124,22 @@ export function semanticDecision(output: SemanticRouteOutput, events: readonly S
     return { kind: 'track', source: 'semantic', confidence: output.confidence, reason: output.reason, fingerprint: stableHash({ kind: 'track', seqs: output.checkpointSeqs, steps: rendered.steps }), steps: rendered.steps, checkpoints: rendered.steps.map((_, i) => i + 1), evidenceSeqs: rendered.evidenceSeqs }
   }
   const perItem = itemBudget(output.candidateCallIds.length, maxItemChars, maxInputChars)
-  const candidates = output.candidateCallIds.map((callId, i) => {
+  const candidates = output.candidateCallIds.map((callId, i): CandidateArtifact | undefined => {
     const pair = index.calls.get(callId)
     // Non-evidence calls are not candidates (they were never offered to the classifier);
     // a citation of one is an invalid reference, so the whole decision is rejected
     // instead of comparing metadata as if it were alternative work. A FAILED result is
     // likewise not an alternative to select between.
     if (!pair || !pair.ok || !isEvidenceOutput(pair.name, pair.text)) return undefined
-    return { id: callId, groupId: 'semantic', label: pair.name + ' ' + (i + 1), content: sanitizeVerifierText(pair.text, perItem), identity: sanitizeVerifierText(pair.text, 1_000_000_000), callId, fromSeq: pair.callSeq, toSeq: pair.resultSeq }
+    return { id: callId, groupId: 'semantic', label: pair.name + ' ' + (i + 1), content: sanitizeVerifierText(pair.text, perItem), identity: sanitizeVerifierText(pair.text, 1_000_000_000), callId, fromSeq: pair.callSeq, toSeq: pair.resultSeq, reviewStage: 'artifact' as const }
   }).filter((candidate): candidate is CandidateArtifact => candidate !== undefined)
   if (candidates.length !== output.candidateCallIds.length) return undefined
   // Same-object dedup as the structured pass: an explicit verifier call already reviewed
   // this exact candidate set, so scoring it again would be a duplicate purchase.
   const contents = candidates.map(candidate => candidate.identity)
   const reviews = explicitReviewKeys(events)
-  if (output.kind === 'compare' ? reviews.compare.has(candidateSetKey(contents)) : reviews.select.has(candidateSetKey(contents))) return undefined
+  const key = reviewKey('artifact', contents)
+  if (output.kind === 'compare' ? reviews.compare.has(key) : reviews.select.has(key)) return undefined
   const fingerprint = stableHash({ kind: output.kind, candidates })
   if (output.kind === 'compare') return { kind: 'compare', source: 'semantic', confidence: output.confidence, reason: output.reason, fingerprint, candidates: [candidates[0]!, candidates[1]!] }
   return { kind: 'select', source: 'semantic', confidence: output.confidence, reason: output.reason, fingerprint, candidates }

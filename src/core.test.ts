@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   CRITERIA_PRESETS,
   DEFAULT_CRITERIA,
+  DEFAULT_GROUND_TRUTH_NOTE,
   EMPTY_WORK_BASELINE,
   accumulatePairs,
   bradleyTerry,
@@ -11,6 +12,7 @@ import {
   evidenceNonce,
   extractProgressScore,
   extractScore,
+  PROPOSAL_CRITERIA,
   parseCriteriaMarkdown,
   pivotRoundPairs,
   rankScores,
@@ -240,3 +242,67 @@ describe('criteria markdown', () => {
     expect(EMPTY_WORK_BASELINE).toBe('(No useful work or verification was performed.)')
   })
 })
+
+describe('review stage framing', () => {
+  const criterion = DEFAULT_CRITERIA[0]!
+
+  it('offers a dedicated narrow rubric for unexecuted proposals', () => {
+    // The artifact rubric asks for observed stdout/stderr, so scoring an unexecuted plan with it
+    // fails by construction — that is the whole reason the stage exists.
+    expect(PROPOSAL_CRITERIA).toHaveLength(3)
+    expect(new Set(PROPOSAL_CRITERIA.map(row => row.id)).size).toBe(3)
+    for (const row of PROPOSAL_CRITERIA) {
+      expect(row.description.length).toBeGreaterThan(40)
+      expect(row.name.length).toBeGreaterThan(0)
+    }
+    // A proposal is never measured with the artifact rubric, and vice versa.
+    expect(PROPOSAL_CRITERIA).not.toBe(DEFAULT_CRITERIA)
+    expect(PROPOSAL_CRITERIA.map(row => row.id)).not.toContain('output_match')
+  })
+
+  it('keeps the default (artifact, coding) prompt byte-identical', () => {
+    // The scoring cache keys on the rendered prompt: rewording the default would silently
+    // invalidate every installation's cache and every stored score.
+    const base = buildPairwisePrompt('task', 'A body', 'B body', criterion)
+    expect(buildPairwisePrompt('task', 'A body', 'B body', criterion, undefined, {})).toBe(base)
+    expect(buildPairwisePrompt('task', 'A body', 'B body', criterion, DEFAULT_GROUND_TRUTH_NOTE, { stage: 'artifact', domain: 'coding' })).toBe(base)
+    // An unknown domain must not fall back to claiming a coding agent either.
+    expect(buildPairwisePrompt('task', 'A body', 'B body', criterion, DEFAULT_GROUND_TRUTH_NOTE, { domain: 'custom' })).toBe(base)
+  })
+
+  it('frames a proposal comparison as unexecuted and relabels the blocks', () => {
+    const prompt = buildPairwisePrompt('task', 'plan one', 'plan two', criterion, DEFAULT_GROUND_TRUTH_NOTE, { stage: 'proposal' })
+    expect(prompt).toContain('NOT been executed')
+    expect(prompt).toContain('<<<PROPOSAL_A:')
+    expect(prompt).toContain('<<<PROPOSAL_B:')
+    expect(prompt).not.toContain('<<<TRAJECTORY_A:')
+    expect(prompt).toContain('**Proposal A:**')
+    // A stage note explains that missing stdout is not a defect in a proposal.
+    expect(prompt).toContain('do not score a side down merely because it has no stdout yet')
+    // The verdict contract is unchanged: only the framing differs.
+    expect(prompt).toContain('<score_A> LETTER_A_TO_T </score_A>')
+    expect(extractScore(completion('<score_A> A </score_A>'), '<score_A>')).toBe(1)
+  })
+
+  it('names the task domain instead of always claiming a coding agent', () => {
+    const research = buildPairwisePrompt('task', 'A body', 'B body', criterion, DEFAULT_GROUND_TRUTH_NOTE, { domain: 'research' })
+    expect(research).toContain('AI agent work on research tasks')
+    expect(research).not.toContain('AI coding agents')
+    // Everything that carries evidence stays identical, so a rubric change alone still shares
+    // the trace-heavy prefix.
+    const artifact = buildPairwisePrompt('task', 'A body', 'B body', criterion)
+    expect(research).toContain('<<<TRAJECTORY_A:')
+    expect(artifact).toContain('<<<TASK:')
+  })
+
+  it('keeps the criterion as the only tail-varying part within one stage', () => {
+    // Prefix caching across the criteria of one comparison only works if the stage framing is
+    // constant and the criterion sits last.
+    const first = buildPairwisePrompt('task', 'A body', 'B body', PROPOSAL_CRITERIA[0]!, DEFAULT_GROUND_TRUTH_NOTE, { stage: 'proposal' })
+    const second = buildPairwisePrompt('task', 'A body', 'B body', PROPOSAL_CRITERIA[1]!, DEFAULT_GROUND_TRUTH_NOTE, { stage: 'proposal' })
+    const divergence = first.split('').findIndex((char, index) => char !== second[index])
+    expect(divergence).toBeGreaterThan(0)
+    expect(divergence).toBeGreaterThan(first.indexOf('<<<END_TASK:'))
+  })
+})
+

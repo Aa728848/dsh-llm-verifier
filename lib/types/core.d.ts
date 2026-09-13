@@ -36,6 +36,23 @@ export type CriteriaPresetId = typeof CRITERIA_PRESET_IDS[number];
  * any existing verdict, prompt or cache key.
  */
 export declare const CRITERIA_PRESETS: Record<CriteriaPresetId, Criterion[]>;
+/**
+ * What a comparison's two sides actually are.
+ *
+ * The same numeric verdict means different things per stage, and the acceptance gate only ever
+ * reads the final artifact review: a proposal that "wins" has proven nothing about the work.
+ * Omitting the stage means the historical artifact semantics (see README).
+ */
+export type ReviewStage = 'proposal' | 'artifact';
+/**
+ * Default rubric for the `proposal` stage.
+ *
+ * The artifact rubric asks for observed stdout/stderr ("Output Match"), so an unexecuted plan
+ * scored against it fails by construction — exactly the case the stage split exists to fix.
+ * These three criteria ask the questions a proposal can actually answer; they are deliberately
+ * as narrow as the artifact ones (2-4 narrow criteria beat one broad one).
+ */
+export declare const PROPOSAL_CRITERIA: Criterion[];
 /** Derive a criterion id from free text: lowercase, alphanumerics and underscores, max 40 chars. */
 export declare function slugCriterionId(text: string): string;
 /** Make an id unique against the ids already used, by appending _2, _3, ... */
@@ -76,6 +93,20 @@ export declare function renderDelimitedBlock(tag: string, token: string, content
 export declare const UNTRUSTED_EVIDENCE_NOTE: string;
 export declare function normalizeScoreLetter(token: string): string | undefined;
 export declare function extractScore(completion: CompletionLogprobs, tag: string): number;
+/** Optional stage/domain framing for one pairwise prompt. */
+export interface PairwisePromptOptions {
+    /** Which review stage the two sides belong to; omitted means the historical artifact wording. */
+    stage?: ReviewStage;
+    /**
+     * Task domain the rubric targets (normally the criteria preset id).
+     *
+     * Only the ROLE sentence reacts to it. The `coding` default is byte-identical to the historical
+     * prompt — the scoring cache keys on the rendered prompt, so rewording the default would silently
+     * invalidate every installation's cache — while a research/writing/ops rubric no longer claims to
+     * be judging a coding agent.
+     */
+    domain?: string;
+}
 /**
  * One pairwise prompt focused on a single criterion.
  *
@@ -87,13 +118,14 @@ export declare function extractScore(completion: CompletionLogprobs, tag: string
  * end when editing"), and `VerifierEngine.compare` warms the prefix with one job before
  * fanning out the rest. Keep it that way.
  * @param problem - task statement shown to the judge.
- * @param traceA - candidate A's trajectory.
- * @param traceB - candidate B's trajectory.
+ * @param traceA - candidate A's trajectory or proposal.
+ * @param traceB - candidate B's trajectory or proposal.
  * @param criterion - the single criterion this call scores.
  * @param groundTruthNote - note prepended to every judge prompt.
+ * @param options - review stage and task domain; omitted keeps the historical artifact prompt.
  * @returns The rendered prompt.
  */
-export declare function buildPairwisePrompt(problem: string, traceA: string, traceB: string, criterion: Criterion, groundTruthNote?: string): string;
+export declare function buildPairwisePrompt(problem: string, traceA: string, traceB: string, criterion: Criterion, groundTruthNote?: string, options?: PairwisePromptOptions): string;
 export declare function buildProgressPrompt(problem: string, steps: readonly string[], checkpoints: readonly number[]): string;
 /**
  * One best-of-N drafting prompt.

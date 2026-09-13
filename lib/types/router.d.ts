@@ -1,4 +1,5 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
+import { type ReviewStage } from './core.ts';
 import type { AutoVerifyMode } from './auto.ts';
 /**
  * A unique id for a diagnostic route row that never got a reservation (evidence dropped by the
@@ -33,6 +34,14 @@ export interface CandidateArtifact {
     callId: string;
     fromSeq: number;
     toSeq: number;
+    /**
+     * Which review stage this artifact belongs to.
+     *
+     * A candidate set that was reviewed as an unexecuted proposal must not suppress the SAME
+     * content later arriving with real execution evidence: those are different questions about
+     * different objects. Trusted workflow v1 envelopes and semantic candidates are artifacts.
+     */
+    reviewStage: ReviewStage;
 }
 interface RouteBase {
     source: 'structured' | 'semantic';

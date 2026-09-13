@@ -15,7 +15,7 @@ import { extractSession, sanitizeVerifierText, sessionEvents } from './session.t
 import { CriteriaResolver, type ResolvedCriteria } from './criteria.ts'
 import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, MAX_ROUTE_FEEDBACK_CHARS, type AcceptanceCriterion, type RoutedCandidateRef } from './auto.ts'
 import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, latestDirectUserSeq, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type CandidateArtifact, type Reservation, type RouteDecision, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
-import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, buildGenerationPrompt, buildPairwisePrompt, extractScore } from './core.ts'
+import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, PROPOSAL_CRITERIA, buildGenerationPrompt, buildPairwisePrompt, extractScore, type ReviewStage } from './core.ts'
 import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from './plan-gate.ts'
 import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from './team-gate.ts'
 import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, parseStatisticsQuery, resolveStatisticsFile, summarizeVerdict, type RouteObservation, type StatisticsOverview, type VerifierToolName } from './statistics.ts'
@@ -50,6 +50,15 @@ const criterionResultSchema = { type: 'object' as const, additionalProperties: f
  */
 const acceptanceCriterionResultSchema = { type: 'object' as const, additionalProperties: false, properties: { id: { type: 'string' as const, required: true as const }, name: { type: 'string' as const }, score: { type: 'number' as const, required: true as const } } }
 const commonParams = { criteria: { type: 'array' as const, items: criterionSchema }, repeats: { type: 'integer' as const }, images: { type: 'array' as const, items: { type: 'string' as const }, description: 'Optional HTTPS or data:image/...;base64 images. The selected DSH model must accept image input.' } }
+/**
+ * Review stage an explicit compare/select declares.
+ *
+ * Omitted keeps the historical artifact semantics, so an existing caller's verdict, cache key and
+ * routing de-duplication credential are unchanged. `proposal` means neither side has been executed.
+ */
+const reviewStageParam = { type: 'string' as const, enum: ['proposal', 'artifact'] as const, description: 'Which stage both sides are in. proposal: unexecuted plans/drafts, scored against the proposal rubric (goal/constraints, feasibility, verification design) when criteria is omitted, and never evidence that the task was completed. artifact (default): completed work with its observed output.' }
+const reviewStageField = { type: 'string' as const, required: true as const }
+const criteriaSourceField = { type: 'string' as const, required: true as const }
 function renderJson(value: unknown) { return [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }] }
 function positive(value: number | undefined, fallback: number, field: string): number { const result = value ?? fallback; if (!Number.isSafeInteger(result) || result <= 0) throw new Error('llm-verifier: ' + field + ' must be a positive integer'); return result }
 function capped(value: number | undefined, fallback: number, maximum: number, field: string): number { const result = positive(value, fallback, field); if (result > maximum) throw new Error('llm-verifier: ' + field + ' must be at most ' + maximum); return result }
@@ -192,6 +201,45 @@ export function apply(ctx: Context, config: Config = {}): void {
   // coding preset instead of disabling the gate.
   const criteriaResolver = new CriteriaResolver()
   const configuredCriteria = () => criteriaResolver.resolve(current().criteriaPreset, current().criteriaFile)
+  /**
+   * Which review stage an explicit call declared.
+   *
+   * Omitted keeps the historical artifact semantics, so an existing caller's verdict, cache key
+   * and routing de-duplication credential are byte-identical. An unknown value is refused rather
+   * than silently treated as an artifact: the caller must know what it was scored against.
+   * @param value - the `review_stage` argument.
+   * @returns The resolved stage.
+   */
+  const parseReviewStage = (value: unknown): ReviewStage => {
+    if (value === undefined || value === 'artifact') return 'artifact'
+    if (value === 'proposal') return 'proposal'
+    throw new Error('llm-verifier: review_stage must be proposal or artifact')
+  }
+  /**
+   * The rubric one compare/select actually scores with.
+   *
+   * An explicit `criteria` always wins (the caller keeps control). Otherwise the stage picks the
+   * default: `proposal` scores with the narrow proposal rubric, `artifact` with the configured
+   * one. The resolved source is reported in the verdict so a caller can always tell what it was
+   * judged against, instead of having to infer it from a score.
+   * @param stage - the resolved review stage.
+   * @param criteriaInput - the caller's `criteria` argument, if any.
+   * @returns The rubric plus its reported source.
+   */
+  const stageRubric = async (stage: ReviewStage, criteriaInput: unknown): Promise<ResolvedCriteria> => {
+    if (criteriaInput !== undefined) return { criteria: normalizeCriteria(criteriaInput), source: 'explicit' }
+    if (stage === 'proposal') return { criteria: PROPOSAL_CRITERIA, source: 'proposal' }
+    return configuredCriteria()
+  }
+  /**
+   * Task domain the prompt's role sentence names, taken from the rubric that was resolved.
+   *
+   * `coding` and the unknown-domain sources (`custom`/`fallback`) keep the historical wording;
+   * a research/writing/ops rubric no longer tells the judge it is reading a coding trajectory.
+   * @param rubric - the rubric in effect.
+   * @returns The domain string to forward to the prompt builder.
+   */
+  const rubricDomain = (rubric: ResolvedCriteria): string => rubric.source
   /**
    * Every known topic header, newest first.
    *
@@ -379,10 +427,18 @@ export function apply(ctx: Context, config: Config = {}): void {
     const { verifier, selected } = await engine(agent)
     if (!Number.isSafeInteger(count) || count < MIN_BEST_OF_N || count > MAX_BEST_OF_N) throw new Error('llm-verifier: n must be an integer between ' + MIN_BEST_OF_N + ' and ' + MAX_BEST_OF_N)
     const rounds = capped(repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats')
-    const rubric: ResolvedCriteria = criteriaInput === undefined ? await configuredCriteria() : { criteria: normalizeCriteria(criteriaInput), source: 'explicit' as const }
+    // The two comparisons answer different questions, so by default they use different rubrics:
+    // the drafts are UNEXECUTED text, so ranking them with the artifact rubric ("compare the final
+    // verification command's stdout/stderr") fails every draft by construction. Ranking therefore
+    // defaults to the proposal rubric, while the winner-vs-baseline measurement keeps the
+    // configured DELIVERY rubric — that step predicts the gate and must not be weakened. An
+    // explicit `criteria` still controls both, exactly as before.
+    const rankingRubric: ResolvedCriteria = criteriaInput === undefined ? { criteria: PROPOSAL_CRITERIA, source: 'proposal' } : { criteria: normalizeCriteria(criteriaInput), source: 'explicit' }
+    const baselineRubric: ResolvedCriteria = criteriaInput === undefined ? await configuredCriteria() : rankingRubric
     // Bound the plan before spending the generation: with repeats and an ensemble this tool can
-    // reach the shared explicit ceiling, and an unbounded custom rubric would blow past it.
-    const planned = (selectComparisonsUpperBound(count) + 1) * rubric.criteria.length * rounds * selected.judges.length
+    // reach the shared explicit ceiling, and an unbounded custom rubric would blow past it. The
+    // two phases are counted separately instead of assuming their rubrics are the same size.
+    const planned = (selectComparisonsUpperBound(count) * rankingRubric.criteria.length + baselineRubric.criteria.length) * rounds * selected.judges.length
     if (planned > MAX_EXPLICIT_PLANNED_CALLS) throw new Error('llm-verifier: best-of-n with n=' + count + ' would issue about ' + planned + ' judge calls; reduce n, repeats, criteria or judges')
     // The drafting model is the session's OWN model, read from the logged request header: no new
     // configuration, and the drafts come from exactly the model the task is being done with.
@@ -439,7 +495,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (survivors.length < MIN_BEST_OF_N) failWithUsage(new Error('llm-verifier: best-of-n produced ' + survivors.length + ' usable draft(s) out of ' + count + '; at least ' + MIN_BEST_OF_N + ' are required to choose between them' + (failures.length === 0 ? '' : ' — ' + failures.join('; '))))
     let ranked: Awaited<ReturnType<typeof verifier.select>>
     try {
-      ranked = await verifier.select({ problem, candidates: survivors.map(survivor => survivor.text), criteria: rubric.criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats: rounds, pivots: Math.min(2, survivors.length), seed: 0, ...(trace ? { trace } : {}) }, signal)
+      ranked = await verifier.select({ problem, candidates: survivors.map(survivor => survivor.text), criteria: rankingRubric.criteria, ...(rankingRubric.groundTruthNote ? { groundTruthNote: rankingRubric.groundTruthNote } : {}), repeats: rounds, pivots: Math.min(2, survivors.length), seed: 0, reviewStage: 'proposal', domain: rankingRubric.source, ...(trace ? { trace } : {}) }, signal)
     } catch (error) {
       // The drafts are already paid for; a tournament failure must not hide them.
       mergeRunStats(generation, partialStats(error))
@@ -453,7 +509,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // tournament above, so without it two different comparisons share one set of labels.
     let compared: Awaited<ReturnType<typeof verifier.compare>>
     try {
-      compared = await verifier.compare({ problem, candidateA: ranked.best, candidateB: EMPTY_WORK_BASELINE, criteria: rubric.criteria, traceLabelPrefix: 'baseline: ', ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats: rounds, ...(trace ? { trace } : {}) }, signal)
+      compared = await verifier.compare({ problem, candidateA: ranked.best, candidateB: EMPTY_WORK_BASELINE, criteria: baselineRubric.criteria, traceLabelPrefix: 'baseline: ', reviewStage: 'artifact', domain: baselineRubric.source, ...(baselineRubric.groundTruthNote ? { groundTruthNote: baselineRubric.groundTruthNote } : {}), repeats: rounds, ...(trace ? { trace } : {}) }, signal)
     } catch (error) {
       // Baseline scoring failed: keep the generation AND tournament usage that preceded it.
       mergeRunStats(generation, partialStats(error))
@@ -472,6 +528,18 @@ export function apply(ctx: Context, config: Config = {}): void {
     const result = {
       best: ranked.best,
       index: ranked.index,
+      /**
+       * The drafts are text this tool generated; it never executed or tested them.
+       *
+       * Reported explicitly so a caller cannot read the tournament ranking as evidence that the
+       * winning draft was verified — only `score`/`passesThreshold` (from the baseline
+       * comparison) carry the gate's meaning.
+       */
+      rankingStage: 'proposal' as const,
+      rankingCriteriaSource: rankingRubric.source,
+      rankingCriteriaCount: rankingRubric.criteria.length,
+      baselineCriteriaSource: baselineRubric.source,
+      baselineCriteriaCount: baselineRubric.criteria.length,
       /** 1-based draft numbers of the survivors, in `scores`/`ranking` order. */
       sources: survivors.map(survivor => survivor.attempt),
       scores: ranked.scores,
@@ -1203,15 +1271,15 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   })
 
-  ctx.tools.register(defineTool({ name: 'verifier_compare', description: 'Use autonomously when exactly two substantive answers, patches, plans, or execution trajectories need an independent evidence-based comparison and the choice is consequential or uncertain. Do not use for trivial deterministic questions or when there is only one candidate. Uses the verifier model selected in DSH Settings (or the configured judge ensemble) with top-logprob A–T expectations when supported and explicit-tag fallback otherwise.', parameters: { problem: { type: 'string', required: true }, candidate_a: { type: 'string', required: true }, candidate_b: { type: 'string', required: true }, ...commonParams }, output: { schema: { type: 'object', additionalProperties: false, properties: { scoreA: { type: 'number', required: true }, scoreB: { type: 'number', required: true }, winner: { type: 'string', enum: ['A', 'B', 'tie'], required: true }, criteria: { type: 'array', items: criterionResultSchema, required: true }, identical: { type: 'boolean' }, agreement: { type: 'number', required: true }, calls: { type: 'integer', required: true }, stats: { ...statsSchema, required: true }, provider: { type: 'string', required: true }, model: { type: 'string', required: true }, judges: judgesSchema } }, render: (_args, value) => renderJson(value) }, timeoutMs: entry.timeoutMs * 20, async execute(args, exec) { requireEnabled(); const agent = requireAgent(exec.agent); return record('verifier_compare', agent, async (trace) => { const { verifier, selected } = await engine(agent); const [problem, candidateA, candidateB] = explicitEvidence([args.problem, args.candidate_a, args.candidate_b], explicitItemChars(selected), explicitBudget(selected), 'compare input'); const rubric = args.criteria === undefined ? await configuredCriteria() : { criteria: normalizeCriteria(args.criteria), source: 'explicit' as const }; const repeats = capped(args.repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats'); const planned = rubric.criteria.length * repeats * selected.judges.length; if (planned > MAX_EXPLICIT_PLANNED_CALLS) throw new Error('llm-verifier: this comparison would issue about ' + planned + ' judge calls; reduce repeats, criteria or judges'); const result = await verifier.compare({ problem, candidateA, candidateB, criteria: rubric.criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats, images: await images(args.images, exec.signal), ...(trace ? { trace } : {}) }, exec.signal); return { result, selected } }) } }))
+  ctx.tools.register(defineTool({ name: 'verifier_compare', description: 'Use autonomously when exactly two substantive answers, patches, plans, or execution trajectories need an independent evidence-based comparison and the choice is consequential or uncertain. Do not use for trivial deterministic questions or when there is only one candidate. Uses the verifier model selected in DSH Settings (or the configured judge ensemble) with top-logprob A–T expectations when supported and explicit-tag fallback otherwise. Pass review_stage="proposal" when neither side has been executed yet: the default rubric then becomes goal/constraints, feasibility and verification design, and the verdict reports reviewStage and criteriaSource. A proposal win is never evidence that the task was completed.', parameters: { problem: { type: 'string', required: true }, candidate_a: { type: 'string', required: true }, candidate_b: { type: 'string', required: true }, review_stage: reviewStageParam, ...commonParams }, output: { schema: { type: 'object', additionalProperties: false, properties: { scoreA: { type: 'number', required: true }, scoreB: { type: 'number', required: true }, winner: { type: 'string', enum: ['A', 'B', 'tie'], required: true }, criteria: { type: 'array', items: criterionResultSchema, required: true }, identical: { type: 'boolean' }, reviewStage: reviewStageField, criteriaSource: criteriaSourceField, agreement: { type: 'number', required: true }, calls: { type: 'integer', required: true }, stats: { ...statsSchema, required: true }, provider: { type: 'string', required: true }, model: { type: 'string', required: true }, judges: judgesSchema } }, render: (_args, value) => renderJson(value) }, timeoutMs: entry.timeoutMs * 20, async execute(args, exec) { requireEnabled(); const agent = requireAgent(exec.agent); return record('verifier_compare', agent, async (trace) => { const { verifier, selected } = await engine(agent); const [problem, candidateA, candidateB] = explicitEvidence([args.problem, args.candidate_a, args.candidate_b], explicitItemChars(selected), explicitBudget(selected), 'compare input'); const stage = parseReviewStage(args.review_stage); const rubric = await stageRubric(stage, args.criteria); const repeats = capped(args.repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats'); const planned = rubric.criteria.length * repeats * selected.judges.length; if (planned > MAX_EXPLICIT_PLANNED_CALLS) throw new Error('llm-verifier: this comparison would issue about ' + planned + ' judge calls; reduce repeats, criteria or judges'); const result = await verifier.compare({ problem, candidateA, candidateB, criteria: rubric.criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats, reviewStage: stage, domain: rubricDomain(rubric), images: await images(args.images, exec.signal), ...(trace ? { trace } : {}) }, exec.signal); return { result: { ...result, reviewStage: stage, criteriaSource: rubric.source }, selected } }) } }))
 
-  ctx.tools.register(defineTool({ name: 'verifier_select', description: 'Use autonomously when three or more substantive candidate answers, patches, plans, or trajectories must be ranked and an independent choice is valuable. Use verifier_compare for exactly two candidates. Generating extra candidates pays off only when the artifact is a final deliverable and choosing wrong is expensive: produce them (for example with parallel subagents), then rank the real ones here. Do not pad the list with near-duplicates. Deterministic orchestrators should call this directly once they have three or more real candidates.', parameters: { problem: { type: 'string', required: true }, candidates: { type: 'array', items: { type: 'string' }, required: true }, ...commonParams, pivots: { type: 'integer' }, seed: { type: 'integer' } }, output: { schema: { type: 'object', additionalProperties: false, properties: { index: { type: 'integer', required: true }, best: { type: 'string', required: true }, identical: { type: 'boolean' }, scores: { type: 'array', items: { type: 'number' }, required: true }, ranking: { type: 'array', items: { type: 'integer' }, required: true }, pivots: { type: 'array', items: { type: 'integer' }, required: true }, comparisons: { type: 'integer', required: true }, calls: { type: 'integer', required: true }, stats: { ...statsSchema, required: true }, provider: { type: 'string', required: true }, model: { type: 'string', required: true }, judges: judgesSchema } }, render: (_args, value) => renderJson(value) }, timeoutMs: entry.timeoutMs * 100, async execute(args, exec) { requireEnabled(); const agent = requireAgent(exec.agent); return record('verifier_select', agent, async (trace) => { const { verifier, selected } = await engine(agent); const limit = explicitCandidateLimit(selected); if (args.candidates.length > limit) throw new Error('llm-verifier: candidates must contain at most ' + limit + ' entries'); const candidates = explicitEvidence(args.candidates, explicitItemChars(selected), explicitBudget(selected), 'candidates'); const rubric = args.criteria === undefined ? await configuredCriteria() : { criteria: normalizeCriteria(args.criteria), source: 'explicit' as const }; const criteria = rubric.criteria; const repeats = capped(args.repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats'); const pivots = capped(args.pivots, 2, Math.max(1, candidates.length), 'pivots'); const planned = selectComparisonsUpperBound(candidates.length, pivots) * criteria.length * repeats * selected.judges.length; if (planned > MAX_EXPLICIT_PLANNED_CALLS) throw new Error('llm-verifier: this selection would issue about ' + planned + ' judge calls (candidates x criteria x repeats x judges); reduce candidates, pivots, criteria, repeats or judges'); const result = await verifier.select({ problem: sanitizeVerifierText(args.problem, explicitItemChars(selected)), candidates, criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats, pivots, seed: args.seed ?? 0, images: await images(args.images, exec.signal), ...(trace ? { trace } : {}) }, exec.signal); return { result, selected } }) } }))
+  ctx.tools.register(defineTool({ name: 'verifier_select', description: 'Use autonomously when three or more substantive candidate answers, patches, plans, or trajectories must be ranked and an independent choice is valuable. Use verifier_compare for exactly two candidates. Generating extra candidates pays off only when the artifact is a final deliverable and choosing wrong is expensive: produce them (for example with parallel subagents), then rank the real ones here. Do not pad the list with near-duplicates. Deterministic orchestrators should call this directly once they have three or more real candidates. Pass review_stage="proposal" to rank unexecuted plans or drafts: the default rubric then becomes goal/constraints, feasibility and verification design, and the verdict reports reviewStage and criteriaSource — relative shares, never an acceptance result.', parameters: { problem: { type: 'string', required: true }, candidates: { type: 'array', items: { type: 'string' }, required: true }, review_stage: reviewStageParam, ...commonParams, pivots: { type: 'integer' }, seed: { type: 'integer' } }, output: { schema: { type: 'object', additionalProperties: false, properties: { index: { type: 'integer', required: true }, best: { type: 'string', required: true }, identical: { type: 'boolean' }, reviewStage: reviewStageField, criteriaSource: criteriaSourceField, scores: { type: 'array', items: { type: 'number' }, required: true }, ranking: { type: 'array', items: { type: 'integer' }, required: true }, pivots: { type: 'array', items: { type: 'integer' }, required: true }, comparisons: { type: 'integer', required: true }, calls: { type: 'integer', required: true }, stats: { ...statsSchema, required: true }, provider: { type: 'string', required: true }, model: { type: 'string', required: true }, judges: judgesSchema } }, render: (_args, value) => renderJson(value) }, timeoutMs: entry.timeoutMs * 100, async execute(args, exec) { requireEnabled(); const agent = requireAgent(exec.agent); return record('verifier_select', agent, async (trace) => { const { verifier, selected } = await engine(agent); const limit = explicitCandidateLimit(selected); if (args.candidates.length > limit) throw new Error('llm-verifier: candidates must contain at most ' + limit + ' entries'); const candidates = explicitEvidence(args.candidates, explicitItemChars(selected), explicitBudget(selected), 'candidates'); const stage = parseReviewStage(args.review_stage); const rubric = await stageRubric(stage, args.criteria); const criteria = rubric.criteria; const repeats = capped(args.repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats'); const pivots = capped(args.pivots, 2, Math.max(1, candidates.length), 'pivots'); const planned = selectComparisonsUpperBound(candidates.length, pivots) * criteria.length * repeats * selected.judges.length; if (planned > MAX_EXPLICIT_PLANNED_CALLS) throw new Error('llm-verifier: this selection would issue about ' + planned + ' judge calls (candidates x criteria x repeats x judges); reduce candidates, pivots, criteria, repeats or judges'); const result = await verifier.select({ problem: sanitizeVerifierText(args.problem, explicitItemChars(selected)), candidates, criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats, pivots, seed: args.seed ?? 0, reviewStage: stage, domain: rubricDomain(rubric), images: await images(args.images, exec.signal), ...(trace ? { trace } : {}) }, exec.signal); return { result: { ...result, reviewStage: stage, criteriaSource: rubric.source }, selected } }) } }))
 
   ctx.tools.register(defineTool({ name: 'verifier_track', description: 'Use autonomously for a genuinely multi-step task when progress at explicit checkpoints is uncertain or needs evidence-based measurement. Deterministic goal/workflow orchestrators should call this directly when real checkpoints already exist. Do not use for a single completed answer or invent checkpoints.', parameters: { problem: { type: 'string', required: true }, steps: { type: 'array', items: { type: 'string' }, required: true }, checkpoints: { type: 'array', items: { type: 'integer' }, required: true }, repeats: commonParams.repeats, images: commonParams.images }, output: { schema: { type: 'object', additionalProperties: false, properties: { scores: { type: 'array', items: { type: 'number' }, required: true }, perRepeat: { type: 'array', items: { type: 'array', items: { type: 'number' } }, required: true }, calls: { type: 'integer', required: true }, stats: { ...statsSchema, required: true }, provider: { type: 'string', required: true }, model: { type: 'string', required: true }, judges: judgesSchema } }, render: (_args, value) => renderJson(value) }, timeoutMs: entry.timeoutMs * 20, async execute(args, exec) { requireEnabled(); const agent = requireAgent(exec.agent); return record('verifier_track', agent, async (trace) => { const { verifier, selected } = await engine(agent); if (args.steps.length > MAX_TRACK_STEPS) throw new Error('llm-verifier: steps must contain at most ' + MAX_TRACK_STEPS + ' entries'); const steps = explicitEvidence(args.steps, explicitItemChars(selected), explicitBudget(selected), 'steps'); const result = await verifier.track(sanitizeVerifierText(args.problem, explicitItemChars(selected)), steps, args.checkpoints, capped(args.repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats'), exec.signal, await images(args.images, exec.signal), trace); return { result, selected } }) } }))
 
   ctx.tools.register(defineTool({
     name: 'verifier_best_of_n',
-    description: 'Use ONLY when a final deliverable is expensive to get wrong and no candidate exists yet: this drafts n independent candidates with the current session model, has the independent verifier rank them, and then re-scores the winner against the same fixed empty-work baseline the automatic acceptance gate uses. A draft that hits its output ceiling is kept and listed in truncated — the judge sees the incomplete text and scores it as such, and discarding it would waste a generation already paid for. It is by far the most expensive verifier tool: on the default 3-criterion rubric it costs 2 generations + 12 judge calls at n=2, 3 + 24 at n=3, and 4 + 36..60 at n=4 — never call it per turn, for trivial questions, or to compare candidates you already have (rank those with verifier_select or verifier_compare). scores are RELATIVE tournament shares; only score, criteria, threshold and passesThreshold are absolute and comparable with the acceptance gate. Requires a session whose model is already known; if the session has no logged request header, write the candidates with parallel subagents and call verifier_select instead.',
+    description: 'Use ONLY when a final deliverable is expensive to get wrong and no candidate exists yet: this drafts n independent candidates with the current session model, has the independent verifier rank them, and then re-scores the winner against the same fixed empty-work baseline the automatic acceptance gate uses. A draft that hits its output ceiling is kept and listed in truncated — the judge sees the incomplete text and scores it as such, and discarding it would waste a generation already paid for. It is by far the most expensive verifier tool: on the default 3-criterion rubric it costs 2 generations + 12 judge calls at n=2, 3 + 24 at n=3, and 4 + 36..60 at n=4 — never call it per turn, for trivial questions, or to compare candidates you already have (rank those with verifier_select or verifier_compare). By default the tournament ranks the drafts with the proposal rubric (they are unexecuted text, so the artifact rubric would fail them by construction) while the winner-vs-baseline step keeps the configured delivery rubric; an explicit criteria applies to both. rankingStage/rankingCriteriaSource/baselineCriteriaSource report which rubric each phase used. scores are RELATIVE tournament shares; only score, criteria, threshold and passesThreshold are absolute and comparable with the acceptance gate. Requires a session whose model is already known; if the session has no logged request header, write the candidates with parallel subagents and call verifier_select instead.',
     parameters: {
       task: { type: 'string', required: true, description: 'The request every draft must answer. Bound to the explicit per-item evidence cap after redaction.' },
       n: { type: 'integer', description: 'How many independent drafts to generate; between 2 and 4, default 3. Cost grows with n.' },
@@ -1225,6 +1293,11 @@ export function apply(ctx: Context, config: Config = {}): void {
         properties: {
           best: { type: 'string', required: true },
           index: { type: 'integer', required: true },
+          rankingStage: { type: 'string', required: true },
+          rankingCriteriaSource: { type: 'string', required: true },
+          rankingCriteriaCount: { type: 'integer', required: true },
+          baselineCriteriaSource: { type: 'string', required: true },
+          baselineCriteriaCount: { type: 'integer', required: true },
           sources: { type: 'array', items: { type: 'integer' }, required: true },
           scores: { type: 'array', items: { type: 'number' }, required: true },
           ranking: { type: 'array', items: { type: 'integer' }, required: true },

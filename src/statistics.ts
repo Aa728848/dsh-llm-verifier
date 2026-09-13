@@ -19,6 +19,15 @@ export interface VerdictSummary {
   baselineScore?: number
   winner?: 'A' | 'B' | 'tie'
   threshold?: number
+  /**
+   * Review stage the call declared (P02): `proposal` means unexecuted plans/drafts.
+   *
+   * Optional and additive: old records have no stage and are rendered as artifacts, which is
+   * exactly the semantics they were produced under.
+   */
+  reviewStage?: string
+  /** Which rubric produced the score: a preset id, `proposal`, `explicit`, `custom` or `fallback`. */
+  criteriaSource?: string
 }
 
 /** Upper bound on the stored checkpoint progression; one explicit call can legitimately carry 32 steps. */
@@ -52,11 +61,17 @@ export function summarizeVerdict(toolName: VerifierToolName, value: unknown, pha
   const scores = Array.isArray(row.scores) ? row.scores.filter((entry): entry is number => typeof entry === 'number' && Number.isFinite(entry)) : []
   const winner = row.winner === 'A' || row.winner === 'B' || row.winner === 'tie' ? row.winner : undefined
   if (toolName === 'verifier_route_classify') return { phase, outcome: 'classified' }
+  // The stage and the rubric that actually scored are part of the verdict: "which object was
+  // judged, and against what" cannot be recovered from a score alone.
+  const framing = {
+    ...(typeof row.reviewStage === 'string' ? { reviewStage: row.reviewStage } : {}),
+    ...(typeof row.criteriaSource === 'string' ? { criteriaSource: row.criteriaSource } : {}),
+  }
   if (toolName === 'verifier_select') {
-    if (row.identical === true) return { phase, outcome: 'identical-candidates' }
+    if (row.identical === true) return { phase, outcome: 'identical-candidates', ...framing }
     const index = numberAt('index')
     const best = index === undefined ? undefined : scores[index]
-    return { phase, outcome: 'ranked', ...(best !== undefined ? { score: best } : {}) }
+    return { phase, outcome: 'ranked', ...(best !== undefined ? { score: best } : {}), ...framing }
   }
   if (toolName === 'verifier_track') {
     // The verdict reports the newest checkpoint (the one the continuation decision
@@ -85,6 +100,7 @@ export function summarizeVerdict(toolName: VerifierToolName, value: unknown, pha
       ...(score !== undefined ? { score } : {}),
       ...(scoreB !== undefined ? { scoreB } : {}),
       ...(winner !== undefined ? { winner } : {}),
+      ...framing,
     }
   }
   // The remaining tools are both measured against the fixed empty-work baseline. A best-of-N
@@ -138,6 +154,10 @@ function acceptanceVerdict(row: Record<string, unknown>, phase: string, threshol
     ...(criteria.length > 0 ? { criteria } : {}),
     ...(winner !== undefined ? { winner } : {}),
     threshold,
+    // best-of_n reports both phases; the gate-facing rubric is the baseline one, and the drafts
+    // it ranked were proposals. A plain session acceptance carries neither field.
+    ...(typeof row.rankingStage === 'string' ? { reviewStage: row.rankingStage } : {}),
+    ...(typeof row.baselineCriteriaSource === 'string' ? { criteriaSource: row.baselineCriteriaSource } : {}),
   }
 }
 

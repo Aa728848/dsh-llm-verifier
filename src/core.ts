@@ -141,6 +141,41 @@ export const CRITERIA_PRESETS: Record<CriteriaPresetId, Criterion[]> = {
   ],
 }
 
+/**
+ * What a comparison's two sides actually are.
+ *
+ * The same numeric verdict means different things per stage, and the acceptance gate only ever
+ * reads the final artifact review: a proposal that "wins" has proven nothing about the work.
+ * Omitting the stage means the historical artifact semantics (see README).
+ */
+export type ReviewStage = 'proposal' | 'artifact'
+
+/**
+ * Default rubric for the `proposal` stage.
+ *
+ * The artifact rubric asks for observed stdout/stderr ("Output Match"), so an unexecuted plan
+ * scored against it fails by construction — exactly the case the stage split exists to fix.
+ * These three criteria ask the questions a proposal can actually answer; they are deliberately
+ * as narrow as the artifact ones (2-4 narrow criteria beat one broad one).
+ */
+export const PROPOSAL_CRITERIA: Criterion[] = [
+  {
+    id: 'goal_and_constraints',
+    name: 'Goal And Constraints',
+    description: "Does the proposed approach address exactly the stated goal, including every explicit constraint (paths, formats, interfaces, naming, scope)? Penalize a plausible approach to a nearby but different problem and required steps that are missing altogether.",
+  },
+  {
+    id: 'feasibility',
+    name: 'Feasibility',
+    description: "Could the proposed steps actually be carried out with the tools, files and environment the task names? Reward concrete, ordered actions with their prerequisites; penalize hand-waving, invented APIs and steps that contradict the stated environment. Distinguish \"we will run X\" from \"we ran X and saw Y\".",
+  },
+  {
+    id: 'verification_design',
+    name: 'Verification Design',
+    description: 'Does the proposal say how the result will be checked and what observed output would prove it? Reward a specific, relevant check with the expected result; penalize claims of success with no described way to confirm them, and do not demand terminal output from a deliverable that is pure text.',
+  },
+]
+
 /** Derive a criterion id from free text: lowercase, alphanumerics and underscores, max 40 chars. */
 export function slugCriterionId(text: string): string {
   const slug = text.toLowerCase().replace(/[^a-z0-9]+/gu, '_').replace(/^_+|_+$/gu, '')
@@ -277,6 +312,49 @@ export function extractScore(completion: CompletionLogprobs, tag: string): numbe
   return (letterValue(letter) - 1) / (GRANULARITY - 1)
 }
 
+/** Optional stage/domain framing for one pairwise prompt. */
+export interface PairwisePromptOptions {
+  /** Which review stage the two sides belong to; omitted means the historical artifact wording. */
+  stage?: ReviewStage
+  /**
+   * Task domain the rubric targets (normally the criteria preset id).
+   *
+   * Only the ROLE sentence reacts to it. The `coding` default is byte-identical to the historical
+   * prompt — the scoring cache keys on the rendered prompt, so rewording the default would silently
+   * invalidate every installation's cache — while a research/writing/ops rubric no longer claims to
+   * be judging a coding agent.
+   */
+  domain?: string
+}
+
+/** Role sentence for a completed-artifact review of a coding task (the historical wording). */
+const EVALUATOR_ROLE_ARTIFACT = 'You are an expert evaluator of AI coding agents. You will see a task description and two agent trajectories, then evaluate them on ONE specific criterion, stated at the end.'
+/** Role sentence for an unexecuted proposal: there is no trajectory and no observed output. */
+const EVALUATOR_ROLE_PROPOSAL = 'You are an expert evaluator of AI agent plans and drafts. You will see a task description and two PROPOSED approaches that have NOT been executed, then evaluate them on ONE specific criterion, stated at the end.'
+
+/**
+ * Stage note for a proposal comparison.
+ *
+ * Constant text (no untrusted content), placed before the evidence blocks so the criterion stays
+ * the single tail-varying part and the per-criterion prefix caching still holds.
+ */
+const PROPOSAL_STAGE_NOTE = 'Neither side has been executed, so no observed tool output exists for either one. Judge the approach itself: treat "we will run X" as a plan to evaluate, never as evidence that X happened, and do not score a side down merely because it has no stdout yet.'
+
+/**
+ * The evaluator role sentence for one prompt.
+ *
+ * `custom` and `fallback` rubrics are of unknown domain, so they get the domain-neutral wording
+ * instead of an unearned "coding agents" claim.
+ * @param options - stage/domain framing.
+ * @returns The role sentence.
+ */
+function evaluatorRole(options: PairwisePromptOptions): string {
+  if (options.stage === 'proposal') return EVALUATOR_ROLE_PROPOSAL
+  const domain = options.domain?.trim() ?? ''
+  if (!domain || domain === 'coding' || domain === 'custom' || domain === 'fallback') return EVALUATOR_ROLE_ARTIFACT
+  return 'You are an expert evaluator of AI agent work on ' + domain + ' tasks. You will see a task description and two completed attempts, then evaluate them on ONE specific criterion, stated at the end.'
+}
+
 /**
  * One pairwise prompt focused on a single criterion.
  *
@@ -288,24 +366,29 @@ export function extractScore(completion: CompletionLogprobs, tag: string): numbe
  * end when editing"), and `VerifierEngine.compare` warms the prefix with one job before
  * fanning out the rest. Keep it that way.
  * @param problem - task statement shown to the judge.
- * @param traceA - candidate A's trajectory.
- * @param traceB - candidate B's trajectory.
+ * @param traceA - candidate A's trajectory or proposal.
+ * @param traceB - candidate B's trajectory or proposal.
  * @param criterion - the single criterion this call scores.
  * @param groundTruthNote - note prepended to every judge prompt.
+ * @param options - review stage and task domain; omitted keeps the historical artifact prompt.
  * @returns The rendered prompt.
  */
-export function buildPairwisePrompt(problem: string, traceA: string, traceB: string, criterion: Criterion, groundTruthNote = DEFAULT_GROUND_TRUTH_NOTE): string {
+export function buildPairwisePrompt(problem: string, traceA: string, traceB: string, criterion: Criterion, groundTruthNote = DEFAULT_GROUND_TRUTH_NOTE, options: PairwisePromptOptions = {}): string {
   const token = evidenceNonce(problem, traceA, traceB)
+  const proposal = options.stage === 'proposal'
+  const tagA = proposal ? 'PROPOSAL_A' : 'TRAJECTORY_A'
+  const tagB = proposal ? 'PROPOSAL_B' : 'TRAJECTORY_B'
   return [
-    'You are an expert evaluator of AI coding agents. You will see a task description and two agent trajectories, then evaluate them on ONE specific criterion, stated at the end.',
+    evaluatorRole(options),
     groundTruthNote,
     UNTRUSTED_EVIDENCE_NOTE,
+    ...(proposal ? [PROPOSAL_STAGE_NOTE] : []),
     '**Task:**\n' + renderDelimitedBlock('TASK', token, problem),
-    '**Trajectory A:**\n' + renderDelimitedBlock('TRAJECTORY_A', token, traceA),
-    '**Trajectory B:**\n' + renderDelimitedBlock('TRAJECTORY_B', token, traceB),
+    '**' + (proposal ? 'Proposal A' : 'Trajectory A') + ':**\n' + renderDelimitedBlock(tagA, token, traceA),
+    '**' + (proposal ? 'Proposal B' : 'Trajectory B') + ':**\n' + renderDelimitedBlock(tagB, token, traceB),
     '**Rating Scale:**\n' + SCALE_DESCRIPTION,
     '**Evaluation Guideline — ' + criterion.name + ':**\n' + criterion.description,
-    'Score each trajectory ONLY on this specific criterion ("' + criterion.name + '"). Ignore other aspects that are not relevant to it.',
+    'Score each ' + (proposal ? 'proposal' : 'trajectory') + ' ONLY on this specific criterion ("' + criterion.name + '"). Ignore other aspects that are not relevant to it.',
     'Reason it through first, then END your reply with exactly these two lines and nothing after them. Replace each placeholder with a single letter A-T, keeping the spaces around the letter exactly as shown:\n<score_A> LETTER_A_TO_T </score_A>\n<score_B> LETTER_A_TO_T </score_B>',
     'Begin your analysis now.',
   ].join('\n\n')

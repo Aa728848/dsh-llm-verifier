@@ -812,6 +812,21 @@ describe('structured route dedup and selection', () => {
     expect(analyzeStructuredRoute(value.events)).toBeUndefined()
   })
 
+  it('does not let a proposal review suppress an artifact route over the same content', () => {
+    // A proposal review and an artifact review are different questions about different objects:
+    // the same text arriving later WITH execution evidence must still be routed. Omitted
+    // `review_stage` deliberately keeps the old artifact credential (covered by the
+    // "skips the same candidate set" test above).
+    const value = session()
+    const contents = ['a', 'b', 'c']
+    tool(value, 'workflow', 'w', group('g', contents))
+    value.append('tool/call', { turn: 1, step: 1, callId: 'sel' as never, name: 'verifier_select', arguments: JSON.stringify({ problem: 'p', candidates: contents, review_stage: 'proposal' }) })
+    value.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'sel' as never, content: [{ type: 'text', text: '{"index":0}' }], isError: false }) }, { surfaceOp: 'append' })
+    const decision = analyzeStructuredRoute(value.events)
+    expect(decision?.kind).toBe('select')
+    if (decision?.kind === 'select') expect(decision.candidates[0]!.reviewStage).toBe('artifact')
+  })
+
   it('deduplicates a long candidate whose prompt copy was truncated', () => {
     // The routing copy is capped, so hashing the RENDERED content never matched the
     // untruncated explicit arguments. The identity field keeps the two in sync.

@@ -1,7 +1,7 @@
 import { type UsageStats, type VerifierClientConfig, type VerifierImage } from './caller.ts';
 import { ScoreCache, SingleFlight, type CachedPairScore } from './cache.ts';
 import type { DecisionTrace } from './decisions.ts';
-import { DEFAULT_GROUND_TRUTH_NOTE, type Criterion } from './core.ts';
+import { DEFAULT_GROUND_TRUTH_NOTE, type Criterion, type ReviewStage } from './core.ts';
 export interface CompareOptions {
     problem: string;
     candidateA: string;
@@ -10,8 +10,19 @@ export interface CompareOptions {
     groundTruthNote?: string;
     repeats?: number;
     images?: readonly VerifierImage[];
-    trace?: DecisionTrace; /** Prefix for this comparison's decision-snapshot labels; one invocation that judges twice on the same criteria needs them distinguishable. */
+    trace?: DecisionTrace;
+    /** Prefix for this comparison's decision-snapshot labels; one invocation that judges twice on the same criteria needs them distinguishable. */
     traceLabelPrefix?: string;
+    /**
+     * Which review stage both sides belong to.
+     *
+     * `proposal` switches the default rubric to {@link PROPOSAL_CRITERIA} and the prompt to the
+     * unexecuted-draft framing; omitted (or `artifact`) keeps the historical semantics, so every
+     * existing caller, cache key and verdict is unchanged.
+     */
+    reviewStage?: ReviewStage;
+    /** Task domain for the prompt's role sentence; normally the criteria preset id. */
+    domain?: string;
 }
 export interface CriterionResult {
     id: string;
@@ -68,6 +79,10 @@ export interface SelectOptions {
     seed?: number;
     images?: readonly VerifierImage[];
     trace?: DecisionTrace;
+    /** Review stage applied to every pair of the tournament; see {@link CompareOptions.reviewStage}. */
+    reviewStage?: ReviewStage;
+    /** Task domain for the prompt's role sentence; normally the criteria preset id. */
+    domain?: string;
 }
 export interface SelectResult {
     index: number;
@@ -141,6 +156,16 @@ export declare class VerifierEngine {
         hit: boolean;
     }>);
     private finishStats;
+    /**
+     * Prompt framing for one comparison.
+     *
+     * Rebuilt from the stage/domain the caller declared. Both fields are part of the RENDERED
+     * prompt, so the score cache keys on them automatically; the cache's `version` does not need
+     * to move when only this framing changes.
+     * @param options - the comparison's options.
+     * @returns Stage and domain to forward to {@link buildPairwisePrompt}.
+     */
+    private framing;
     private scoreOne;
     private mapLimited;
     /**

@@ -17,6 +17,15 @@ export interface VerdictSummary {
     baselineScore?: number;
     winner?: 'A' | 'B' | 'tie';
     threshold?: number;
+    /**
+     * Review stage the call declared (P02): `proposal` means unexecuted plans/drafts.
+     *
+     * Optional and additive: old records have no stage and are rendered as artifacts, which is
+     * exactly the semantics they were produced under.
+     */
+    reviewStage?: string;
+    /** Which rubric produced the score: a preset id, `proposal`, `explicit`, `custom` or `fallback`. */
+    criteriaSource?: string;
 }
 /** Thresholds the verdict summary needs; plain values keep the mapping a pure function. */
 export interface VerdictThresholds {

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { apply } from './index.ts'
 import { partialStats } from './engine.ts'
+import { PROPOSAL_CRITERIA } from './core.ts'
 
 const tempDirs: string[] = []
 function tempDir(): string { const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-assembly-')); tempDirs.push(dir); return dir }
@@ -196,7 +197,7 @@ function scriptedStream(strongDraft: number, failing: readonly number[], calls: 
       // engine before the tournament, which changes the cost this suite measures.
       return textStream((number === strongDraft ? STRONG_DRAFT : WEAK_DRAFT) + ' Draft ' + number + '.', truncating.includes(number) ? 'max-tokens' : 'stop')
     }
-    return textStream('reasoning\n<score_A> ' + verdictLetter(section(prompt, 'TRAJECTORY_A')) + ' </score_A>\n<score_B> ' + verdictLetter(section(prompt, 'TRAJECTORY_B')) + ' </score_B>')
+    return textStream('reasoning\n<score_A> ' + verdictLetter(section(prompt, 'TRAJECTORY_A') || section(prompt, 'PROPOSAL_A')) + ' </score_A>\n<score_B> ' + verdictLetter(section(prompt, 'TRAJECTORY_B') || section(prompt, 'PROPOSAL_B')) + ' </score_B>')
   }
 }
 
@@ -460,6 +461,113 @@ describe('verifier_current_session', () => {
  * tool schema too — otherwise the exact case the shortcut exists for fails host validation,
  * and the caller gets INVALID_TOOL_OUTPUT instead of the tie the engine computed.
  */
+
+/**
+ * P02: the review stage decides the DEFAULT rubric and the prompt framing, and says so in the
+ * verdict. An omitted `review_stage` must keep today's artifact semantics byte for byte.
+ */
+describe('explicit review stages', () => {
+  /** Records every rendered prompt and answers with a fixed A/T verdict. */
+  function recording(prompts: string[]) {
+    return (options: { messages: readonly unknown[] }) => {
+      prompts.push(promptText(options))
+      return textStream('reasoning\n<score_A> A </score_A>\n<score_B> T </score_B>')
+    }
+  }
+
+  it('scores a proposal against the proposal rubric and reports what it used', async () => {
+    const prompts: string[] = []
+    const { tools } = assemble(JUDGE, { stream: recording(prompts), sessions: [{ id: 'session-1', createdAt: 1 }] })
+    const definition = tools.get('verifier_compare')!
+    const result = await definition.execute({ problem: 'pick a plan', candidate_a: 'plan STRONG', candidate_b: 'plan WEAK', review_stage: 'proposal' }, exec) as Record<string, any>
+    expect(result.reviewStage).toBe('proposal')
+    expect(result.criteriaSource).toBe('proposal')
+    expect(result.criteria.map((row: any) => row.id)).toEqual(PROPOSAL_CRITERIA.map(row => row.id))
+    expect(prompts.length).toBeGreaterThan(0)
+    for (const prompt of prompts) {
+      expect(prompt).toContain('<<<PROPOSAL_A:')
+      expect(prompt).not.toContain('<<<TRAJECTORY_A:')
+    }
+    assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'compare')
+  })
+
+  it('keeps the omitted stage on the historical artifact path', async () => {
+    const prompts: string[] = []
+    const { tools } = assemble(JUDGE, { stream: recording(prompts), sessions: [{ id: 'session-1', createdAt: 1 }] })
+    const definition = tools.get('verifier_compare')!
+    const result = await definition.execute({ problem: 'pick', candidate_a: 'AAA', candidate_b: 'BBB', review_stage: 'artifact' }, exec) as Record<string, any>
+    expect(result.reviewStage).toBe('artifact')
+    expect(result.criteriaSource).toBe('coding')
+    expect(result.criteria.map((row: any) => row.id)).toEqual(['specification', 'output_match', 'error_signals'])
+    expect(prompts.every(prompt => prompt.includes('<<<TRAJECTORY_A:'))).toBe(true)
+  })
+
+  it('lets an explicit criteria argument keep control of the stage default', async () => {
+    const { tools } = assemble(JUDGE, { stream: recording([]), sessions: [{ id: 'session-1', createdAt: 1 }] })
+    const definition = tools.get('verifier_select')!
+    const result = await definition.execute({
+      problem: 'pick a plan',
+      candidates: ['plan one', 'plan two', 'plan three'],
+      review_stage: 'proposal',
+      criteria: [{ id: 'mine', name: 'Mine', description: 'judge only this one thing' }],
+    }, exec) as Record<string, any>
+    expect(result.reviewStage).toBe('proposal')
+    expect(result.criteriaSource).toBe('explicit')
+    assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'select')
+  })
+
+  it('refuses an unknown stage before any model call', async () => {
+    const calls: string[] = []
+    const { tools } = assemble(JUDGE, { stream: recording(calls), sessions: [{ id: 'session-1', createdAt: 1 }] })
+    // The registered parameter schema rejects it before execute() ever runs.
+    await expect(tools.get('verifier_compare')!.execute({ problem: 'p', candidate_a: 'A', candidate_b: 'B', review_stage: 'draft' }, exec)).rejects.toThrow(/review_stage/u)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('ranks best-of-N drafts as a proposal but measures the winner with the delivery rubric', async () => {
+    const prompts: string[] = []
+    const stream = (options: { messages: readonly unknown[] }) => {
+      const prompt = promptText(options)
+      prompts.push(prompt)
+      const draft = /Draft (\d+) of \d+\./.exec(prompt)
+      if (draft !== null) {
+        const number = Number(draft[1])
+        return textStream((number === 2 ? STRONG_DRAFT : WEAK_DRAFT) + ' Draft ' + number + '.')
+      }
+      const sideA = section(prompt, 'TRAJECTORY_A') || section(prompt, 'PROPOSAL_A')
+      const sideB = section(prompt, 'TRAJECTORY_B') || section(prompt, 'PROPOSAL_B')
+      return textStream('<score_A> ' + verdictLetter(sideA) + ' </score_A>\n<score_B> ' + verdictLetter(sideB) + ' </score_B>')
+    }
+    const definition = assemble(JUDGE, { stream, sessions: [{ id: 'session-1', createdAt: 1 }] }).tools.get('verifier_best_of_n')!
+    const result = await definition.execute({ task: 'do the thing' }, exec) as Record<string, any>
+    expect(result.rankingStage).toBe('proposal')
+    expect(result.rankingCriteriaSource).toBe('proposal')
+    expect(result.rankingCriteriaCount).toBe(3)
+    expect(result.baselineCriteriaSource).toBe('coding')
+    expect(result.baselineCriteriaCount).toBe(3)
+    const judges = prompts.filter(prompt => !/Draft \d+ of \d+\./.test(prompt))
+    const tournament = judges.filter(prompt => !prompt.includes(BASELINE))
+    const baseline = judges.filter(prompt => prompt.includes(BASELINE))
+    expect(tournament.length).toBeGreaterThan(0)
+    expect(baseline.length).toBeGreaterThan(0)
+    // Regression: scoring an unexecuted draft with the artifact rubric fails it by construction,
+    // so the tournament must use the proposal rubric while the baseline keeps the gate's own.
+    expect(tournament.every(prompt => prompt.includes('<<<PROPOSAL_A:'))).toBe(true)
+    expect(baseline.every(prompt => prompt.includes('<<<TRAJECTORY_A:'))).toBe(true)
+    // The absolute fields still come only from the baseline comparison.
+    expect(result.passesThreshold).toBe(true)
+    assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'best_of_n')
+  })
+
+  it('keeps an explicit best-of-N rubric in control of both phases', async () => {
+    const result = await assemble(JUDGE, { stream: scriptedStream(2, [], []) }).tools.get('verifier_best_of_n')!
+      .execute({ task: 'do the thing', n: 2, criteria: [{ id: 'mine', name: 'Mine', description: 'judge only this one thing' }] }, exec) as Record<string, any>
+    expect(result.rankingCriteriaSource).toBe('explicit')
+    expect(result.baselineCriteriaSource).toBe('explicit')
+    expect(result.criteria.map((row: any) => row.id)).toEqual(['mine'])
+  })
+})
+
 describe('identical-candidate verdicts', () => {
   it("declares compare's identical tie on its output schema", async () => {
     const definition = assemble().tools.get('verifier_compare')!
@@ -694,7 +802,7 @@ describe('routing-cycle budget through the real hooks', () => {
       calls.push({ prompt })
       if (prompt.includes('expert independent technical plan verifier')) return textStream('Verdict: A\nSummary: sound plan.')
       if (prompt.includes('conservative verifier router')) return textStream(JSON.stringify({ kind: 'compare', confidence: 1, reason: 'two alternatives', candidateCallIds: ['s1', 's2'], checkpointSeqs: [] }))
-      return textStream('reasoning\n<score_A> ' + verdictLetter(section(prompt, 'TRAJECTORY_A')) + ' </score_A>\n<score_B> ' + verdictLetter(section(prompt, 'TRAJECTORY_B')) + ' </score_B>')
+      return textStream('reasoning\n<score_A> ' + verdictLetter(section(prompt, 'TRAJECTORY_A') || section(prompt, 'PROPOSAL_A')) + ' </score_A>\n<score_B> ' + verdictLetter(section(prompt, 'TRAJECTORY_B') || section(prompt, 'PROPOSAL_B')) + ' </score_B>')
     }
   }
   const isPlan = (prompt: string) => prompt.includes('expert independent technical plan verifier')
@@ -840,7 +948,7 @@ describe('delivery-phase scheduling and tie feedback', () => {
       const prompt = promptText(options)
       calls.push({ prompt })
       if (prompt.includes('<c1>')) return textStream('<c1> A </c1>\n<c2> A </c2>')
-      return textStream('reasoning\n<score_A> ' + verdictLetter(section(prompt, 'TRAJECTORY_A')) + ' </score_A>\n<score_B> ' + verdictLetter(section(prompt, 'TRAJECTORY_B')) + ' </score_B>')
+      return textStream('reasoning\n<score_A> ' + verdictLetter(section(prompt, 'TRAJECTORY_A') || section(prompt, 'PROPOSAL_A')) + ' </score_A>\n<score_B> ' + verdictLetter(section(prompt, 'TRAJECTORY_B') || section(prompt, 'PROPOSAL_B')) + ' </score_B>')
     }
   }
   const isFinalCall = (prompt: string) => prompt.includes('TRAJECTORY_A')
@@ -954,7 +1062,7 @@ describe('early candidate review through agent/pre-step', () => {
     return (options: { messages: readonly unknown[] }) => {
       const prompt = promptText(options)
       calls.push({ prompt })
-      return textStream('reasoning\n<score_A> ' + verdictLetter(section(prompt, 'TRAJECTORY_A')) + ' </score_A>\n<score_B> ' + verdictLetter(section(prompt, 'TRAJECTORY_B')) + ' </score_B>')
+      return textStream('reasoning\n<score_A> ' + verdictLetter(section(prompt, 'TRAJECTORY_A') || section(prompt, 'PROPOSAL_A')) + ' </score_A>\n<score_B> ' + verdictLetter(section(prompt, 'TRAJECTORY_B') || section(prompt, 'PROPOSAL_B')) + ' </score_B>')
     }
   }
 

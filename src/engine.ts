@@ -2,12 +2,33 @@ import { addUsage, attachUsage, callVerifier, emptyUsage, partialUsage, predictS
 import { ScoreCache, SingleFlight, stableHash, type CachedPairScore } from './cache.ts'
 import type { DecisionTrace } from './decisions.ts'
 import {
-  DEFAULT_CRITERIA, DEFAULT_GROUND_TRUTH_NOTE, accumulatePairs, buildPairwisePrompt, buildProgressPrompt,
+  DEFAULT_CRITERIA, DEFAULT_GROUND_TRUTH_NOTE, PROPOSAL_CRITERIA, accumulatePairs, buildPairwisePrompt, buildProgressPrompt,
   dedupeCriterionId, extractProgressScore, extractScore, pivotRoundPairs, rankScores, ringCycle, slugCriterionId,
-  topPivots, type Criterion,
+  topPivots, type Criterion, type ReviewStage,
 } from './core.ts'
 
-export interface CompareOptions { problem: string; candidateA: string; candidateB: string; criteria?: readonly Criterion[]; groundTruthNote?: string; repeats?: number; images?: readonly VerifierImage[]; trace?: DecisionTrace; /** Prefix for this comparison's decision-snapshot labels; one invocation that judges twice on the same criteria needs them distinguishable. */ traceLabelPrefix?: string }
+export interface CompareOptions {
+  problem: string
+  candidateA: string
+  candidateB: string
+  criteria?: readonly Criterion[]
+  groundTruthNote?: string
+  repeats?: number
+  images?: readonly VerifierImage[]
+  trace?: DecisionTrace
+  /** Prefix for this comparison's decision-snapshot labels; one invocation that judges twice on the same criteria needs them distinguishable. */
+  traceLabelPrefix?: string
+  /**
+   * Which review stage both sides belong to.
+   *
+   * `proposal` switches the default rubric to {@link PROPOSAL_CRITERIA} and the prompt to the
+   * unexecuted-draft framing; omitted (or `artifact`) keeps the historical semantics, so every
+   * existing caller, cache key and verdict is unchanged.
+   */
+  reviewStage?: ReviewStage
+  /** Task domain for the prompt's role sentence; normally the criteria preset id. */
+  domain?: string
+}
 export interface CriterionResult { id: string; name: string; scoreA: number; scoreB: number }
 export interface RunStats extends UsageStats {
   cacheHits: number
@@ -51,7 +72,21 @@ export interface CompareResult {
   identical?: true
 }
 
-export interface SelectOptions { problem: string; candidates: readonly string[]; criteria?: readonly Criterion[]; groundTruthNote?: string; repeats?: number; pivots?: number; seed?: number; images?: readonly VerifierImage[]; trace?: DecisionTrace }
+export interface SelectOptions {
+  problem: string
+  candidates: readonly string[]
+  criteria?: readonly Criterion[]
+  groundTruthNote?: string
+  repeats?: number
+  pivots?: number
+  seed?: number
+  images?: readonly VerifierImage[]
+  trace?: DecisionTrace
+  /** Review stage applied to every pair of the tournament; see {@link CompareOptions.reviewStage}. */
+  reviewStage?: ReviewStage
+  /** Task domain for the prompt's role sentence; normally the criteria preset id. */
+  domain?: string
+}
 
 export interface SelectResult {
   index: number
@@ -235,9 +270,25 @@ export class VerifierEngine {
     return stats
   }
 
+  /**
+   * Prompt framing for one comparison.
+   *
+   * Rebuilt from the stage/domain the caller declared. Both fields are part of the RENDERED
+   * prompt, so the score cache keys on them automatically; the cache's `version` does not need
+   * to move when only this framing changes.
+   * @param options - the comparison's options.
+   * @returns Stage and domain to forward to {@link buildPairwisePrompt}.
+   */
+  private framing(options: CompareOptions): { stage?: ReviewStage; domain?: string } {
+    return {
+      ...(options.reviewStage === undefined ? {} : { stage: options.reviewStage }),
+      ...(options.domain === undefined ? {} : { domain: options.domain }),
+    }
+  }
+
   private async scoreOne(client: VerifierClientConfig, options: CompareOptions, candidateA: string, candidateB: string, criterion: Criterion, repeat: number, signal?: AbortSignal): Promise<{ scores: readonly [number, number]; usage: UsageStats; scoringMode: 'top-logprobs' | 'explicit-tag'; hit: boolean; channelFallback: boolean }> {
     const ground = options.groundTruthNote ?? DEFAULT_GROUND_TRUTH_NOTE
-    const prompt = buildPairwisePrompt(options.problem, candidateA, candidateB, criterion, ground)
+    const prompt = buildPairwisePrompt(options.problem, candidateA, candidateB, criterion, ground, this.framing(options))
     const imageKey = options.images?.map(image => stableHash([image.mediaType, Buffer.from(image.data).toString('base64')]))
     // Cache identity pins the scoring channel, but the channel is only predictable
     // before the call when the capability cache already knows the answer. Lookups use
@@ -334,7 +385,10 @@ export class VerifierEngine {
   }
 
   async compare(options: CompareOptions, signal?: AbortSignal): Promise<CompareResult> {
-    const criteria = options.criteria?.length ? options.criteria : DEFAULT_CRITERIA
+    // An unexecuted proposal has no observed output to match, so scoring it with the artifact
+    // rubric ("Output Match") fails it by construction. The stage therefore selects the default
+    // rubric; an explicit `criteria` always wins and is used verbatim.
+    const criteria = options.criteria?.length ? options.criteria : options.reviewStage === 'proposal' ? PROPOSAL_CRITERIA : DEFAULT_CRITERIA
     if (options.candidateA === options.candidateB) return this.informationalTie(criteria)
     const repeats = options.repeats ?? 2
     const jobs = criteria.flatMap(criterion => Array.from({ length: repeats }, (_, repeat) => ({ criterion, repeat })))
@@ -537,6 +591,8 @@ export class VerifierEngine {
           repeats: options.repeats,
           images: options.images,
           trace: options.trace,
+          ...(options.reviewStage === undefined ? {} : { reviewStage: options.reviewStage }),
+          ...(options.domain === undefined ? {} : { domain: options.domain }),
         }, signal)
         recordPair(a, b, result)
       } catch (error) {

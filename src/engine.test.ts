@@ -6,7 +6,7 @@ import type { VerifierClientConfig } from './caller.ts'
 import { ScoreCache, SingleFlight, type CachedPairScore } from './cache.ts'
 import { VerifierEngine, mergeRunStats, orientRoundPairs, partialStats } from './engine.ts'
 import { emptyUsage } from './caller.ts'
-import { pivotRoundPairs } from './core.ts'
+import { DEFAULT_CRITERIA, PROPOSAL_CRITERIA, pivotRoundPairs } from './core.ts'
 import { TopLogprobCapabilityCache } from './top-logprobs.ts'
 
 function chunks(text: string) { return [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'text-delta', index: 0, text }, { type: 'block-end', index: 0, block: { type: 'text', text } }, { type: 'usage', usage: { inputTokens: 7, cacheReadTokens: 3, outputTokens: 4, reasoningTokens: 2 } }, { type: 'finish', reason: { kind: 'stop' } }] as any[] }
@@ -902,3 +902,90 @@ describe('byte-identical candidates', () => {
     await expect(engine.select({ problem: 'task', candidates: [] })).rejects.toThrow(/must not be empty/u)
   })
 })
+
+/**
+ * P02: the review stage picks the DEFAULT rubric and the prompt framing.
+ *
+ * A proposal has no observed output, so the artifact rubric's "compare the final verification
+ * command's stdout/stderr" fails it by construction — the exact case this split exists to fix.
+ * The stage is also part of the cache identity, so re-reviewing the same text as an artifact is
+ * never served the proposal's scores.
+ */
+describe('review stage', () => {
+  function textOf(options: any): string {
+    const message = options.messages[0]
+    return typeof message.content === 'string'
+      ? message.content
+      : message.content.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('')
+  }
+  /** Records every rendered prompt and always answers with the same A/T verdict. */
+  function recordingPrompts(prompts: string[]) {
+    return { stream: (options: any) => { prompts.push(textOf(options)); return streamOf(chunks('<score_A> A </score_A>\n<score_B> T </score_B>')) } }
+  }
+
+  it('defaults a proposal to the proposal rubric and the unexecuted framing', async () => {
+    const prompts: string[] = []
+    const engine = new VerifierEngine(clientConfig({ llm: recordingPrompts(prompts) } as any), 4)
+    const result = await engine.compare({ problem: 'task', candidateA: 'plan STRONG', candidateB: 'plan WEAK', repeats: 1, reviewStage: 'proposal' })
+    expect(result.criteria.map(row => row.id)).toEqual(PROPOSAL_CRITERIA.map(row => row.id))
+    expect(prompts).toHaveLength(3)
+    for (const prompt of prompts) {
+      expect(prompt).toContain('<<<PROPOSAL_A:')
+      expect(prompt).not.toContain('<<<TRAJECTORY_A:')
+    }
+    // One call per proposal criterion, and never the artifact ones.
+    const guidelines = prompts.map(prompt => /\*\*Evaluation Guideline — (.+?):\*\*/u.exec(prompt)?.[1])
+    expect(new Set(guidelines)).toEqual(new Set(PROPOSAL_CRITERIA.map(row => row.name)))
+  })
+
+  it('keeps the artifact default byte-identical in behaviour and criteria', async () => {
+    const prompts: string[] = []
+    const engine = new VerifierEngine(clientConfig({ llm: recordingPrompts(prompts) } as any), 4)
+    const result = await engine.compare({ problem: 'task', candidateA: 'AAA', candidateB: 'BBB', repeats: 1 })
+    expect(result.criteria.map(row => row.id)).toEqual(DEFAULT_CRITERIA.map(row => row.id))
+    expect(prompts.some(prompt => prompt.includes('<<<TRAJECTORY_A:'))).toBe(true)
+    expect(prompts.some(prompt => prompt.includes('<<<PROPOSAL_A:'))).toBe(false)
+  })
+
+  it('lets an explicit rubric override the stage default', async () => {
+    const prompts: string[] = []
+    const engine = new VerifierEngine(clientConfig({ llm: recordingPrompts(prompts) } as any), 4)
+    const result = await engine.compare({
+      problem: 'task', candidateA: 'plan STRONG', candidateB: 'plan WEAK', repeats: 1, reviewStage: 'proposal',
+      criteria: [{ id: 'mine', name: 'Mine', description: 'judge only this one thing' }],
+    })
+    expect(result.criteria.map(row => row.id)).toEqual(['mine'])
+    expect(prompts).toHaveLength(1)
+    // The framing is still a proposal: the caller changed the rubric, not the stage.
+    expect(prompts[0]).toContain('<<<PROPOSAL_A:')
+  })
+
+  it('keys the score cache by stage so artifact scores never answer a proposal review', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-engine-stage-'))
+    try {
+      const file = join(dir, 'scores.json')
+      const engine = new VerifierEngine(clientConfig({ llm: { stream: scriptedStream([]) } as any }), 4, new ScoreCache(file, 100))
+      const artifact = await engine.compare({ problem: 'task', candidateA: 'AAA', candidateB: 'BBB', repeats: 1 })
+      expect(artifact.stats.cacheMisses).toBe(3)
+      const proposal = await engine.compare({ problem: 'task', candidateA: 'AAA', candidateB: 'BBB', repeats: 1, reviewStage: 'proposal' })
+      expect(proposal.stats.cacheMisses).toBe(3)
+      expect(proposal.stats.cacheHits).toBe(0)
+      // Same stage AND same content is still a hit: the split does not disable the cache.
+      const again = await engine.compare({ problem: 'task', candidateA: 'AAA', candidateB: 'BBB', repeats: 1, reviewStage: 'proposal' })
+      expect(again.stats.cacheHits).toBe(3)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('applies the stage to every pair of a selection', async () => {
+    const prompts: string[] = []
+    const engine = new VerifierEngine(clientConfig({ llm: recordingPrompts(prompts) } as any), 4)
+    const result = await engine.select({ problem: 'task', candidates: ['plan STRONG', 'plan WEAK', 'plan THIRD'], repeats: 1, reviewStage: 'proposal' })
+    expect(result.comparisons).toBe(3)
+    // Three ring edges x three proposal criteria x one repeat.
+    expect(prompts).toHaveLength(9)
+    for (const prompt of prompts) expect(prompt).toContain('<<<PROPOSAL_A:')
+  })
+})
+
