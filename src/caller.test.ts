@@ -471,6 +471,12 @@ describe('call-option freezing', () => {
     controller.abort(new Error('llm-verifier: request timed out'))
     expect(aborted).toEqual(['abort'])
     expect(options.signal.aborted).toBe(true)
+    // A second real trigger, reported independently: the api-gateway fuses the caller signal with
+    // its own through AbortSignal.any, and Node writes the lazily-created Symbol(kDependantSignals)
+    // onto the SOURCE signal -> "Cannot add property Symbol(kDependantSignals), object is not
+    // extensible" on a frozen one. It fires on Node 24 as well, i.e. it predates the kEvents change
+    // (>= 26.5) and is the earliest of the three symptoms.
+    expect(() => AbortSignal.any([options.signal])).not.toThrow()
   })
 
   it('hands llm.stream a frozen option object whose signal is still mutable', async () => {
