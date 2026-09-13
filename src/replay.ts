@@ -17,6 +17,15 @@ export interface ReplayRouteObservation {
   evidenceChars?: number
   usageIncomplete?: boolean
   canceled?: boolean
+  /** P06: which stream the host actually received from the cycle. */
+  replayed?: string
+  /** P06: extra generation calls and judge calls the cycle bought. */
+  generatedCalls?: number
+  judgeCalls?: number
+  /** P06: the alternative was byte-identical to the original, so no judge was called. */
+  sameCandidate?: boolean
+  /** P06: the alternative was generated with the failing-run evidence attached. */
+  alternativeAugmented?: boolean
 }
 
 /** One persisted invocation, reduced to the fields an acceptance decision depends on. */
@@ -29,6 +38,8 @@ export interface ReplayInvocation {
   score?: number
   baselineScore?: number
   winner?: 'A' | 'B' | 'tie'
+  /** Terminal outcome of the invocation, when the verdict declares one (P06 cycle rows do). */
+  outcome?: string
   criteria: Array<{ id: string; score: number }>
   /** Automatic routing-cycle observation, when the record carries one. */
   route?: ReplayRouteObservation
@@ -50,8 +61,15 @@ export function parseRouteObservation(value: unknown): ReplayRouteObservation | 
     if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 0) observation[key] = Math.trunc(candidate)
   }
   if (typeof row.skipReason === 'string' && row.skipReason) observation.skipReason = row.skipReason
+  for (const key of ['generatedCalls', 'judgeCalls'] as const) {
+    const candidate = row[key]
+    if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 0) observation[key] = Math.trunc(candidate)
+  }
   if (row.usageIncomplete === true) observation.usageIncomplete = true
   if (row.canceled === true) observation.canceled = true
+  if (typeof row.replayed === 'string' && row.replayed) observation.replayed = row.replayed
+  if (row.sameCandidate === true) observation.sameCandidate = true
+  if (row.alternativeAugmented === true) observation.alternativeAugmented = true
   return observation
 }
 
@@ -85,6 +103,7 @@ export function parseStatisticsRecords(text: string): ReplayInvocation[] {
     const score = numberAt(verdict, 'score')
     const baselineScore = numberAt(verdict, 'baselineScore')
     const winner = verdict.winner === 'A' || verdict.winner === 'B' || verdict.winner === 'tie' ? verdict.winner : undefined
+    const outcome = typeof verdict.outcome === 'string' && verdict.outcome ? verdict.outcome : undefined
     const stats = typeof row.stats === 'object' && row.stats !== null ? row.stats as Record<string, unknown> : {}
     const route = parseRouteObservation(row.route)
     out.push({
@@ -96,6 +115,7 @@ export function parseStatisticsRecords(text: string): ReplayInvocation[] {
       ...(score !== undefined ? { score } : {}),
       ...(baselineScore !== undefined ? { baselineScore } : {}),
       ...(winner !== undefined ? { winner } : {}),
+      ...(outcome !== undefined ? { outcome } : {}),
       ...(route !== undefined ? { route } : {}),
     })
   }
@@ -264,6 +284,88 @@ export function summarizeRouteCycles(invocations: readonly ReplayInvocation[]): 
   return summary
 }
 
+/**
+ * P06 process-selection cycle aggregate.
+ *
+ * A separate section on purpose: a process row is neither a routing decision nor a model call,
+ * and its outcome is not a verdict about the task. The design note for the controlled comparison
+ * (`.agents/notes/proposed/testing/2026-09-13-real-evaluation-samples-and-four-arm-controls.md`)
+ * asks for exactly these numbers per arm, so they are computed here instead of by hand.
+ */
+export interface ProcessCycleSummary {
+  /** Purchased cycles (a statistics row exists only after the reservation was taken). */
+  purchased: number
+  /** Declines that never reached a reservation (settings off, budget, unreadable intent...). */
+  skipped: number
+  /** Terminal outcome of every purchased cycle, from the verdict. */
+  byOutcome: Record<string, number>
+  /** Why a skipped cycle was skipped. */
+  bySkipReason: Record<string, number>
+  /** What the HOST actually received. */
+  replayedOriginal: number
+  replayedCandidate: number
+  replayedNone: number
+  /** `candidate` over purchased: the only replacement rate that counts. */
+  effectiveReplacementRate: number
+  sameCandidate: number
+  sameCandidateRate: number
+  /** Cycles whose alternative was generated with the failing-run evidence attached. */
+  augmented: number
+  augmentedReplacementRate: number
+  plainReplacementRate: number
+  /** Added model calls and the extra generation/judge split. */
+  addedCalls: number
+  generatedCalls: number
+  judgeCalls: number
+}
+
+/**
+ * Summarize the recorded P06 cycles.
+ *
+ * Reads only what the rows state: `replayed` is the delivery, not the decision, and a cycle whose
+ * winner was withheld is therefore counted as an original replay (the plugin corrects that row for
+ * exactly this reason). Rates are 0 when their denominator is 0, never NaN.
+ * @param invocations - records from parseStatisticsRecords.
+ * @returns Counts, arm split and rates across every observed process cycle.
+ */
+export function summarizeProcessCycles(invocations: readonly ReplayInvocation[]): ProcessCycleSummary {
+  const rows = invocations.filter(record => record.route !== undefined && record.route.destination === 'process')
+  const summary: ProcessCycleSummary = { purchased: 0, skipped: 0, byOutcome: {}, bySkipReason: {}, replayedOriginal: 0, replayedCandidate: 0, replayedNone: 0, effectiveReplacementRate: 0, sameCandidate: 0, sameCandidateRate: 0, augmented: 0, augmentedReplacementRate: 0, plainReplacementRate: 0, addedCalls: 0, generatedCalls: 0, judgeCalls: 0 }
+  let augmentedReplays = 0
+  let plainPurchased = 0
+  let plainReplays = 0
+  for (const record of rows) {
+    const route = record.route!
+    if (route.stage === 'skipped') {
+      summary.skipped += 1
+      const reason = route.skipReason ?? 'unknown'
+      summary.bySkipReason[reason] = (summary.bySkipReason[reason] ?? 0) + 1
+      continue
+    }
+    summary.purchased += 1
+    summary.addedCalls += record.calls
+    summary.generatedCalls += route.generatedCalls ?? 0
+    summary.judgeCalls += route.judgeCalls ?? 0
+    const outcome = record.outcome ?? 'unknown'
+    summary.byOutcome[outcome] = (summary.byOutcome[outcome] ?? 0) + 1
+    if (route.replayed === 'candidate') summary.replayedCandidate += 1
+    else if (route.replayed === 'none') summary.replayedNone += 1
+    else summary.replayedOriginal += 1
+    if (route.sameCandidate === true) summary.sameCandidate += 1
+    if (route.alternativeAugmented === true) {
+      summary.augmented += 1
+      if (route.replayed === 'candidate') augmentedReplays += 1
+    } else {
+      plainPurchased += 1
+      if (route.replayed === 'candidate') plainReplays += 1
+    }
+  }
+  summary.effectiveReplacementRate = summary.purchased > 0 ? summary.replayedCandidate / summary.purchased : 0
+  summary.sameCandidateRate = summary.purchased > 0 ? summary.sameCandidate / summary.purchased : 0
+  summary.augmentedReplacementRate = summary.augmented > 0 ? augmentedReplays / summary.augmented : 0
+  summary.plainReplacementRate = plainPurchased > 0 ? plainReplays / plainPurchased : 0
+  return summary
+}
 /** Sample strata the labeled evaluation must cover (the plan six groups). */
 export const EVALUATION_CATEGORIES = ["code", "research", "writing", "candidates", "long-task", "conversational"] as const
 export type EvaluationCategory = typeof EVALUATION_CATEGORIES[number]

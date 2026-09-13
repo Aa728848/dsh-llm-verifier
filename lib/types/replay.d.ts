@@ -14,6 +14,15 @@ export interface ReplayRouteObservation {
     evidenceChars?: number;
     usageIncomplete?: boolean;
     canceled?: boolean;
+    /** P06: which stream the host actually received from the cycle. */
+    replayed?: string;
+    /** P06: extra generation calls and judge calls the cycle bought. */
+    generatedCalls?: number;
+    judgeCalls?: number;
+    /** P06: the alternative was byte-identical to the original, so no judge was called. */
+    sameCandidate?: boolean;
+    /** P06: the alternative was generated with the failing-run evidence attached. */
+    alternativeAugmented?: boolean;
 }
 /** One persisted invocation, reduced to the fields an acceptance decision depends on. */
 export interface ReplayInvocation {
@@ -25,6 +34,8 @@ export interface ReplayInvocation {
     score?: number;
     baselineScore?: number;
     winner?: 'A' | 'B' | 'tie';
+    /** Terminal outcome of the invocation, when the verdict declares one (P06 cycle rows do). */
+    outcome?: string;
     criteria: Array<{
         id: string;
         score: number;
@@ -143,6 +154,50 @@ export interface RouteCycleSummary {
  * @returns Counts and shares across every observed cycle.
  */
 export declare function summarizeRouteCycles(invocations: readonly ReplayInvocation[]): RouteCycleSummary;
+/**
+ * P06 process-selection cycle aggregate.
+ *
+ * A separate section on purpose: a process row is neither a routing decision nor a model call,
+ * and its outcome is not a verdict about the task. The design note for the controlled comparison
+ * (`.agents/notes/proposed/testing/2026-09-13-real-evaluation-samples-and-four-arm-controls.md`)
+ * asks for exactly these numbers per arm, so they are computed here instead of by hand.
+ */
+export interface ProcessCycleSummary {
+    /** Purchased cycles (a statistics row exists only after the reservation was taken). */
+    purchased: number;
+    /** Declines that never reached a reservation (settings off, budget, unreadable intent...). */
+    skipped: number;
+    /** Terminal outcome of every purchased cycle, from the verdict. */
+    byOutcome: Record<string, number>;
+    /** Why a skipped cycle was skipped. */
+    bySkipReason: Record<string, number>;
+    /** What the HOST actually received. */
+    replayedOriginal: number;
+    replayedCandidate: number;
+    replayedNone: number;
+    /** `candidate` over purchased: the only replacement rate that counts. */
+    effectiveReplacementRate: number;
+    sameCandidate: number;
+    sameCandidateRate: number;
+    /** Cycles whose alternative was generated with the failing-run evidence attached. */
+    augmented: number;
+    augmentedReplacementRate: number;
+    plainReplacementRate: number;
+    /** Added model calls and the extra generation/judge split. */
+    addedCalls: number;
+    generatedCalls: number;
+    judgeCalls: number;
+}
+/**
+ * Summarize the recorded P06 cycles.
+ *
+ * Reads only what the rows state: `replayed` is the delivery, not the decision, and a cycle whose
+ * winner was withheld is therefore counted as an original replay (the plugin corrects that row for
+ * exactly this reason). Rates are 0 when their denominator is 0, never NaN.
+ * @param invocations - records from parseStatisticsRecords.
+ * @returns Counts, arm split and rates across every observed process cycle.
+ */
+export declare function summarizeProcessCycles(invocations: readonly ReplayInvocation[]): ProcessCycleSummary;
 /** Sample strata the labeled evaluation must cover (the plan six groups). */
 export declare const EVALUATION_CATEGORIES: readonly ["code", "research", "writing", "candidates", "long-task", "conversational"];
 export type EvaluationCategory = typeof EVALUATION_CATEGORIES[number];

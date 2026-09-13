@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { evaluateSample, parseEvaluationSample, parseStatisticsRecords, replayDecisionScores, summarizeEvaluation, summarizeRouteCycles, sweepThresholds } from './replay.ts'
+import { evaluateSample, parseEvaluationSample, parseStatisticsRecords, replayDecisionScores, summarizeEvaluation, summarizeProcessCycles, summarizeRouteCycles, sweepThresholds } from './replay.ts'
 
 const statistics = JSON.stringify({
   version: 1,
@@ -127,6 +127,59 @@ describe('summarizeRouteCycles', () => {
   })
 })
 
+const processStatistics = JSON.stringify({
+  version: 1,
+  records: [
+    // purchased, winner delivered, augmented arm
+    { toolName: 'verifier_compare', startedAt: 1, success: true, stats: { calls: 7 }, verdict: { phase: 'process', outcome: 'candidate-selected' }, route: { cycleId: 'p1', trigger: 'llm-stream', stage: 'process', destination: 'process', replayed: 'candidate', generatedCalls: 1, judgeCalls: 6, alternativeAugmented: true } },
+    // purchased, the winner was withheld in the last window and the row was corrected, augmented arm
+    { toolName: 'verifier_compare', startedAt: 2, success: true, stats: { calls: 7 }, verdict: { phase: 'process', outcome: 'candidate-not-delivered (switch-off)' }, route: { cycleId: 'p2', trigger: 'llm-stream', stage: 'process', destination: 'process', replayed: 'original', generatedCalls: 1, judgeCalls: 6, alternativeAugmented: true } },
+    // purchased, identical candidates so no judge was called, plain arm
+    { toolName: 'verifier_compare', startedAt: 3, success: true, stats: { calls: 1 }, verdict: { phase: 'process', outcome: 'identical-candidate' }, route: { cycleId: 'p3', trigger: 'llm-stream', stage: 'process', destination: 'process', replayed: 'original', generatedCalls: 1, judgeCalls: 0, sameCandidate: true } },
+    // purchased, the generation failed, plain arm
+    { toolName: 'verifier_compare', startedAt: 4, success: false, stats: { calls: 1 }, verdict: { phase: 'process', outcome: 'generation-failed' }, route: { cycleId: 'p4', trigger: 'llm-stream', stage: 'process', destination: 'process', replayed: 'original', generatedCalls: 1, judgeCalls: 0 } },
+    // declined before any purchase: a diagnostic row, never a cycle
+    { toolName: 'verifier_compare', startedAt: 5, success: true, stats: { calls: 0 }, verdict: { phase: 'process', outcome: 'no-process-budget' }, route: { cycleId: 'diagnostic-1', trigger: 'llm-stream', stage: 'skipped', destination: 'process', skipReason: 'no-process-budget', replayed: 'none', generatedCalls: 0, judgeCalls: 0 } },
+    // an ordinary routing row must not leak into the process section
+    { toolName: 'verifier_track', startedAt: 6, success: true, stats: { calls: 3 }, verdict: { phase: 'routing', outcome: 'compared' }, route: { cycleId: 'r1', trigger: 'turn-stopping', stage: 'execution', destination: 'track' } },
+  ],
+})
+
+describe('summarizeProcessCycles', () => {
+  it('counts purchases, deliveries, identical candidates and both arms', () => {
+    const records = parseStatisticsRecords(processStatistics)
+    // The P06-only observation fields survive the loose reader, or the whole section reports zero.
+    expect(records[0]!.route).toMatchObject({ replayed: 'candidate', generatedCalls: 1, judgeCalls: 6, alternativeAugmented: true })
+    expect(records[2]!.route?.sameCandidate).toBe(true)
+    expect(records[4]!.route).toMatchObject({ stage: 'skipped', skipReason: 'no-process-budget', replayed: 'none' })
+    const summary = summarizeProcessCycles(records)
+    expect(summary.purchased).toBe(4)
+    expect(summary.skipped).toBe(1)
+    expect(summary.byOutcome).toEqual({ 'candidate-selected': 1, 'candidate-not-delivered (switch-off)': 1, 'identical-candidate': 1, 'generation-failed': 1 })
+    expect(summary.bySkipReason).toEqual({ 'no-process-budget': 1 })
+    // A withheld winner is an ORIGINAL replay: the replacement rate must not count it.
+    expect([summary.replayedCandidate, summary.replayedOriginal, summary.replayedNone]).toEqual([1, 3, 0])
+    expect(summary.effectiveReplacementRate).toBe(0.25)
+    expect(summary.sameCandidate).toBe(1)
+    expect(summary.sameCandidateRate).toBe(0.25)
+    // Two augmented cycles with one delivery, two plain cycles with none: the arms are separable.
+    expect(summary.augmented).toBe(2)
+    expect(summary.augmentedReplacementRate).toBe(0.5)
+    expect(summary.plainReplacementRate).toBe(0)
+    // Added calls exclude the routing row and the unpurchased skip.
+    expect(summary.addedCalls).toBe(16)
+    expect([summary.generatedCalls, summary.judgeCalls]).toEqual([4, 12])
+  })
+
+  it('reports zero rates, never NaN, when nothing was purchased', () => {
+    const records = parseStatisticsRecords(JSON.stringify({ version: 1, records: [
+      { toolName: 'verifier_track', startedAt: 1, success: true, stats: { calls: 3 }, route: { cycleId: 'r1', trigger: 'turn-stopping', stage: 'execution', destination: 'track' } },
+    ] }))
+    const summary = summarizeProcessCycles(records)
+    expect(summary).toMatchObject({ purchased: 0, skipped: 0, effectiveReplacementRate: 0, sameCandidateRate: 0, augmentedReplacementRate: 0, plainReplacementRate: 0 })
+    expect(Number.isNaN(summary.effectiveReplacementRate)).toBe(false)
+  })
+})
 const userEvent = (seq, text) => ({ type: 'user/message', seq, data: { source: { kind: 'user' }, content: [{ type: 'text', text }] } })
 const callEvent = (seq, id, name) => ({ type: 'tool/call', seq, data: { turn: 1, step: 1, callId: id, name, arguments: '{}' } })
 const resultEvent = (seq, id, text) => ({ type: 'tool/result', seq, data: { turn: 1, step: 1, message: { source: { callId: id }, content: [{ type: 'text', text }] } } })

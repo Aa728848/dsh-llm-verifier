@@ -44,7 +44,7 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 | `client-fields.ts` | 设置页的声明式字段注册表：`CONFIG_DEFAULTS`、分区/字段元数据、`valuesFromView`、`validateValues`/`textIssue`、快速配置预设与 `activeProfile`、`renderSections` 与折叠分区摘要——全部纯函数，由 `client-fields.test.ts` 直接测试 |
 | `decisions.ts` | 决策快照（脱敏提示词 + 原始回答）的持久化与限量：一次调用 ≤ 32 次模型调用、单条记录 ≤ 3 万字符，且这 3 万字符**按调用数平均分配**（6 次调用的会话验收必须留下 6 条、各自缩窗，而不是只留最先返回的 3 条）；超出调用上限时按**均匀间隔**取样（首尾必留），避免 n=4 的 best-of-N（约 46 次调用）把排在最后的 `draft N` 全部截掉；每话题最近 40 条；看板按需拉取 |
 | `criteria.ts` | 判据解析：预设直取、自定义 Markdown 文件每次重读（内容未变则复用解析结果），文件缺失/解析失败**退回 coding 并记录原因**，绝不让门控失效 |
-| `replay.ts` | 离线回放：从 `statistics-v1.json` 重放阈值（用当前 `sessionAccepted` 规则）、从 `decisions-v1.json` 重放解析器；纯函数，配套 `scripts/eval-replay.mjs` 与 `lib/replay.js` 导出 |
+| `replay.ts` | 离线回放：从 `statistics-v1.json` 重放阈值（用当前 `sessionAccepted` 规则）、从 `decisions-v1.json` 重放解析器、按路由观测汇总周期与 **P06 分臂读数**（`summarizeRouteCycles` / `summarizeProcessCycles`）；纯函数，配套 `scripts/eval-replay.mjs` 与 `lib/replay.js` 导出 |
 | `.agents/notes/` | Agent Notes：非平凡变更的决策日志（问题 → 决定 → 备选 → 后果），体系说明与模板见 `.agents/notes/README.md` |
 
 ## 硬性规矩

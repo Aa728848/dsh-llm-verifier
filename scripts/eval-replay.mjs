@@ -23,7 +23,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { parseEvaluationSample, parseStatisticsRecords, replayDecisionScores, summarizeEvaluation, summarizeRouteCycles, sweepThresholds } from '../lib/replay.js'
+import { parseEvaluationSample, parseStatisticsRecords, replayDecisionScores, summarizeEvaluation, summarizeProcessCycles, summarizeRouteCycles, sweepThresholds } from '../lib/replay.js'
 
 const DEFAULT_THRESHOLDS = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.9]
 
@@ -86,6 +86,8 @@ for (const directory of dirs) {
 // S05-B offline layer: what the recorded routing cycles actually did, and (when a labeled
 // sample directory is supplied) how the deterministic routing layers score against real labels.
 const cycles = summarizeRouteCycles(invocations)
+// P06 单列：过程选优的触发、结局、交付与两条对照臂（见 P05 计划里的指标清单）。
+const processCycles = summarizeProcessCycles(invocations)
 const samples = []
 if (options.samples !== undefined) {
   let files = []
@@ -112,7 +114,7 @@ for (const row of replay) {
 }
 
 if (options.json) {
-  console.log(JSON.stringify({ topics: dirs.length, invocations: invocations.length, thresholds: rows, parser: [...byChannel.values()], routeCycles: cycles, evaluation }, null, 2))
+  console.log(JSON.stringify({ topics: dirs.length, invocations: invocations.length, thresholds: rows, parser: [...byChannel.values()], routeCycles: cycles, processCycles, evaluation }, null, 2))
 } else {
   console.log('LLM verifier offline replay')
   console.log('  topics scanned     ' + dirs.length)
@@ -133,6 +135,15 @@ if (options.json) {
   console.log('    pre-step share    ' + (cycles.preStepShare * 100).toFixed(1) + '% of executions reached a decision before implementation')
   console.log('    by trigger        ' + JSON.stringify(cycles.byTrigger))
   console.log('    by skip reason    ' + JSON.stringify(cycles.bySkipReason))
+  console.log('')
+  console.log('  P06 process selection (from the llm-stream cycle observations):')
+  console.log('    cycles            purchased ' + processCycles.purchased + ', skipped ' + processCycles.skipped)
+  console.log('    delivered         candidate ' + processCycles.replayedCandidate + ', original ' + processCycles.replayedOriginal + ', none ' + processCycles.replayedNone + '   (effective replacement ' + (processCycles.effectiveReplacementRate * 100).toFixed(1) + '%)')
+  console.log('    identical         ' + processCycles.sameCandidate + ' (' + (processCycles.sameCandidateRate * 100).toFixed(1) + '% of purchases)')
+  console.log('    arms              augmented ' + processCycles.augmented + ' (replacement ' + (processCycles.augmentedReplacementRate * 100).toFixed(1) + '%) / plain (replacement ' + (processCycles.plainReplacementRate * 100).toFixed(1) + '%)')
+  console.log('    added calls       ' + processCycles.addedCalls + ' (generated ' + processCycles.generatedCalls + ', judge ' + processCycles.judgeCalls + ')')
+  console.log('    by outcome        ' + JSON.stringify(processCycles.byOutcome))
+  console.log('    by skip reason    ' + JSON.stringify(processCycles.bySkipReason))
   if (evaluation !== undefined) {
     console.log('')
     console.log('  labeled sample evaluation (' + evaluation.samples + ' samples):')
