@@ -67,6 +67,7 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 
 - 每个模块一份同目录 `<module>.test.ts`；不写跨模块的大集成测试，用 `engine.test.ts` 的 scripted stream 模式模拟模型。
 - **回归测试要断言边界值**，例如"截断到上限的条目仍应被接受"，而不只是 happy path。
+- **工具 output schema 必须覆盖真实返回值**：宿主按 `additionalProperties: false` + 编译后的 `required` 严格校验注册工具的返回值，未声明/缺失字段会让**整条调用**以 `INVALID_TOOL_OUTPUT` 失败（`verifier_current_session`、`verifier_compare`、`verifier_select` 都曾因此失败；失败与入参无关，重试只会重复同一次模型调用）。每个注册工具都要有一条把**真实返回值**过 `index.test.ts` 的 `assertMatchesSchema` 的回归，新增输出字段时 schema 与测试同改。
 - 需要网络的路径一律注入假 `fetch`/`llm.stream`，测试不得真的发请求。
 - `parity.test.ts` 需要同级存在 `../llm-as-a-verifier` Python 仓库，缺了就 skip（不是失败）。启动器可用 `DSH_VERIFIER_PYTHON` 覆盖。
 

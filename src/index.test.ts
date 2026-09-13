@@ -342,3 +342,74 @@ describe('verifier_best_of_n', () => {
     await expect(execute({ task: 'do the thing' }, bareExec)).rejects.toThrow(/no logged request header/u)
   })
 })
+
+/**
+ * The explicit session verifier once returned a field its own output schema did not declare.
+ * The host rejects that whole call with INVALID_TOOL_OUTPUT long before the model sees a
+ * verdict, and because the failure does not depend on the arguments, a retry makes the same
+ * model call and fails identically — it reads like a transient tool error. This suite asserts
+ * the REAL return value against the declared schema instead of the fields the test knows about.
+ */
+describe('verifier_current_session', () => {
+  /** A session with a real event log: the tool has to extract its own task, trace and image refs. */
+  const sessionExec = {
+    agent: {
+      id: 'agent-3',
+      session: {
+        header: { id: 'session-3' },
+        requestHeader: () => ({ config: { provider: 'session-provider', model: 'session-model', reasoningEffort: 'high' } }),
+        snapshotEvents: () => [
+          { type: 'user/message', seq: 0, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix the failing parser test.' }] } },
+          { type: 'assistant/message', seq: 1, data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'Patched the separator handling.' }] } } },
+          { type: 'tool/result', seq: 2, data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '1 passed' }] } } },
+        ],
+      },
+    },
+    signal: new AbortController().signal,
+  }
+
+  it('declares every field its verdict returns', () => {
+    const definition = assemble().tools.get('verifier_current_session')!
+    for (const key of [
+      'sessionId', 'problem', 'score', 'baselineScore', 'winner', 'criteria', 'fromSeq', 'toSeq',
+      'omittedCharacters', 'agreement', 'calls', 'stats', 'provider', 'model', 'judges',
+    ]) expect(definition.output.schema.properties[key], key).toBeDefined()
+  })
+
+  it('renders a verdict that satisfies the declared output schema', async () => {
+    const definition = assemble(JUDGE, { stream: scriptedStream(0, [], []) }).tools.get('verifier_current_session')!
+    const result = await definition.execute({}, sessionExec) as Record<string, any>
+    assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'current_session')
+    // The acceptance-facing per-criterion shape, not compare's {scoreA, scoreB}: the host rejects
+    // undeclared keys, so reusing criterionResultSchema here is exactly the regression to guard.
+    expect(result.criteria.length).toBeGreaterThan(0)
+    for (const row of result.criteria) {
+      expect(typeof row.id).toBe('string')
+      expect(typeof row.score).toBe('number')
+      expect(row.scoreA).toBeUndefined()
+      expect(row.scoreB).toBeUndefined()
+    }
+  })
+})
+
+/**
+ * Both engines short-circuit byte-identical candidates without any model call
+ * (`identical: true`, 0.5 everywhere). That flag is optional, so it must be declared on the
+ * tool schema too — otherwise the exact case the shortcut exists for fails host validation,
+ * and the caller gets INVALID_TOOL_OUTPUT instead of the tie the engine computed.
+ */
+describe('identical-candidate verdicts', () => {
+  it("declares compare's identical tie on its output schema", async () => {
+    const definition = assemble().tools.get('verifier_compare')!
+    const result = await definition.execute({ problem: 'choose one', candidate_a: 'same answer', candidate_b: 'same answer' }, exec) as Record<string, any>
+    expect(result.identical).toBe(true)
+    assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'compare')
+  })
+
+  it("declares select's all-identical ranking on its output schema", async () => {
+    const definition = assemble().tools.get('verifier_select')!
+    const result = await definition.execute({ problem: 'choose one', candidates: ['same answer', 'same answer'] }, exec) as Record<string, any>
+    expect(result.identical).toBe(true)
+    assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'select')
+  })
+})
