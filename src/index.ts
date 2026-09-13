@@ -19,6 +19,7 @@ import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from 
 import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from './team-gate.ts'
 import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, parseStatisticsQuery, resolveStatisticsFile, summarizeVerdict, type StatisticsOverview, type VerifierToolName } from './statistics.ts'
 import { resolveTopicDataDir, type SessionArtifactLocator } from './topic-storage.ts'
+import { DecisionStore, boundDecisionCalls, resolveDecisionsFile, type DecisionCall, type DecisionRecord, type DecisionTrace } from './decisions.ts'
 
 export const name = 'llm-verifier'
 export const inject = ['tools', 'agents', 'attachments', 'llm', 'connection', 'sessionPersistence']
@@ -28,6 +29,7 @@ export * from './engine.ts'
 export * from './cache.ts'
 export * from './statistics.ts'
 export * from './topic-storage.ts'
+export * from './decisions.ts'
 export * from './auto.ts'
 export * from './router.ts'
 export * from './plan-gate.ts'
@@ -106,7 +108,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   let limiter = new RequestLimiter(entry.maxConcurrency)
   const current = installVerifierSettings(ctx, entry, () => { limiter = new RequestLimiter(current().maxConcurrency) })
   const autoRouter = new AutoVerifierRouter()
-  const topics = new Map<string, { dataDir: string; cache: ScoreCache; capabilities: TopLogprobCapabilityCache; flights: SingleFlight<{ value: CachedPairScore; hit: boolean }>; statistics: StatisticsStore }>()
+  const topics = new Map<string, { dataDir: string; cache: ScoreCache; capabilities: TopLogprobCapabilityCache; flights: SingleFlight<{ value: CachedPairScore; hit: boolean }>; statistics: StatisticsStore; decisions: DecisionStore }>()
   const topic = (header: SessionHeader) => {
     const selected = current()
     const dataDir = resolveTopicDataDir(services.sessionPersistence, header, selected.cacheDir)
@@ -114,7 +116,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const existing = topics.get(id)
     if (existing?.dataDir === dataDir) return existing
     const cacheFile = resolveCacheFile(dataDir)
-    const created = { dataDir, cache: new ScoreCache(cacheFile, selected.cacheMaxEntries), capabilities: new TopLogprobCapabilityCache(resolveCapabilityFile(dataDir)), flights: new SingleFlight<{ value: CachedPairScore; hit: boolean }>(), statistics: new StatisticsStore(resolveStatisticsFile(cacheFile)) }
+    const created = { dataDir, cache: new ScoreCache(cacheFile, selected.cacheMaxEntries), capabilities: new TopLogprobCapabilityCache(resolveCapabilityFile(dataDir)), flights: new SingleFlight<{ value: CachedPairScore; hit: boolean }>(), statistics: new StatisticsStore(resolveStatisticsFile(cacheFile)), decisions: new DecisionStore(resolveDecisionsFile(cacheFile)) }
     topics.set(id, created)
     return created
   }
@@ -146,15 +148,23 @@ export function apply(ctx: Context, config: Config = {}): void {
       autoTrackCompletionThreshold: selected.autoTrackCompletionThreshold,
     })
   }
-  const record = async <T>(toolName: VerifierToolName, agent: Agent, operation: () => Promise<{ result: T; selected: { provider: string; model: string } }>, phase = 'explicit'): Promise<T & { provider: string; model: string }> => {
+  const record = async <T>(toolName: VerifierToolName, agent: Agent, operation: (trace?: DecisionTrace) => Promise<{ result: T; selected: { provider: string; model: string } }>, phase = 'explicit'): Promise<T & { provider: string; model: string }> => {
     const startedAt = Date.now()
     let selected: { provider: string; model: string } = current()
-    const statistics = topic(agent.session.header).statistics
+    const topicEntry = topic(agent.session.header)
+    const statistics = topicEntry.statistics
+    // Every real model call is captured here, so the dashboard can answer "why did the
+    // judge say that" from the exact prompt and raw answer instead of a replay. Calls
+    // are bounded twice (per call, per record) before anything reaches the disk.
+    const capture = current().captureDecisions
+    const calls: DecisionCall[] = []
+    const trace: DecisionTrace | undefined = capture ? call => { calls.push(call) } : undefined
     try {
-      const completed = await operation()
+      const completed = await operation(trace)
       selected = completed.selected
       const value = { ...completed.result as T & object, ...route(selected) } as T & { provider: string; model: string }
       await statistics.record({ toolName, sessionId: String(agent.id), startedAt, success: true, provider: selected.provider, model: selected.model, stats: statsFrom(value), verdict: verdictFrom(toolName, value, phase) }).catch(() => {})
+      if (calls.length > 0) await topicEntry.decisions.record({ toolName, phase, startedAt, provider: selected.provider, model: selected.model, calls: boundDecisionCalls(calls) }).catch(() => {})
       return value
     } catch (error) {
       const details = errorDetails(error)
@@ -189,29 +199,30 @@ export function apply(ctx: Context, config: Config = {}): void {
       verdict: { phase, outcome },
     }).catch(() => {})
   }
-  const verifySession = async (agent: Agent, options: SessionVerificationOptions, signal: AbortSignal, phase = 'explicit'): Promise<SessionVerificationResult & { provider: string; model: string }> => record('verifier_current_session', agent, async () => {
+  const verifySession = async (agent: Agent, options: SessionVerificationOptions, signal: AbortSignal, phase = 'explicit'): Promise<SessionVerificationResult & { provider: string; model: string }> => record('verifier_current_session', agent, async (trace) => {
     const extracted = await extractSession(agent, async (ref: ImageAttachmentRef) => { const stored = await services.attachments.readImage(ref, signal); return { data: stored.data, mediaType: stored.ref.mediaType } }, { fromSeq: options.fromSeq, toSeq: options.toSeq, includeAssistantText: options.includeAssistantText, redactPatterns: options.redactPatterns, maxChars: options.maxChars })
     if (!extracted.problem.trim()) throw new Error('llm-verifier: no direct user task found in the selected session range — widen from_seq so the task statement is included')
     const { verifier, selected } = await engine(agent)
-    const compared = await verifier.compare({ problem: extracted.problem, candidateA: extracted.trace, candidateB: '(No useful work or verification was performed.)', repeats: positive(options.repeats, 2, 'repeats'), images: extracted.images }, signal)
+    const compared = await verifier.compare({ problem: extracted.problem, candidateA: extracted.trace, candidateB: '(No useful work or verification was performed.)', repeats: positive(options.repeats, 2, 'repeats'), images: extracted.images, ...(trace ? { trace } : {}) }, signal)
     const result: SessionVerificationResult = { sessionId: extracted.sessionId, problem: extracted.problem, score: compared.scoreA, baselineScore: compared.scoreB, winner: compared.winner, criteria: compared.criteria.map(row => ({ id: row.id, name: row.name, score: row.scoreA })), fromSeq: extracted.fromSeq, toSeq: extracted.toSeq, omittedCharacters: extracted.omittedCharacters, calls: compared.calls, stats: compared.stats, judges: compared.judges, agreement: compared.agreement }
     return { result, selected }
   }, phase)
-  const compareCandidates = async (agent: Agent, problem: string, candidateA: string, candidateB: string, repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit') => record('verifier_compare', agent, async () => {
+  const compareCandidates = async (agent: Agent, problem: string, candidateA: string, candidateB: string, repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit') => record('verifier_compare', agent, async (trace) => {
     const { verifier, selected } = await engine(agent)
-    return { result: await verifier.compare({ problem, candidateA, candidateB, repeats, images: routedImages }, signal), selected }
+    return { result: await verifier.compare({ problem, candidateA, candidateB, repeats, images: routedImages, ...(trace ? { trace } : {}) }, signal), selected }
   }, phase)
-  const selectCandidates = async (agent: Agent, problem: string, candidates: readonly string[], repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit') => record('verifier_select', agent, async () => {
+  const selectCandidates = async (agent: Agent, problem: string, candidates: readonly string[], repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit') => record('verifier_select', agent, async (trace) => {
     const { verifier, selected } = await engine(agent)
-    return { result: await verifier.select({ problem, candidates, repeats, pivots: Math.min(2, candidates.length), seed: 0, images: routedImages }, signal), selected }
+    return { result: await verifier.select({ problem, candidates, repeats, pivots: Math.min(2, candidates.length), seed: 0, images: routedImages, ...(trace ? { trace } : {}) }, signal), selected }
   }, phase)
-  const trackProgress = async (agent: Agent, problem: string, steps: readonly string[], checkpoints: readonly number[], repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit') => record('verifier_track', agent, async () => {
+  const trackProgress = async (agent: Agent, problem: string, steps: readonly string[], checkpoints: readonly number[], repeats: number, signal: AbortSignal, routedImages: readonly import('./caller.ts').VerifierImage[] = [], phase = 'explicit') => record('verifier_track', agent, async (trace) => {
     const { verifier, selected } = await engine(agent)
-    return { result: await verifier.track(problem, steps, checkpoints, repeats, signal, routedImages), selected }
+    return { result: await verifier.track(problem, steps, checkpoints, repeats, signal, routedImages, trace), selected }
   }, phase)
-  const classifyRoute = async (agent: Agent, prompt: string, signal: AbortSignal, phase: string) => record('verifier_route_classify', agent, async () => {
+  const classifyRoute = async (agent: Agent, prompt: string, signal: AbortSignal, phase: string) => record('verifier_route_classify', agent, async (trace) => {
     const { verifier, selected } = await engine(agent)
     const completion = await callVerifierText(verifier.client, prompt, signal)
+    trace?.({ label: 'route classify', channel: completion.scoringMode, prompt, output: completion.text })
     const stats: RunStats = { ...completion.usage, cacheHits: 0, cacheMisses: 0, estimatedCostUsd: ((completion.usage.inputTokens + completion.usage.cachedInputTokens) * selected.estimatedInputUsdPerMillion + completion.usage.outputTokens * selected.estimatedOutputUsdPerMillion) / 1_000_000, topLogprobScores: 0, explicitTagScores: 1 }
     return { result: { text: completion.text, stats }, selected }
   }, phase)
@@ -241,6 +252,30 @@ export function apply(ctx: Context, config: Config = {}): void {
     } catch (error) { return rpcFailure(error instanceof Error ? error.message : String(error)) }
   }
 
+  /**
+   * One decision snapshot by invocation id, across every topic.
+   *
+   * The dashboard shows merged topics, so the lookup fans out the same way the
+   * statistics query does instead of guessing which topic owns the record.
+   * @param id - invocation id the snapshot was stored under.
+   */
+  const handleDecisionQuery = async (id: unknown) => {
+    if (typeof id !== 'string' || id.length === 0) return rpcFailure('decision id must be a non-empty string')
+    try {
+      const items = await services.sessionPersistence.list()
+      const headers: SessionHeader[] = items
+        .map(item => item && typeof item === 'object' && 'header' in item ? (item as { header: SessionHeader }).header : item as SessionHeader)
+        .filter(header => header !== undefined)
+      for (const header of headers) {
+        const found = await topic(header).decisions.find(id).catch(() => undefined)
+        if (found) return rpcSuccess({ decision: found })
+      }
+      return rpcFailure('decision snapshot not found: it was pruned, never captured, or belongs to a deleted topic')
+    } catch (error) { return rpcFailure(error instanceof Error ? error.message : String(error)) }
+  }
+  /** Whether a payload asks for a decision snapshot instead of a statistics overview. */
+  const isDecisionQuery = (payload: unknown): boolean => typeof payload === 'object' && payload !== null && (payload as { kind?: unknown }).kind === 'decision'
+
   // 1. 优先注册到官方 /api 共享通道 (connection.fetch.register)
   const anyConn = services.connection as unknown as { fetch?: { register: (route: unknown) => () => Promise<void> } }
   if (anyConn && anyConn.fetch && typeof anyConn.fetch.register === 'function') {
@@ -259,7 +294,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           const isRpcEnvelope = typeof body === 'object' && body !== null && (body as { type?: unknown }).type === 'client-request' && typeof (body as { rpcId?: unknown }).rpcId === 'string'
           const rpcId = isRpcEnvelope ? (body as { rpcId: string }).rpcId : 'direct'
           const payload = isRpcEnvelope ? (body as { payload?: unknown }).payload : body
-          const outcome = await handleStatisticsQuery(payload)
+          const outcome = isDecisionQuery(payload) ? await handleDecisionQuery((payload as { id?: unknown }).id) : await handleStatisticsQuery(payload)
           if (isRpcEnvelope) {
             return Response.json({
               type: 'server-response',
@@ -282,6 +317,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   if (typeof legacyRpc.rpc?.handle === 'function') {
     try {
       legacyRpc.rpc.handle('/llm-verifier', async (endpoint: string, payload: unknown) => {
+        if (endpoint === 'decision') return handleDecisionQuery((payload as { id?: unknown } | undefined)?.id)
         if (endpoint !== 'statistics') return rpcFailure('unknown llm-verifier endpoint')
         return handleStatisticsQuery(payload)
       })
@@ -443,7 +479,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (decision) {
       // Every judge scores every match, and compare/select round the repeat count up to an
       // even number so the A/B slots get swapped, so the reservation has to cover both.
-      const repeats = routedRepeats(decision, selected.autoVerifyRepeats)
+      const repeats = routedRepeats(decision, selected.autoVerifyRepeats, selected.autoTrackRepeats)
       const expectedCalls = estimateRoutedCalls(decision, repeats, DEFAULT_CRITERIA.length) * selected.judges.length
       const reservation = autoRouter.reserve(agent, decision.kind, decision.fingerprint, expectedCalls, policy)
       if (reservation === undefined) {
@@ -545,11 +581,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   })
 
-  ctx.tools.register(defineTool({ name: 'verifier_compare', description: 'Use autonomously when exactly two substantive answers, patches, plans, or execution trajectories need an independent evidence-based comparison and the choice is consequential or uncertain. Do not use for trivial deterministic questions or when there is only one candidate. Uses the verifier model selected in DSH Settings (or the configured judge ensemble) with top-logprob A–T expectations when supported and explicit-tag fallback otherwise.', parameters: { problem: { type: 'string', required: true }, candidate_a: { type: 'string', required: true }, candidate_b: { type: 'string', required: true }, ...commonParams }, output: { schema: { type: 'object', additionalProperties: false, properties: { scoreA: { type: 'number', required: true }, scoreB: { type: 'number', required: true }, winner: { type: 'string', enum: ['A', 'B', 'tie'], required: true }, criteria: { type: 'array', items: criterionResultSchema, required: true }, agreement: { type: 'number', required: true }, calls: { type: 'integer', required: true }, stats: { ...statsSchema, required: true }, provider: { type: 'string', required: true }, model: { type: 'string', required: true }, judges: judgesSchema } }, render: (_args, value) => renderJson(value) }, timeoutMs: entry.timeoutMs * 20, async execute(args, exec) { requireEnabled(); const agent = requireAgent(exec.agent); return record('verifier_compare', agent, async () => { const { verifier, selected } = await engine(agent); const [problem, candidateA, candidateB] = explicitEvidence([args.problem, args.candidate_a, args.candidate_b], explicitItemChars(selected), explicitBudget(selected), 'compare input'); const result = await verifier.compare({ problem, candidateA, candidateB, criteria: normalizeCriteria(args.criteria), repeats: capped(args.repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats'), images: await images(args.images, exec.signal) }, exec.signal); return { result, selected } }) } }))
+  ctx.tools.register(defineTool({ name: 'verifier_compare', description: 'Use autonomously when exactly two substantive answers, patches, plans, or execution trajectories need an independent evidence-based comparison and the choice is consequential or uncertain. Do not use for trivial deterministic questions or when there is only one candidate. Uses the verifier model selected in DSH Settings (or the configured judge ensemble) with top-logprob A–T expectations when supported and explicit-tag fallback otherwise.', parameters: { problem: { type: 'string', required: true }, candidate_a: { type: 'string', required: true }, candidate_b: { type: 'string', required: true }, ...commonParams }, output: { schema: { type: 'object', additionalProperties: false, properties: { scoreA: { type: 'number', required: true }, scoreB: { type: 'number', required: true }, winner: { type: 'string', enum: ['A', 'B', 'tie'], required: true }, criteria: { type: 'array', items: criterionResultSchema, required: true }, agreement: { type: 'number', required: true }, calls: { type: 'integer', required: true }, stats: { ...statsSchema, required: true }, provider: { type: 'string', required: true }, model: { type: 'string', required: true }, judges: judgesSchema } }, render: (_args, value) => renderJson(value) }, timeoutMs: entry.timeoutMs * 20, async execute(args, exec) { requireEnabled(); const agent = requireAgent(exec.agent); return record('verifier_compare', agent, async (trace) => { const { verifier, selected } = await engine(agent); const [problem, candidateA, candidateB] = explicitEvidence([args.problem, args.candidate_a, args.candidate_b], explicitItemChars(selected), explicitBudget(selected), 'compare input'); const result = await verifier.compare({ problem, candidateA, candidateB, criteria: normalizeCriteria(args.criteria), repeats: capped(args.repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats'), images: await images(args.images, exec.signal), ...(trace ? { trace } : {}) }, exec.signal); return { result, selected } }) } }))
 
-  ctx.tools.register(defineTool({ name: 'verifier_select', description: 'Use autonomously when three or more substantive candidate answers, patches, plans, or trajectories must be ranked and an independent choice is valuable. Use verifier_compare for exactly two candidates; do not generate extra candidates merely to invoke this tool. Deterministic orchestrators should call this directly once they have three or more real candidates.', parameters: { problem: { type: 'string', required: true }, candidates: { type: 'array', items: { type: 'string' }, required: true }, ...commonParams, pivots: { type: 'integer' }, seed: { type: 'integer' } }, output: { schema: { type: 'object', additionalProperties: false, properties: { index: { type: 'integer', required: true }, best: { type: 'string', required: true }, scores: { type: 'array', items: { type: 'number' }, required: true }, ranking: { type: 'array', items: { type: 'integer' }, required: true }, pivots: { type: 'array', items: { type: 'integer' }, required: true }, comparisons: { type: 'integer', required: true }, calls: { type: 'integer', required: true }, stats: { ...statsSchema, required: true }, provider: { type: 'string', required: true }, model: { type: 'string', required: true }, judges: judgesSchema } }, render: (_args, value) => renderJson(value) }, timeoutMs: entry.timeoutMs * 100, async execute(args, exec) { requireEnabled(); const agent = requireAgent(exec.agent); return record('verifier_select', agent, async () => { const { verifier, selected } = await engine(agent); const limit = explicitCandidateLimit(selected); if (args.candidates.length > limit) throw new Error('llm-verifier: candidates must contain at most ' + limit + ' entries'); const candidates = explicitEvidence(args.candidates, explicitItemChars(selected), explicitBudget(selected), 'candidates'); const criteria = normalizeCriteria(args.criteria); const repeats = capped(args.repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats'); const planned = plannedComparisons(candidates.length) * (criteria?.length || 3) * repeats; if (planned > MAX_EXPLICIT_PLANNED_CALLS) throw new Error('llm-verifier: this selection would issue about ' + planned + ' judge calls; reduce candidates or repeats'); const result = await verifier.select({ problem: sanitizeVerifierText(args.problem, explicitItemChars(selected)), candidates, criteria, repeats, pivots: capped(args.pivots, 2, Math.max(1, candidates.length), 'pivots'), seed: args.seed ?? 0, images: await images(args.images, exec.signal) }, exec.signal); return { result, selected } }) } }))
+  ctx.tools.register(defineTool({ name: 'verifier_select', description: 'Use autonomously when three or more substantive candidate answers, patches, plans, or trajectories must be ranked and an independent choice is valuable. Use verifier_compare for exactly two candidates; do not generate extra candidates merely to invoke this tool. Deterministic orchestrators should call this directly once they have three or more real candidates.', parameters: { problem: { type: 'string', required: true }, candidates: { type: 'array', items: { type: 'string' }, required: true }, ...commonParams, pivots: { type: 'integer' }, seed: { type: 'integer' } }, output: { schema: { type: 'object', additionalProperties: false, properties: { index: { type: 'integer', required: true }, best: { type: 'string', required: true }, scores: { type: 'array', items: { type: 'number' }, required: true }, ranking: { type: 'array', items: { type: 'integer' }, required: true }, pivots: { type: 'array', items: { type: 'integer' }, required: true }, comparisons: { type: 'integer', required: true }, calls: { type: 'integer', required: true }, stats: { ...statsSchema, required: true }, provider: { type: 'string', required: true }, model: { type: 'string', required: true }, judges: judgesSchema } }, render: (_args, value) => renderJson(value) }, timeoutMs: entry.timeoutMs * 100, async execute(args, exec) { requireEnabled(); const agent = requireAgent(exec.agent); return record('verifier_select', agent, async (trace) => { const { verifier, selected } = await engine(agent); const limit = explicitCandidateLimit(selected); if (args.candidates.length > limit) throw new Error('llm-verifier: candidates must contain at most ' + limit + ' entries'); const candidates = explicitEvidence(args.candidates, explicitItemChars(selected), explicitBudget(selected), 'candidates'); const criteria = normalizeCriteria(args.criteria); const repeats = capped(args.repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats'); const planned = plannedComparisons(candidates.length) * (criteria?.length || 3) * repeats; if (planned > MAX_EXPLICIT_PLANNED_CALLS) throw new Error('llm-verifier: this selection would issue about ' + planned + ' judge calls; reduce candidates or repeats'); const result = await verifier.select({ problem: sanitizeVerifierText(args.problem, explicitItemChars(selected)), candidates, criteria, repeats, pivots: capped(args.pivots, 2, Math.max(1, candidates.length), 'pivots'), seed: args.seed ?? 0, images: await images(args.images, exec.signal), ...(trace ? { trace } : {}) }, exec.signal); return { result, selected } }) } }))
 
-  ctx.tools.register(defineTool({ name: 'verifier_track', description: 'Use autonomously for a genuinely multi-step task when progress at explicit checkpoints is uncertain or needs evidence-based measurement. Deterministic goal/workflow orchestrators should call this directly when real checkpoints already exist. Do not use for a single completed answer or invent checkpoints.', parameters: { problem: { type: 'string', required: true }, steps: { type: 'array', items: { type: 'string' }, required: true }, checkpoints: { type: 'array', items: { type: 'integer' }, required: true }, repeats: commonParams.repeats, images: commonParams.images }, output: { schema: { type: 'object', additionalProperties: false, properties: { scores: { type: 'array', items: { type: 'number' }, required: true }, perRepeat: { type: 'array', items: { type: 'array', items: { type: 'number' } }, required: true }, calls: { type: 'integer', required: true }, stats: { ...statsSchema, required: true }, provider: { type: 'string', required: true }, model: { type: 'string', required: true }, judges: judgesSchema } }, render: (_args, value) => renderJson(value) }, timeoutMs: entry.timeoutMs * 20, async execute(args, exec) { requireEnabled(); const agent = requireAgent(exec.agent); return record('verifier_track', agent, async () => { const { verifier, selected } = await engine(agent); if (args.steps.length > MAX_TRACK_STEPS) throw new Error('llm-verifier: steps must contain at most ' + MAX_TRACK_STEPS + ' entries'); const steps = explicitEvidence(args.steps, explicitItemChars(selected), explicitBudget(selected), 'steps'); const result = await verifier.track(sanitizeVerifierText(args.problem, explicitItemChars(selected)), steps, args.checkpoints, capped(args.repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats'), exec.signal, await images(args.images, exec.signal)); return { result, selected } }) } }))
+  ctx.tools.register(defineTool({ name: 'verifier_track', description: 'Use autonomously for a genuinely multi-step task when progress at explicit checkpoints is uncertain or needs evidence-based measurement. Deterministic goal/workflow orchestrators should call this directly when real checkpoints already exist. Do not use for a single completed answer or invent checkpoints.', parameters: { problem: { type: 'string', required: true }, steps: { type: 'array', items: { type: 'string' }, required: true }, checkpoints: { type: 'array', items: { type: 'integer' }, required: true }, repeats: commonParams.repeats, images: commonParams.images }, output: { schema: { type: 'object', additionalProperties: false, properties: { scores: { type: 'array', items: { type: 'number' }, required: true }, perRepeat: { type: 'array', items: { type: 'array', items: { type: 'number' } }, required: true }, calls: { type: 'integer', required: true }, stats: { ...statsSchema, required: true }, provider: { type: 'string', required: true }, model: { type: 'string', required: true }, judges: judgesSchema } }, render: (_args, value) => renderJson(value) }, timeoutMs: entry.timeoutMs * 20, async execute(args, exec) { requireEnabled(); const agent = requireAgent(exec.agent); return record('verifier_track', agent, async (trace) => { const { verifier, selected } = await engine(agent); if (args.steps.length > MAX_TRACK_STEPS) throw new Error('llm-verifier: steps must contain at most ' + MAX_TRACK_STEPS + ' entries'); const steps = explicitEvidence(args.steps, explicitItemChars(selected), explicitBudget(selected), 'steps'); const result = await verifier.track(sanitizeVerifierText(args.problem, explicitItemChars(selected)), steps, args.checkpoints, capped(args.repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats'), exec.signal, await images(args.images, exec.signal), trace); return { result, selected } }) } }))
 
   ctx.tools.register(defineTool({ name: 'verifier_current_session', description: 'Explicitly verify the current DSH session. Smart/strict policy can also invoke this gate automatically at the turn-stopping lifecycle boundary after consequential work with real tool evidence. Extracts the session, applies redaction and bounds, then sends the evidence to the configured verifier model.', parameters: { from_seq: { type: 'integer' }, to_seq: { type: 'integer' }, include_assistant_text: { type: 'boolean' }, redact_patterns: { type: 'array', items: { type: 'string' } }, max_chars: { type: 'integer' }, repeats: { type: 'integer' } }, output: { schema: { type: 'object', additionalProperties: false, properties: { sessionId: { type: 'string', required: true }, problem: { type: 'string', required: true }, score: { type: 'number', required: true }, baselineScore: { type: 'number', required: true }, winner: { type: 'string', enum: ['A', 'B', 'tie'], required: true }, fromSeq: { type: 'integer', required: true }, toSeq: { type: 'integer', required: true }, omittedCharacters: { type: 'integer', required: true }, agreement: { type: 'number', required: true }, calls: { type: 'integer', required: true }, stats: { ...statsSchema, required: true }, provider: { type: 'string', required: true }, model: { type: 'string', required: true }, judges: judgesSchema } }, render: (_args, value) => renderJson(value) }, timeoutMs: entry.timeoutMs * 20, async execute(args, exec) { requireEnabled(); const agent = requireAgent(exec.agent); return verifySession(agent, { fromSeq: args.from_seq, toSeq: args.to_seq, includeAssistantText: args.include_assistant_text, redactPatterns: args.redact_patterns, maxChars: args.max_chars === undefined ? undefined : capped(args.max_chars, 200000, MAX_SESSION_CHARS, 'max_chars'), repeats: capped(args.repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats') }, exec.signal) } }))
 }

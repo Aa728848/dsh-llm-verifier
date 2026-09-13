@@ -5,9 +5,11 @@ import { type ExtraJudgeDraft } from './client-judges.ts';
 export { zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage, compact, money, duration, dateTime, type I18nDict, type VerdictSummary, resolveCacheDirOnSave, sameSettingValue, sectionForSave, WORST_CASE_ROUTE_CALLS_PER_JUDGE, WORST_CASE_FINAL_CALLS_PER_JUDGE, WORST_CASE_TASK_PER_JUDGE, WORST_CASE_SESSION_PER_JUDGE, computeJudgeCount, computeWorstCaseBudget, type BudgetWarningState, evaluateBudgetWarning, isVerdictFailed, formatPercentage, formatVerdictDetails, };
 export interface Values {
     enabled: boolean;
+    captureDecisions: boolean;
     autoVerifyMode: 'manual' | 'smart' | 'strict';
     autoVerifyThreshold: number;
     autoVerifyRepeats: number;
+    autoTrackRepeats: number;
     autoVerifyFinalRepeats: number;
     autoVerifyMinToolCalls: number;
     autoVerifyMaxChars: number;

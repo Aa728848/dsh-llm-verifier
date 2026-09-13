@@ -392,23 +392,67 @@ function trailingSummary(index: EvidenceIndex, call: EvidenceCall, maxChars: num
  * @param index - evidence index of the current task.
  * @param newest - the call already rendered as the newest output, if any.
  * @param budget - maximum characters this block may occupy.
- * @returns The labelled block, or '' when it would add nothing.
+ * @returns The labelled block and the run it came from, or an empty block.
  */
-function verificationEvidence(index: EvidenceIndex, newest: EvidenceCall | undefined, budget: number): string {
-  if (budget < 128) return ''
+function verificationEvidence(index: EvidenceIndex, newest: EvidenceCall | undefined, budget: number): { text: string; call: EvidenceCall | undefined } {
+  if (budget < 128) return { text: '', call: undefined }
   // A freshly observed run already sits in the newest block; showing an older one as
   // well would only add noise (and could read as two independent verifications).
-  if (newest !== undefined && looksLikeVerificationRun(newest.text)) return ''
+  if (newest !== undefined && looksLikeVerificationRun(newest.text)) return { text: '', call: undefined }
   let run: EvidenceCall | undefined
   for (const pair of index.calls.values()) {
     if (!isEvidenceOutput(pair.name, pair.text) || !looksLikeVerificationRun(pair.text)) continue
     if (run === undefined || pair.resultSeq > run.resultSeq) run = pair
   }
-  if (run === undefined) return ''
+  if (run === undefined) return { text: '', call: undefined }
   const trailing = trailingSummary(index, run, 200)
   const prefix = '\n\nLatest observed verification run (' + run.name + (trailing === '' ? '' : ' — ' + trailing) + '):\n'
+  if (prefix.length >= budget) return { text: '', call: undefined }
+  return { text: prefix + sanitizeVerifierText(run.text, budget - prefix.length), call: run }
+}
+
+/** Upper bound on the one-line-per-call digest attached to the newest checkpoint. */
+const MAX_DIGEST_LINES = 8
+
+/**
+ * One line per recent tool result, newest last.
+ *
+ * The detailed blocks above show the newest output and the newest verification run; a
+ * judge deciding whether that verification still covers the current state also needs to
+ * know what the calls in between actually did. The trailing histogram on the
+ * verification block names the tools, this names the work ("gh api … state=closed",
+ * "Updated todo list: 0 pending"), and it deliberately keeps coordination results — they
+ * are exactly what a tail of the task looks like.
+ *
+ * Rendered only for the checkpoint being judged, bounded by its own slice of the same
+ * per-item budget, and always keeping the newest lines when the budget is tight.
+ * @param index - evidence index of the current task.
+ * @param budget - maximum characters this block may occupy.
+ * @param shown - calls already rendered in full above, marked instead of dropped.
+ * @returns The labelled block, or '' when there is nothing recent to add.
+ */
+function recentEvidenceDigest(index: EvidenceIndex, budget: number, shown: readonly (EvidenceCall | undefined)[]): string {
+  if (budget < 128) return ''
+  // The plugin's own verdicts stay out even here: a one-line "winner A, score 1" in the
+  // judge's context is the self-grading this module refuses everywhere else.
+  const recent = [...index.calls.values()]
+    .filter(call => !VERIFIER_EVIDENCE_TOOLS.has(call.name))
+    .sort((a, b) => a.resultSeq - b.resultSeq)
+    .slice(-MAX_DIGEST_LINES)
+  if (recent.length === 0) return ''
+  const rendered = recent.map(call => {
+    const first = call.text.split('\n').map(line => line.trim()).find(line => line.length > 0) ?? ''
+    const mark = shown.includes(call) ? ' [shown above]' : ''
+    return '  [' + call.resultSeq + '] ' + (call.name + ': ' + first).slice(0, 110) + mark
+  })
+  const prefix = '\n\nRecent tool results (newest last):\n'
   if (prefix.length >= budget) return ''
-  return prefix + sanitizeVerifierText(run.text, budget - prefix.length)
+  const room = budget - prefix.length
+  let kept = rendered
+  while (kept.length > 1 && kept.join('\n').length > room) kept = kept.slice(1)
+  const omitted = kept.length < rendered.length ? '  …older omitted\n' : ''
+  const body = omitted + kept.join('\n')
+  return prefix + (body.length > room ? body.slice(body.length - room) : body)
 }
 
 /**
@@ -491,8 +535,9 @@ interface CheckpointSource { seq: number; label: string; body: string }
  * than the newest one before the last todo snapshot (which is often several tool calls
  * stale), and it carries the agent's latest prose as an explicitly labelled claim (see
  * {@link currentNarration}), because prose deliverables never reach a tool. It gets one
- * extra slot as well — the newest verification run in the task
- * ({@link verificationEvidence}) — because a single output slot cannot show both the
+ * extra slots as well — the newest verification run in the task
+ * ({@link verificationEvidence}) and a one-line digest of the recent calls
+ * ({@link recentEvidenceDigest}) — because a single output slot cannot show both the
  * tail of the task and the test run that tail is hiding.
  * @param index - evidence index of the current task.
  * @param sources - checkpoints in chronological order.
@@ -517,9 +562,18 @@ function renderCheckpointSteps(index: EvidenceIndex, sources: readonly Checkpoin
     const observed = checkpointEvidence(index, isCurrent ? Number.POSITIVE_INFINITY : source.seq, isCurrent ? Math.floor(evidenceBudget / 2) : evidenceBudget, isCurrent)
     // Only the newest checkpoint can be short of verification: the older ones describe
     // past states, and their single output is what was current for them then.
-    const verification = isCurrent ? verificationEvidence(index, observed.call, Math.floor(evidenceBudget / 2) - observed.text.length) : ''
-    const narration = isCurrent ? currentNarration(index, evidenceBudget - observed.text.length - verification.length) : ''
-    return sanitizeVerifierText(note + source.label + source.body, Math.max(1, stepCap - observed.text.length - verification.length - narration.length)) + observed.text + verification + narration
+    const verification = isCurrent
+      ? verificationEvidence(index, observed.call, Math.floor(evidenceBudget / 2) - observed.text.length)
+      : { text: '', call: undefined }
+    // The digest comes out of the item cap rather than the evidence budget: it is a
+    // bounded summary, and the narration keeps the room the evidence budget reserved for
+    // it. MAX_DIGEST_LINES lines of ~110 characters never exceed a tenth of the item.
+    const digest = isCurrent
+      ? recentEvidenceDigest(index, Math.min(1000, Math.floor(stepCap / 10)), [observed.call, verification.call])
+      : ''
+    const narration = isCurrent ? currentNarration(index, evidenceBudget - observed.text.length - verification.text.length) : ''
+    const used = observed.text.length + verification.text.length + digest.length + narration.length
+    return sanitizeVerifierText(note + source.label + source.body, Math.max(1, stepCap - used)) + observed.text + verification.text + digest + narration
   })
   return { steps, evidenceSeqs: kept.map(source => source.seq), omitted }
 }
@@ -721,13 +775,18 @@ export function semanticDecision(output: SemanticRouteOutput, events: readonly S
  * cancels that.
  *
  * `select` does not need it: its ring is symmetric by construction and the pivot round
- * is oriented per pair by the engine, so one round is already unbiased. `track` scores
- * a single checkpoint list and has no slots at all.
+ * is oriented per pair by the engine, so one round is already unbiased. `track` has no
+ * slots at all, but it has its own repeat count: without token logprobs one call yields
+ * ONE sampled letter (5.3% of the scale per letter), so repeats are averaged to keep the
+ * progress curve from flipping bands on sampling noise — the same reason the upstream
+ * `n_evaluations` averages repeated verifications.
  * @param decision - the routed decision about to run.
  * @param configured - the configured auto-route repeat count.
+ * @param trackRepeats - repeat count for a `track` route; defaults to `configured`.
  * @returns The repeat count to pass to the engine.
  */
-export function routedRepeats(decision: RouteDecision, configured: number): number {
+export function routedRepeats(decision: RouteDecision, configured: number, trackRepeats = configured): number {
+  if (decision.kind === 'track') return Math.max(1, trackRepeats)
   if (decision.kind !== 'compare') return configured
   return configured % 2 === 0 ? configured : configured + 1
 }

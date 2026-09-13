@@ -8,6 +8,7 @@ export * from './engine.ts';
 export * from './cache.ts';
 export * from './statistics.ts';
 export * from './topic-storage.ts';
+export * from './decisions.ts';
 export * from './auto.ts';
 export * from './router.ts';
 export * from './plan-gate.ts';

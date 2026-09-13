@@ -29,6 +29,16 @@ export interface Config {
   autoVerifyThreshold?: number
   autoVerifyRepeats?: number
   /**
+   * Scoring repeats for an automatic `track` route only.
+   *
+   * Progress scores on a model without token logprobs come from the explicit-tag
+   * channel, i.e. ONE sampled letter per call, and one letter is worth 5.3% of the
+   * A–T scale — adjacent bands are a couple of samples apart. Averaging repeats is
+   * what the upstream `n_evaluations` does for exactly this reason, and a track call
+   * is the cheapest kind (one prompt, no tournament), so it defaults to 3.
+   */
+  autoTrackRepeats?: number
+  /**
    * Scoring repeats for the FINAL session acceptance only.
    *
    * Even rounds swap A/B positions, and the final acceptance is the one automatic
@@ -50,6 +60,13 @@ export interface Config {
   autoRouteMaxInputChars?: number
   autoMaxModelCallsPerTask?: number
   autoMaxModelCallsPerSession?: number
+  /**
+   * Persist a bounded snapshot (prompt + raw answer) of every verifier model call.
+   *
+   * Answers "why did the judge say that?" without replaying a session from its event
+   * log; capped per call, per record and per invocation by `decisions.ts`.
+   */
+  captureDecisions?: boolean
   autoVerifyTeamTasks?: boolean
   autoVerifyPlanMode?: boolean
   autoVerifySubagents?: boolean
@@ -75,6 +92,7 @@ export interface ResolvedConfig {
   autoVerifyMode: AutoVerifyMode
   autoVerifyThreshold: number
   autoVerifyRepeats: number
+  autoTrackRepeats: number
   autoVerifyFinalRepeats: number
   autoVerifyMinToolCalls: number
   autoVerifyMaxChars: number
@@ -90,6 +108,7 @@ export interface ResolvedConfig {
   autoRouteMaxInputChars: number
   autoMaxModelCallsPerTask: number
   autoMaxModelCallsPerSession: number
+  captureDecisions: boolean
   autoVerifyTeamTasks: boolean
   autoVerifyPlanMode: boolean
   autoVerifySubagents: boolean
@@ -122,6 +141,7 @@ export const Config: z<Config> = z.object({
   autoVerifyMode: z.union(['manual', 'smart', 'strict']).default('smart'),
   autoVerifyThreshold: z.number().min(0).max(1).default(0.65),
   autoVerifyRepeats: z.number().step(1).min(1).default(1),
+  autoTrackRepeats: z.number().step(1).min(1).default(3),
   autoVerifyFinalRepeats: z.number().step(1).min(1).default(2),
   autoVerifyMinToolCalls: z.number().step(1).min(1).default(3),
   autoVerifyMaxChars: z.number().step(1).min(1000).default(80000),
@@ -132,11 +152,12 @@ export const Config: z<Config> = z.object({
   autoRouteMaxCandidates: z.number().step(1).min(3).default(8),
   autoRouteMaxPerTask: z.number().step(1).min(1).default(2),
   autoRouteMaxPerSession: z.number().step(1).min(1).default(8),
-  autoTrackCompletionThreshold: z.number().min(0).max(1).default(0.8),
+  autoTrackCompletionThreshold: z.number().min(0).max(1).default(0.684),
   autoRouteMaxItemChars: z.number().step(1).min(100).default(20000),
   autoRouteMaxInputChars: z.number().step(1).min(1000).default(60000),
   autoMaxModelCallsPerTask: z.number().step(1).min(1).default(96),
   autoMaxModelCallsPerSession: z.number().step(1).min(1).default(240),
+  captureDecisions: z.boolean().default(true),
   autoVerifyTeamTasks: z.boolean().default(true),
   autoVerifyPlanMode: z.boolean().default(true),
   autoVerifySubagents: z.boolean().default(false),
@@ -201,6 +222,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) throw new Error('llm-verifier: temperature must be between 0 and 2')
   const values = {
     autoVerifyRepeats: config.autoVerifyRepeats ?? 1,
+    autoTrackRepeats: config.autoTrackRepeats ?? 3,
     autoVerifyFinalRepeats: config.autoVerifyFinalRepeats ?? 2,
     autoVerifyMinToolCalls: config.autoVerifyMinToolCalls ?? 3,
     autoVerifyMaxChars: config.autoVerifyMaxChars ?? 80000,
@@ -224,7 +246,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   if (values.autoRouteMaxCandidates < 3 || values.autoRouteMaxCandidates > 16) throw new Error('llm-verifier: autoRouteMaxCandidates must be between 3 and 16')
   if (values.autoRouteMaxInputChars < values.autoRouteMaxItemChars * 2) throw new Error('llm-verifier: autoRouteMaxInputChars must fit at least two route items')
   const autoRouteMinConfidence = config.autoRouteMinConfidence ?? 0.9
-  const autoTrackCompletionThreshold = config.autoTrackCompletionThreshold ?? 0.8
+  const autoTrackCompletionThreshold = config.autoTrackCompletionThreshold ?? 0.684
   if (![autoRouteMinConfidence, autoTrackCompletionThreshold].every(value => Number.isFinite(value) && value >= 0 && value <= 1)) throw new Error('llm-verifier: auto route thresholds must be between 0 and 1')
   const maxRetries = config.maxRetries ?? 3
   if (!Number.isSafeInteger(maxRetries) || maxRetries < 0) throw new Error('llm-verifier: maxRetries must be a non-negative safe integer')
@@ -306,6 +328,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     autoRouteSemantic: config.autoRouteSemantic ?? true,
     autoRouteMinConfidence,
     autoTrackCompletionThreshold,
+    captureDecisions: config.captureDecisions ?? true,
     autoVerifyTeamTasks: config.autoVerifyTeamTasks ?? true,
     autoVerifyPlanMode: config.autoVerifyPlanMode ?? true,
     autoVerifySubagents: config.autoVerifySubagents ?? false,

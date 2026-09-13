@@ -1,11 +1,12 @@
 import { addUsage, callVerifier, emptyUsage, predictScoringChannel, type ScoringMode, type UsageStats, type VerifierClientConfig, type VerifierImage } from './caller.ts'
 import { ScoreCache, SingleFlight, stableHash, type CachedPairScore } from './cache.ts'
+import type { DecisionTrace } from './decisions.ts'
 import {
   DEFAULT_CRITERIA, DEFAULT_GROUND_TRUTH_NOTE, accumulatePairs, buildPairwisePrompt, buildProgressPrompt,
   extractProgressScore, extractScore, pivotRoundPairs, rankScores, ringCycle, topPivots, type Criterion,
 } from './core.ts'
 
-export interface CompareOptions { problem: string; candidateA: string; candidateB: string; criteria?: readonly Criterion[]; groundTruthNote?: string; repeats?: number; images?: readonly VerifierImage[] }
+export interface CompareOptions { problem: string; candidateA: string; candidateB: string; criteria?: readonly Criterion[]; groundTruthNote?: string; repeats?: number; images?: readonly VerifierImage[]; trace?: DecisionTrace }
 export interface CriterionResult { id: string; name: string; scoreA: number; scoreB: number }
 export interface RunStats extends UsageStats { cacheHits: number; cacheMisses: number; estimatedCostUsd: number; topLogprobScores: number; explicitTagScores: number }
 
@@ -34,7 +35,7 @@ export interface CompareResult {
   agreement: number
 }
 
-export interface SelectOptions { problem: string; candidates: readonly string[]; criteria?: readonly Criterion[]; groundTruthNote?: string; repeats?: number; pivots?: number; seed?: number; images?: readonly VerifierImage[] }
+export interface SelectOptions { problem: string; candidates: readonly string[]; criteria?: readonly Criterion[]; groundTruthNote?: string; repeats?: number; pivots?: number; seed?: number; images?: readonly VerifierImage[]; trace?: DecisionTrace }
 
 export interface SelectResult {
   index: number
@@ -160,7 +161,12 @@ export class VerifierEngine {
     const keyForMode = (scoringMode: ScoringMode) => stableHash({ ...identity, scoringMode })
     const create = async () => {
       const completion = await callVerifier(client, prompt, signal, options.images)
-      return { scoreA: extractScore(completion, '<score_A>'), scoreB: extractScore(completion, '<score_B>'), usage: completion.usage, scoringMode: completion.scoringMode, createdAt: Date.now() }
+      const scoreA = extractScore(completion, '<score_A>')
+      const scoreB = extractScore(completion, '<score_B>')
+      // Traced here, not in scoreOne(): a cache hit or a merged in-flight call makes no
+      // model call, and a snapshot that showed one anyway would be a fabrication.
+      options.trace?.({ label: criterion.name + ' repeat ' + (repeat + 1), channel: completion.scoringMode, prompt, output: completion.text, score: scoreA })
+      return { scoreA, scoreB, usage: completion.usage, scoringMode: completion.scoringMode, createdAt: Date.now() }
     }
     const cache = this.cache
     if (cache === undefined) { const value = await create(); return { scores: [value.scoreA, value.scoreB], usage: value.usage, scoringMode: value.scoringMode, hit: false } }
@@ -338,6 +344,7 @@ export class VerifierEngine {
         groundTruthNote: options.groundTruthNote,
         repeats: options.repeats,
         images: options.images,
+        trace: options.trace,
       }, signal),
     }))
     const rewards = new Map<string, readonly [number, number]>()
@@ -372,7 +379,7 @@ export class VerifierEngine {
     return { rewards, judgeRewards, judgeOk, judgeErrors, judgeCalls, stats: this.finishStats(stats) }
   }
 
-  async track(problem: string, steps: readonly string[], checkpoints: readonly number[], repeats = 2, signal?: AbortSignal, images?: readonly VerifierImage[]): Promise<{ scores: number[]; perRepeat: number[][]; calls: number; stats: RunStats; judges: JudgeScore[] }> {
+  async track(problem: string, steps: readonly string[], checkpoints: readonly number[], repeats = 2, signal?: AbortSignal, images?: readonly VerifierImage[], trace?: DecisionTrace): Promise<{ scores: number[]; perRepeat: number[][]; calls: number; stats: RunStats; judges: JudgeScore[] }> {
     if (!steps.length || !checkpoints.length) throw new Error('llm-verifier: steps and checkpoints must not be empty')
     for (const checkpoint of checkpoints) if (!Number.isSafeInteger(checkpoint) || checkpoint < 1 || checkpoint > steps.length) throw new Error('llm-verifier: each checkpoint must be an integer between 1 and steps.length')
     const prompt = buildProgressPrompt(problem, steps, checkpoints)
@@ -383,12 +390,16 @@ export class VerifierEngine {
     const judgePerRepeatScores: Array<number[][]> = Array.from({ length: this.clients.length }, () => [])
 
     const repeatIndices = Array.from({ length: repeats }, (_, index) => index)
-    const runs = await this.mapLimited(repeatIndices, async () => {
+    const runs = await this.mapLimited(repeatIndices, async (repeatIndex) => {
       const judgeResults = await Promise.all(
         this.clients.map(async (client, k) => {
           try {
             const completion = await callVerifier(client, prompt, signal, images)
             const scores = checkpoints.map((_, index) => extractProgressScore(completion, '<c' + (index + 1) + '>'))
+            // One snapshot per repeat for the primary judge only: extra judges would
+            // multiply the record past its budget, and the primary is what the verdict
+            // reports.
+            if (k === 0) trace?.({ label: 'progress repeat ' + (repeatIndex + 1) + '/' + repeats + (this.clients.length > 1 ? ' judge 1/' + this.clients.length : ''), channel: completion.scoringMode, prompt, output: completion.text, score: scores[scores.length - 1] })
             return {
               k,
               ok: true as const,

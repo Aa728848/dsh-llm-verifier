@@ -32,7 +32,10 @@ export {
 }
 
 const NS = 'llm-verifier'
-export interface Values { enabled: boolean; autoVerifyMode: 'manual'|'smart'|'strict'; autoVerifyThreshold: number; autoVerifyRepeats: number; autoVerifyFinalRepeats: number; autoVerifyMinToolCalls: number; autoVerifyMaxChars: number; autoVerifyMaxPerTask: number; autoVerifyMaxPerSession: number; autoRouteSemantic: boolean; autoRouteMinConfidence: number; autoRouteMaxCandidates: number; autoRouteMaxPerTask: number; autoRouteMaxPerSession: number; autoTrackCompletionThreshold: number; autoRouteMaxItemChars: number; autoRouteMaxInputChars: number; autoMaxModelCallsPerTask: number; autoMaxModelCallsPerSession: number; autoVerifyTeamTasks: boolean; autoVerifyPlanMode: boolean; provider: string; model: string; reasoningEffort?: string; maxTokens: number; temperature: number; label?: string; maxConcurrency: number; maxRetries: number; retryBaseDelayMs: number; timeoutMs: number; cacheDir: string; cacheMaxEntries: number; estimatedInputUsdPerMillion: number; estimatedOutputUsdPerMillion: number; autoVerifySubagents: boolean; extraJudges: ExtraJudgeDraft[] }
+interface DecisionCallView { label: string; channel: string; prompt: string; output: string; score?: number }
+interface DecisionRecordView { id: string; toolName: string; phase: string; provider: string; model: string; startedAt: number; calls: DecisionCallView[] }
+
+export interface Values { enabled: boolean; captureDecisions: boolean; autoVerifyMode: 'manual'|'smart'|'strict'; autoVerifyThreshold: number; autoVerifyRepeats: number; autoTrackRepeats: number; autoVerifyFinalRepeats: number; autoVerifyMinToolCalls: number; autoVerifyMaxChars: number; autoVerifyMaxPerTask: number; autoVerifyMaxPerSession: number; autoRouteSemantic: boolean; autoRouteMinConfidence: number; autoRouteMaxCandidates: number; autoRouteMaxPerTask: number; autoRouteMaxPerSession: number; autoTrackCompletionThreshold: number; autoRouteMaxItemChars: number; autoRouteMaxInputChars: number; autoMaxModelCallsPerTask: number; autoMaxModelCallsPerSession: number; autoVerifyTeamTasks: boolean; autoVerifyPlanMode: boolean; provider: string; model: string; reasoningEffort?: string; maxTokens: number; temperature: number; label?: string; maxConcurrency: number; maxRetries: number; retryBaseDelayMs: number; timeoutMs: number; cacheDir: string; cacheMaxEntries: number; estimatedInputUsdPerMillion: number; estimatedOutputUsdPerMillion: number; autoVerifySubagents: boolean; extraJudges: ExtraJudgeDraft[] }
 export interface Loaded { groups: readonly ModelProviderGroup[]; settings: SettingsNamespaceView; writable: boolean; failures: string[] }
 export interface RunStats { calls: number; attempts: number; retries: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningTokens: number; cacheHits: number; cacheMisses: number; estimatedCostUsd: number; topLogprobScores: number; explicitTagScores: number }
 export interface InvocationRecord { id: string; toolName: string; sessionId?: string; startedAt: number; finishedAt: number; durationMs: number; success: boolean; errorName?: string; errorMessage?: string; provider: string; model: string; stats: RunStats; verdict?: VerdictSummary }
@@ -90,7 +93,7 @@ const muted: React.CSSProperties = { color: 'var(--dsw-text-secondary)', fontSiz
 const toolColors: Record<string, string> = { verifier_route_classify: '#d97706', verifier_compare: '#4f8cff', verifier_select: '#8b6df6', verifier_track: '#2fc5c9', verifier_current_session: '#f5a524' }
 
 function record(value: unknown): Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {} }
-function values(view: SettingsNamespaceView): Values { const v=record(view.value); const mode=v.autoVerifyMode==='manual'||v.autoVerifyMode==='strict'?v.autoVerifyMode:'smart'; return { enabled:v.enabled!==false,autoVerifyMode:mode,autoVerifyThreshold:Number(v.autoVerifyThreshold??.65),autoVerifyRepeats:Number(v.autoVerifyRepeats??1),autoVerifyFinalRepeats:Number(v.autoVerifyFinalRepeats??2),autoVerifyMinToolCalls:Number(v.autoVerifyMinToolCalls??3),autoVerifyMaxChars:Number(v.autoVerifyMaxChars??80000),autoVerifyMaxPerTask:Number(v.autoVerifyMaxPerTask??2),autoVerifyMaxPerSession:Number(v.autoVerifyMaxPerSession??8),autoRouteSemantic:v.autoRouteSemantic!==false,autoRouteMinConfidence:Number(v.autoRouteMinConfidence??.9),autoRouteMaxCandidates:Number(v.autoRouteMaxCandidates??8),autoRouteMaxPerTask:Number(v.autoRouteMaxPerTask??2),autoRouteMaxPerSession:Number(v.autoRouteMaxPerSession??8),autoTrackCompletionThreshold:Number(v.autoTrackCompletionThreshold??.8),autoRouteMaxItemChars:Number(v.autoRouteMaxItemChars??20000),autoRouteMaxInputChars:Number(v.autoRouteMaxInputChars??60000),autoMaxModelCallsPerTask:Number(v.autoMaxModelCallsPerTask??96),autoMaxModelCallsPerSession:Number(v.autoMaxModelCallsPerSession??240),autoVerifyTeamTasks:v.autoVerifyTeamTasks!==false,autoVerifyPlanMode:v.autoVerifyPlanMode!==false,provider:String(v.provider??''),model:String(v.model??''),...(typeof v.reasoningEffort==='string'?{reasoningEffort:v.reasoningEffort}:{}),maxTokens:Number(v.maxTokens??32768),temperature:Number(v.temperature??0.2),...(typeof v.label==='string'&&v.label.trim()?{label:v.label.trim()}:{}),maxConcurrency:Number(v.maxConcurrency??8),maxRetries:Number(v.maxRetries??3),retryBaseDelayMs:Number(v.retryBaseDelayMs??500),timeoutMs:Number(v.timeoutMs??300000),cacheDir:typeof v.cacheDir==='string'&&v.cacheDir.trim()?v.cacheDir.trim():'verifier',cacheMaxEntries:Number(v.cacheMaxEntries??10000),estimatedInputUsdPerMillion:Number(v.estimatedInputUsdPerMillion??0),estimatedOutputUsdPerMillion:Number(v.estimatedOutputUsdPerMillion??0),autoVerifySubagents:v.autoVerifySubagents===true,extraJudges:normalizeExtraJudges(v.extraJudges) } }
+function values(view: SettingsNamespaceView): Values { const v=record(view.value); const mode=v.autoVerifyMode==='manual'||v.autoVerifyMode==='strict'?v.autoVerifyMode:'smart'; return { enabled:v.enabled!==false,captureDecisions:v.captureDecisions!==false,autoVerifyMode:mode,autoVerifyThreshold:Number(v.autoVerifyThreshold??.65),autoVerifyRepeats:Number(v.autoVerifyRepeats??1),autoTrackRepeats:Number(v.autoTrackRepeats??3),autoVerifyFinalRepeats:Number(v.autoVerifyFinalRepeats??2),autoVerifyMinToolCalls:Number(v.autoVerifyMinToolCalls??3),autoVerifyMaxChars:Number(v.autoVerifyMaxChars??80000),autoVerifyMaxPerTask:Number(v.autoVerifyMaxPerTask??2),autoVerifyMaxPerSession:Number(v.autoVerifyMaxPerSession??8),autoRouteSemantic:v.autoRouteSemantic!==false,autoRouteMinConfidence:Number(v.autoRouteMinConfidence??.9),autoRouteMaxCandidates:Number(v.autoRouteMaxCandidates??8),autoRouteMaxPerTask:Number(v.autoRouteMaxPerTask??2),autoRouteMaxPerSession:Number(v.autoRouteMaxPerSession??8),autoTrackCompletionThreshold:Number(v.autoTrackCompletionThreshold??.684),autoRouteMaxItemChars:Number(v.autoRouteMaxItemChars??20000),autoRouteMaxInputChars:Number(v.autoRouteMaxInputChars??60000),autoMaxModelCallsPerTask:Number(v.autoMaxModelCallsPerTask??96),autoMaxModelCallsPerSession:Number(v.autoMaxModelCallsPerSession??240),autoVerifyTeamTasks:v.autoVerifyTeamTasks!==false,autoVerifyPlanMode:v.autoVerifyPlanMode!==false,provider:String(v.provider??''),model:String(v.model??''),...(typeof v.reasoningEffort==='string'?{reasoningEffort:v.reasoningEffort}:{}),maxTokens:Number(v.maxTokens??32768),temperature:Number(v.temperature??0.2),...(typeof v.label==='string'&&v.label.trim()?{label:v.label.trim()}:{}),maxConcurrency:Number(v.maxConcurrency??8),maxRetries:Number(v.maxRetries??3),retryBaseDelayMs:Number(v.retryBaseDelayMs??500),timeoutMs:Number(v.timeoutMs??300000),cacheDir:typeof v.cacheDir==='string'&&v.cacheDir.trim()?v.cacheDir.trim():'verifier',cacheMaxEntries:Number(v.cacheMaxEntries??10000),estimatedInputUsdPerMillion:Number(v.estimatedInputUsdPerMillion??0),estimatedOutputUsdPerMillion:Number(v.estimatedOutputUsdPerMillion??0),autoVerifySubagents:v.autoVerifySubagents===true,extraJudges:normalizeExtraJudges(v.extraJudges) } }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 /** The endpoint answered but rejected the request: a transport fallback would only repeat it. */
 class EndpointError extends Error {}
@@ -233,6 +236,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
       <div style={row}><Label title={t['field.autoVerifyMode.title']} help={t['field.autoVerifyMode.help']}/><select style={selectStyle} disabled={busy} aria-label={t['field.autoVerifyMode.title']} value={draft.autoVerifyMode} onChange={e=>patch('autoVerifyMode',e.target.value as Values['autoVerifyMode'])}><option value="manual">{t['field.autoVerifyMode.manual']}</option><option value="smart">{t['field.autoVerifyMode.smart']}</option><option value="strict">{t['field.autoVerifyMode.strict']}</option></select></div>
       <div style={row}><Label title={t['field.autoRouteSemantic.title']} help={t['field.autoRouteSemantic.help']}/><button type="button" role="switch" aria-checked={draft.autoRouteSemantic} aria-label={t['field.autoRouteSemantic.title']} onClick={()=>patch('autoRouteSemantic',!draft.autoRouteSemantic)} style={toggleStyle(draft.autoRouteSemantic)}><span style={toggleThumbStyle(draft.autoRouteSemantic)}/></button></div>
       <div style={row}><Label title={t['field.autoVerifyTeamTasks.title']} help={t['field.autoVerifyTeamTasks.help']}/><button type="button" role="switch" aria-checked={draft.autoVerifyTeamTasks} aria-label={t['field.autoVerifyTeamTasks.title']} onClick={()=>patch('autoVerifyTeamTasks',!(draft.autoVerifyTeamTasks))} style={toggleStyle(draft.autoVerifyTeamTasks)}><span style={toggleThumbStyle(draft.autoVerifyTeamTasks)}/></button></div>
+      <div style={row}><Label title={t['field.captureDecisions.title']} help={t['field.captureDecisions.help']}/><button type="button" role="switch" aria-checked={draft.captureDecisions} aria-label={t['field.captureDecisions.title']} onClick={()=>patch('captureDecisions',!draft.captureDecisions)} style={toggleStyle(draft.captureDecisions)}><span style={toggleThumbStyle(draft.captureDecisions)}/></button></div>
       <div style={row}><Label title={t['field.autoVerifySubagents.title']} help={t['field.autoVerifySubagents.help']}/><button type="button" role="switch" aria-checked={draft.autoVerifySubagents} aria-label={t['field.autoVerifySubagents.title']} onClick={()=>patch('autoVerifySubagents',!draft.autoVerifySubagents)} style={toggleStyle(draft.autoVerifySubagents)}><span style={toggleThumbStyle(draft.autoVerifySubagents)}/></button></div>
       <div style={row}><Label title={t['field.autoVerifyPlanMode.title']} help={t['field.autoVerifyPlanMode.help']}/><button type="button" role="switch" aria-checked={draft.autoVerifyPlanMode} aria-label={t['field.autoVerifyPlanMode.title']} onClick={()=>patch('autoVerifyPlanMode',!(draft.autoVerifyPlanMode))} style={toggleStyle(draft.autoVerifyPlanMode)}><span style={toggleThumbStyle(draft.autoVerifyPlanMode)}/></button></div>
       <div style={row}><Label title={t['field.autoRouteMinConfidence.title']} help={t['field.autoRouteMinConfidence.help']}/>{numeric('autoRouteMinConfidence',0)}</div>
@@ -248,6 +252,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
       {budgetWarning?.warnSession&&<p style={{margin:'-4px 0 10px',fontSize:12,lineHeight:'18px',color:'var(--dsw-alias-state-warn-label)'}}>{tFormat(t['field.autoMaxModelCallsPerSession.warnBudget'],{current:draft.autoMaxModelCallsPerSession,required:budgetWarning.worstCaseSession,judges:budgetWarning.judgeCount})}</p>}
       <div style={row}><Label title={t['field.autoVerifyThreshold.title']} help={t['field.autoVerifyThreshold.help']}/>{numeric('autoVerifyThreshold',0)}</div>
       <div style={row}><Label title={t['field.autoVerifyRepeats.title']} help={t['field.autoVerifyRepeats.help']}/>{numeric('autoVerifyRepeats',1)}</div>
+      <div style={row}><Label title={t['field.autoTrackRepeats.title']} help={t['field.autoTrackRepeats.help']}/>{numeric('autoTrackRepeats',1)}</div>
       <div style={row}><Label title={t['field.autoVerifyFinalRepeats.title']} help={t['field.autoVerifyFinalRepeats.help']}/>{numeric('autoVerifyFinalRepeats',1)}</div>
       <div style={row}><Label title={t['field.autoVerifyMinToolCalls.title']} help={t['field.autoVerifyMinToolCalls.help']}/>{numeric('autoVerifyMinToolCalls',1)}</div>
       <div style={row}><Label title={t['field.autoVerifyMaxChars.title']} help={t['field.autoVerifyMaxChars.help']}/>{numeric('autoVerifyMaxChars',1000)}</div>
@@ -363,6 +368,35 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [refresh, setRefresh] = useState(0)
+  // Decision snapshots are fetched on demand: they carry whole prompts, and a dashboard
+  // that loaded all of them would ship megabytes of text for rows nobody opened.
+  const [snapshot, setSnapshot] = useState<{ id: string; record?: DecisionRecordView; error?: string } | null>(null)
+  const snapshotRequest = useRef(0)
+  const toggleSnapshot = async (id: string) => {
+    if (snapshot?.id === id) { setSnapshot(null); return }
+    const request = ++snapshotRequest.current
+    setSnapshot({ id })
+    const payload = { kind: 'decision', id }
+    try {
+      let record: DecisionRecordView | undefined
+      if (rpc && typeof rpc.call === 'function') {
+        try {
+          const result = await rpc.call('/api', 'llm-verifier/statistics', payload)
+          if (result && result.ok === true) record = (result.value as { decision?: DecisionRecordView }).decision
+        } catch (rpcError) { console.warn('[llm-verifier] decision rpc.call failed, trying fetch fallback:', rpcError) }
+      }
+      if (record === undefined) {
+        const response = await fetch('/api/llm-verifier/statistics', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
+        const body = await response.json().catch(() => undefined)
+        const value = body?.ok === true ? body.value : body?.result?.ok === true ? body.result.value : undefined
+        if (value === undefined || value === null) throw new EndpointError(body?.error?.message ?? body?.result?.error?.message ?? t['stats.requestFailed'])
+        record = (value as { decision?: DecisionRecordView }).decision
+      }
+      if (snapshotRequest.current === request) setSnapshot({ id, ...(record === undefined ? { error: t['recent.decisionMissing'] } : { record }) })
+    } catch (cause) {
+      if (snapshotRequest.current === request) setSnapshot({ id, error: message(cause) })
+    }
+  }
   // Data belongs to the range/session that produced it: keeping the previous
   // range's numbers under an error banner reads as if they were current.
   const queryKey = days + '|' + sessionOnly + '|' + String(sessionId ?? '')
@@ -505,6 +539,21 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
                   {verdictInfo.checkpointsText && <span style={{ color: 'var(--dsw-text-secondary)' }}>{verdictInfo.checkpointsText}</span>}
                   {verdictInfo.criteriaText && <span style={{ color: 'var(--dsw-text-secondary)' }}>{verdictInfo.criteriaText}</span>}
                   {verdictInfo.winnerText && <span style={{ color: 'var(--dsw-text-secondary)' }}>{verdictInfo.winnerText}</span>}
+                </div>}
+                <div style={{ margin: '6px 0 0 15px' }}>
+                  <button type="button" onClick={() => void toggleSnapshot(item.id)} style={{ fontSize: 11, padding: '2px 7px', borderRadius: 5, cursor: 'pointer', color: 'var(--dsw-text-secondary)', background: 'var(--dsw-surface-sunken)', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))' }}>{snapshot?.id === item.id ? t['recent.decisionHide'] : t['recent.decision']}</button>
+                </div>
+                {snapshot?.id === item.id && <div style={{ margin: '8px 0 2px 15px', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))', borderRadius: 8, padding: '8px 10px', background: 'var(--dsw-surface-sunken)' }}>
+                  {snapshot.error !== undefined && <div style={{ fontSize: 11, color: '#e76565' }}>{snapshot.error}</div>}
+                  {snapshot.record === undefined && snapshot.error === undefined && <div style={{ ...muted, fontSize: 11 }}>{t['recent.decisionLoading']}</div>}
+                  {snapshot.record !== undefined && snapshot.record.calls.length === 0 && <div style={{ ...muted, fontSize: 11 }}>{t['recent.decisionEmpty']}</div>}
+                  {(snapshot.record?.calls ?? []).map((call, index) => <div key={index} style={{ marginBottom: index === snapshot.record!.calls.length - 1 ? 0 : 10 }}>
+                    <div style={{ fontSize: 11, color: 'var(--dsw-text-secondary)' }}>{call.label} · {call.channel}{call.score === undefined ? '' : ' · ' + formatPercentage(call.score)}</div>
+                    <div style={{ fontSize: 11, marginTop: 4 }}>{t['recent.decisionPrompt']}</div>
+                    <pre style={{ margin: 0, maxHeight: 180, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: 'rgba(0,0,0,.2)', padding: '6px 8px', borderRadius: 6 }}>{call.prompt}</pre>
+                    <div style={{ fontSize: 11, marginTop: 4 }}>{t['recent.decisionOutput']}</div>
+                    <pre style={{ margin: 0, maxHeight: 140, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: 'rgba(0,0,0,.2)', padding: '6px 8px', borderRadius: 6 }}>{call.output}</pre>
+                  </div>)}
                 </div>}
               </div>
               <div style={{ textAlign: 'right' }}><div style={{ fontSize: 12 }}>{duration(item.durationMs)}</div><div style={{ ...muted, marginTop: 3 }}>{dateTime(item.startedAt, lang)}</div></div>

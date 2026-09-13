@@ -13,6 +13,14 @@ function tool(value: ReturnType<typeof session>, name: string, id: string, text:
   value.append('tool/call', { turn, step, callId: id as never, name, arguments: '{}' })
   value.append('tool/result', { turn, step, message: createToolResultMessage({ callId: id as never, content: [{ type: 'text', text }], isError: false }) }, { surfaceOp: 'append' })
 }
+/** The full-output evidence block of one rendered step, i.e. everything before its digest. */
+function evidenceBlock(step: string): string {
+  const start = step.indexOf('Latest observed tool output')
+  if (start < 0) return ''
+  const rest = step.slice(start)
+  const end = rest.indexOf('\n\n')
+  return end < 0 ? rest : rest.slice(0, end)
+}
 function assistant(value: ReturnType<typeof session>, text: string, turn = 1, step = 1) {
   value.append('assistant/message', { turn, step, message: createAssistantMessage({ content: [{ type: 'text', text }], source: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } }) }, { surfaceOp: 'append' })
 }
@@ -181,10 +189,14 @@ describe('production structured routing', () => {
     const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
     expect(decision?.kind).toBe('track')
     if (decision?.kind !== 'track') return
-    // The verification run is older than the presentation, and must still win.
-    expect(decision.steps[1]).toContain('309 passed')
-    expect(decision.steps[1]).not.toContain('Presented C:')
-    expect(decision.steps[1]).not.toContain('presented: 1')
+    // The verification run is older than the presentation and must still win the
+    // evidence slot; the presentation survives only as one line of digest context.
+    const step = decision.steps[1]!
+    expect(evidenceBlock(step)).toContain('309 passed')
+    expect(evidenceBlock(step)).not.toContain('Presented C:')
+    expect(evidenceBlock(step)).not.toContain('presented: 1')
+    expect(step).toContain('Recent tool results')
+    expect(step).toContain('present: Presented C:')
   })
 
   it('shows the newest verification run when the newest output is not one', () => {
@@ -274,10 +286,41 @@ describe('production structured routing', () => {
     const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
     expect(decision?.kind).toBe('track')
     if (decision?.kind !== 'track') return
-    expect(decision.steps[1]).toContain('309 passed')
+    const step = decision.steps[1]!
+    expect(evidenceBlock(step)).toContain('309 passed')
     for (const marker of ['(no background jobs)', 'requested cancellation', 'messageId', 'Gemini 3.8 Flash', '"baselineScore"', 'started subagent']) {
-      expect(decision.steps[1], marker).not.toContain(marker)
+      expect(evidenceBlock(step), marker).not.toContain(marker)
     }
+    // The digest still shows them as one-line context — that tail is what the judge has
+    // to weigh — but a previous verdict never appears at all.
+    expect(step).toContain('Recent tool results')
+    expect(step).toContain('(no background jobs)')
+    expect(step).not.toContain('verifier_current_session')
+  })
+
+  it('summarises the recent calls in one line each, newest last', () => {
+    // The verification block says HOW MUCH happened after the run; the digest says WHAT,
+    // so a judge can tell "only issue bookkeeping since" from "twelve writes since".
+    const value = session()
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    tool(value, 'pwsh', 'verify', 'Test Files  3 passed (3)\n     Tests  12 passed (12)')
+    tool(value, 'pwsh', 'close', '1517 closed completed')
+    tool(value, 'todo_write', 'todos', 'Updated todo list: 0 pending, 0 in progress, 13 completed.')
+    tool(value, 'present', 'present', 'Presented C:\\repo\\src\\mapper.ts')
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind !== 'track') return
+    const step = decision.steps[1]!
+    const digest = step.slice(step.indexOf('Recent tool results'))
+    expect(digest).toContain('pwsh: 1517 closed completed')
+    expect(digest).toContain('todo_write: Updated todo list')
+    expect(digest).toContain('present: Presented C:')
+    // Newest last, and the two calls already rendered in full are marked, not repeated.
+    expect(digest.indexOf('1517 closed completed')).toBeLessThan(digest.indexOf('present: Presented C:'))
+    expect(digest).toContain('[shown above]')
+    // Historical checkpoints describe past states and never grow the digest.
+    expect(decision.steps[0]).not.toContain('Recent tool results')
   })
 
   it('keeps a foreground subagent report as checkpoint evidence', () => {
@@ -306,8 +349,12 @@ describe('production structured routing', () => {
     const decision = analyzeStructuredRoute(value.events, 8, 20000, 60000)
     expect(decision?.kind).toBe('track')
     if (decision?.kind !== 'track') return
-    expect(decision.steps[1]).toContain('all tests passed')
-    expect(decision.steps[1]).not.toContain('started subagent')
+    const step = decision.steps[1]!
+    expect(evidenceBlock(step)).toContain('all tests passed')
+    expect(evidenceBlock(step)).not.toContain('started subagent')
+    // It is still visible as digest context: the point is not to hide the call, it is to
+    // stop an acknowledgement from occupying the evidence slot.
+    expect(step).toContain('started subagent')
   })
 
   it('keeps a wrapper that dispatched real work', () => {
@@ -598,6 +645,12 @@ describe('transactional router state', () => {
     expect(routedRepeats(select, 3)).toBe(3)
     expect(routedRepeats(track, 1)).toBe(1)
     expect(routedRepeats(track, 3)).toBe(3)
+    // track carries its own count: with the explicit-tag channel one call samples ONE
+    // letter (5.3% of the A-T scale), so repeats are averaged to keep sampling noise from
+    // flipping the progress curve between bands.
+    expect(routedRepeats(track, 1, 3)).toBe(3)
+    expect(routedRepeats(compare, 1, 3)).toBe(2)
+    expect(routedRepeats(select, 1, 3)).toBe(1)
   })
 
   it('estimates routed calls from the real tournament shape', () => {

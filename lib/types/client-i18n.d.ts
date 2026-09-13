@@ -39,6 +39,8 @@ export declare const zh: {
     'field.autoVerifyThreshold.help': string;
     'field.autoVerifyRepeats.title': string;
     'field.autoVerifyRepeats.help': string;
+    'field.autoTrackRepeats.title': string;
+    'field.autoTrackRepeats.help': string;
     'field.autoVerifyFinalRepeats.title': string;
     'field.autoVerifyFinalRepeats.help': string;
     'field.autoVerifyMinToolCalls.title': string;
@@ -165,6 +167,13 @@ export declare const zh: {
     'recent.title': string;
     'recent.maxCount': string;
     'recent.empty': string;
+    'recent.decision': string;
+    'recent.decisionHide': string;
+    'recent.decisionLoading': string;
+    'recent.decisionMissing': string;
+    'recent.decisionEmpty': string;
+    'recent.decisionPrompt': string;
+    'recent.decisionOutput': string;
     'models.title': string;
     'models.calls': string;
     'models.tokens': string;
@@ -179,6 +188,8 @@ export declare const zh: {
     'field.autoVerifyTeamTasks.help': string;
     'field.autoVerifyPlanMode.title': string;
     'field.autoVerifyPlanMode.help': string;
+    'field.captureDecisions.title': string;
+    'field.captureDecisions.help': string;
     'field.autoVerifySubagents.title': string;
     'field.autoVerifySubagents.help': string;
 };
@@ -226,6 +237,8 @@ export declare const dictionaries: {
         'field.autoVerifyThreshold.help': string;
         'field.autoVerifyRepeats.title': string;
         'field.autoVerifyRepeats.help': string;
+        'field.autoTrackRepeats.title': string;
+        'field.autoTrackRepeats.help': string;
         'field.autoVerifyFinalRepeats.title': string;
         'field.autoVerifyFinalRepeats.help': string;
         'field.autoVerifyMinToolCalls.title': string;
@@ -352,6 +365,13 @@ export declare const dictionaries: {
         'recent.title': string;
         'recent.maxCount': string;
         'recent.empty': string;
+        'recent.decision': string;
+        'recent.decisionHide': string;
+        'recent.decisionLoading': string;
+        'recent.decisionMissing': string;
+        'recent.decisionEmpty': string;
+        'recent.decisionPrompt': string;
+        'recent.decisionOutput': string;
         'models.title': string;
         'models.calls': string;
         'models.tokens': string;
@@ -366,6 +386,8 @@ export declare const dictionaries: {
         'field.autoVerifyTeamTasks.help': string;
         'field.autoVerifyPlanMode.title': string;
         'field.autoVerifyPlanMode.help': string;
+        'field.captureDecisions.title': string;
+        'field.captureDecisions.help': string;
         'field.autoVerifySubagents.title': string;
         'field.autoVerifySubagents.help': string;
     };
@@ -410,6 +432,8 @@ export declare const dictionaries: {
         'field.autoVerifyThreshold.help': string;
         'field.autoVerifyRepeats.title': string;
         'field.autoVerifyRepeats.help': string;
+        'field.autoTrackRepeats.title': string;
+        'field.autoTrackRepeats.help': string;
         'field.autoVerifyFinalRepeats.title': string;
         'field.autoVerifyFinalRepeats.help': string;
         'field.autoVerifyMinToolCalls.title': string;
@@ -536,6 +560,13 @@ export declare const dictionaries: {
         'recent.title': string;
         'recent.maxCount': string;
         'recent.empty': string;
+        'recent.decision': string;
+        'recent.decisionHide': string;
+        'recent.decisionLoading': string;
+        'recent.decisionMissing': string;
+        'recent.decisionEmpty': string;
+        'recent.decisionPrompt': string;
+        'recent.decisionOutput': string;
         'models.title': string;
         'models.calls': string;
         'models.tokens': string;
@@ -550,6 +581,8 @@ export declare const dictionaries: {
         'field.autoVerifyTeamTasks.help': string;
         'field.autoVerifyPlanMode.title': string;
         'field.autoVerifyPlanMode.help': string;
+        'field.captureDecisions.title': string;
+        'field.captureDecisions.help': string;
         'field.autoVerifySubagents.title': string;
         'field.autoVerifySubagents.help': string;
     };

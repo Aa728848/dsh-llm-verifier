@@ -148,13 +148,17 @@ export declare function semanticDecision(output: SemanticRouteOutput, events: re
  * cancels that.
  *
  * `select` does not need it: its ring is symmetric by construction and the pivot round
- * is oriented per pair by the engine, so one round is already unbiased. `track` scores
- * a single checkpoint list and has no slots at all.
+ * is oriented per pair by the engine, so one round is already unbiased. `track` has no
+ * slots at all, but it has its own repeat count: without token logprobs one call yields
+ * ONE sampled letter (5.3% of the scale per letter), so repeats are averaged to keep the
+ * progress curve from flipping bands on sampling noise — the same reason the upstream
+ * `n_evaluations` averages repeated verifications.
  * @param decision - the routed decision about to run.
  * @param configured - the configured auto-route repeat count.
+ * @param trackRepeats - repeat count for a `track` route; defaults to `configured`.
  * @returns The repeat count to pass to the engine.
  */
-export declare function routedRepeats(decision: RouteDecision, configured: number): number;
+export declare function routedRepeats(decision: RouteDecision, configured: number, trackRepeats?: number): number;
 export declare function estimateRoutedCalls(decision: RouteDecision, repeats: number, criteriaCount: number): number;
 export declare function boundDecision(decision: RouteDecision | undefined, policy: RouterPolicy): RouteDecision | undefined;
 export declare class AutoVerifierRouter {
