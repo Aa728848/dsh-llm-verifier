@@ -256,7 +256,7 @@
 | P2-1 离线回放 / 阈值扫描 | ✅ | `replay.ts` + `lib/replay.js` + `scripts/eval-replay.mjs` + `replay.test.ts` |
 | P2-2 第三评分通道（prefill/结构化输出） | ⏸ 只记录，不实现 | 选型说明与两个前置条件写在 `src/top-logprobs.ts` 顶部注释（未来实现者会看的地方） |
 | P2-3 `track` 未来泄露说明 | ✅ | README「四类自动路由」一节 |
-| A-lite best-of-N 配方 + 工具措辞 | ✅ | README 新增一节；`verifier_select` 描述改为"何时值得生成候选" |
+| A best-of-N 生成侧工具（原 A-lite 升级） | ✅ | `verifier_best_of_n`：会话模型起草 + 锦标赛排序 + 门控同源的绝对分，零新配置项、永不自动路由；README 两条路径；实施偏差与实测成本见 [`docs/plan-a-best-of-n.md`](plan-a-best-of-n.md) §9 |
 
 ### 8.1 首次回放结果（本机真实数据，2026-09-13）
 
