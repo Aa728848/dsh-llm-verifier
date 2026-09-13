@@ -85,7 +85,7 @@ const rows = sweepThresholds(invocations, options.thresholds)
 const replay = replayDecisionScores(decisions)
 const byChannel = new Map()
 for (const row of replay) {
-  const bucket = byChannel.get(row.channel) ?? { channel: row.channel, match: 0, drift: 0, unreadable: 0 }
+  const bucket = byChannel.get(row.channel) ?? { channel: row.channel, match: 0, drift: 0, unreadable: 0, 'not-scored': 0 }
   bucket[row.mode] += 1
   byChannel.set(row.channel, bucket)
 }
@@ -107,11 +107,12 @@ if (options.json) {
   console.log('  parser replay of ' + replay.length + ' captured judge answers:')
   if (replay.length === 0) console.log('    no decision snapshots found (capture disabled, or nothing captured yet)')
   for (const bucket of byChannel.values()) {
-    console.log('    ' + bucket.channel.padEnd(14) + 'match ' + String(bucket.match).padStart(4) + '  drift ' + String(bucket.drift).padStart(4) + '  unreadable ' + String(bucket.unreadable).padStart(4))
+    console.log('    ' + bucket.channel.padEnd(14) + 'match ' + String(bucket.match).padStart(4) + '  drift ' + String(bucket.drift).padStart(4) + '  unreadable ' + String(bucket.unreadable).padStart(4) + '  not-scored ' + String(bucket['not-scored']).padStart(4))
   }
   const drifted = replay.filter(row => row.mode === 'drift' && row.channel !== 'top-logprobs').slice(0, 10)
   for (const row of drifted) console.log('    drift: ' + row.label + ' stored ' + row.stored + ' -> reparsed ' + row.reparsed)
   console.log('')
+  console.log('  (not-scored = route classifications and other answers that carry no score tag by design)')
   console.log('  note: a top-logprobs score is an expectation over a token distribution the snapshot')
   console.log('  does not keep, so its text-channel re-parse is expected to differ.')
 }

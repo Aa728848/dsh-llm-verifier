@@ -50,12 +50,13 @@ describe('sweepThresholds', () => {
 })
 
 describe('replayDecisionScores', () => {
-  it('re-parses a stored explicit-tag answer and flags drift and unreadable answers', () => {
+  it('re-parses a stored explicit-tag answer and flags drift and unparseable answers', () => {
     const rows = replayDecisionScores([
       // K is the 10th letter: (20 - 10) - 1 over 19 = 9/19.
       { label: 'clean', channel: 'explicit-tag', output: '<score_A> K </score_A>\n<score_B> T </score_B>', score: 9 / 19 },
       { label: 'changed', channel: 'explicit-tag', output: '<score_A> A </score_A>\n<score_B> T </score_B>', score: 0.5 },
-      { label: 'broken', channel: 'explicit-tag', output: 'no verdict here', score: 0.5 },
+      // A tag that is present but carries no valid letter is a real parser failure.
+      { label: 'broken', channel: 'explicit-tag', output: '<score_A> ZZ </score_A>', score: 0.5 },
       { label: 'distribution', channel: 'top-logprobs', output: '<score_A> A </score_A>', score: 0.83 },
     ])
     expect(rows[0]).toMatchObject({ mode: 'match', reparsed: 9 / 19 })
@@ -63,5 +64,19 @@ describe('replayDecisionScores', () => {
     expect(rows[2]!.mode).toBe('unreadable')
     // A top-logprobs score is an expectation over a distribution the snapshot does not keep.
     expect(rows[3]).toMatchObject({ mode: 'drift', stored: 0.83 })
+  })
+
+  it('replays a progress answer against the last checkpoint, inverted, and ignores non-scoring calls', () => {
+    const rows = replayDecisionScores([
+      // Track stores the LAST checkpoint and progresses A(=0) .. T(=1): <c2> T </c2> is 1.0.
+      { label: 'progress repeat 1/3', channel: 'explicit-tag', output: '<c1> K </c1>\n<c2> T </c2>', score: 1 },
+      { label: 'progress repeat 2/3', channel: 'explicit-tag', output: '<c1> K </c1>\n<c2> T </c2>', score: 0.5 },
+      // A route classification answers strict JSON — no score tag exists by design, and counting
+      // it as unreadable made every routing snapshot look like a regression.
+      { label: 'route classify', channel: 'explicit-tag', output: '{"kind":"none","confidence":0.9}', score: undefined },
+    ])
+    expect(rows[0]).toMatchObject({ mode: 'match', reparsed: 1 })
+    expect(rows[1]).toMatchObject({ mode: 'drift', reparsed: 1 })
+    expect(rows[2]!.mode).toBe('not-scored')
   })
 })

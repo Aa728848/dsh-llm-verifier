@@ -110,26 +110,46 @@ export interface DecisionReplayRow {
   channel: string
   stored?: number
   reparsed?: number
-  mode: 'match' | 'drift' | 'unreadable'
+  /**
+   * `not-scored` means the answer carries no score tag at all — a route classification, or any
+   * other non-scoring call. Counting those as failures made the report cry wolf on every
+   * `track` and `verifier_route_classify` snapshot.
+   */
+  mode: 'match' | 'drift' | 'unreadable' | 'not-scored'
 }
 
 /**
  * Re-parse captured judge answers with the current score parser.
  *
- * A snapshot stores the raw answer, so the parser can be replayed offline: an explicit-tag call
- * must parse back to exactly the score it produced, and a drift means the parser (or the prompt
- * format) changed under a stored answer. A top-logprobs call's stored score is an expectation
- * over a token distribution the snapshot does not keep, so a text-channel re-parse is expected to
- * differ and is reported as drift — read those rows as informational, not as regressions.
+ * A snapshot stores the raw answer, so the parser can be replayed offline: a pairwise call must
+ * parse back to exactly the score it produced, and a drift means the parser (or the prompt format)
+ * changed under a stored answer. A top-logprobs call's stored score is an expectation over a token
+ * distribution the snapshot does not keep, so a text-channel re-parse is expected to differ and is
+ * reported as drift — read those rows as informational, not as regressions.
+ *
+ * The tag depends on the call: pairwise judging answers `<score_A>`, while progress judging answers
+ * `<c1>..<cN>` and the trace stores the LAST checkpoint, inverted (progress runs A = nothing done
+ * .. T = certainly done, the reverse of the pairwise scale). A call with neither tag is a route
+ * classification, i.e. not a score at all.
  * @param calls - captured calls with their raw answers.
  * @returns One row per call.
  */
 export function replayDecisionScores(calls: ReadonlyArray<{ label: string; channel: string; output: string; score?: number }>): DecisionReplayRow[] {
   return calls.map(call => {
+    const completion = { text: call.output, tokens: [], positions: [] }
+    const progressTags = [...call.output.matchAll(/<c(\d+)>/gu)].map(match => '<c' + match[1] + '>')
+    const tagged = call.output.includes('<score_A>') || progressTags.length > 0
     let reparsed: number | undefined
-    try { reparsed = extractScore({ text: call.output, tokens: [], positions: [] }, '<score_A>') } catch { reparsed = undefined }
-    if (reparsed === undefined) return { label: call.label, channel: call.channel, ...(call.score !== undefined ? { stored: call.score } : {}), mode: 'unreadable' as const }
-    const mode = call.score !== undefined && Math.abs(call.score - reparsed) < 1e-9 ? 'match' as const : 'drift' as const
-    return { label: call.label, channel: call.channel, ...(call.score !== undefined ? { stored: call.score } : {}), reparsed, mode }
+    if (tagged) {
+      try {
+        reparsed = call.output.includes('<score_A>')
+          ? extractScore(completion, '<score_A>')
+          : 1 - extractScore(completion, progressTags[progressTags.length - 1]!)
+      } catch { reparsed = undefined }
+    }
+    const head = { label: call.label, channel: call.channel, ...(call.score !== undefined ? { stored: call.score } : {}) }
+    if (!tagged) return { ...head, mode: 'not-scored' as const }
+    if (reparsed === undefined) return { ...head, mode: 'unreadable' as const }
+    return { ...head, reparsed, mode: call.score !== undefined && Math.abs(call.score - reparsed) < 1e-9 ? 'match' as const : 'drift' as const }
   })
 }
