@@ -243,7 +243,10 @@ describe('StatisticsStore', () => {
     // Losing to the baseline can never pass, however high the raw score is.
     expect(summarizeVerdict('verifier_current_session', { score: 0.9, baselineScore: 0.95, winner: 'B' }, 'final', thresholds)).toMatchObject({ outcome: 'below-threshold' })
     // One criterion below the threshold fails the record even though the mean passes.
-    expect(summarizeVerdict('verifier_current_session', { score: 0.6667, baselineScore: 0, winner: 'A', criteria: [{ id: 'specification', scoreA: 1 }, { id: 'error_signals', scoreA: 0 }] }, 'final', thresholds)).toEqual({
+    // This case uses the EXACT shape `verifySession` returns (AcceptanceCriterion: {id, name,
+    // score}) — a previous version of this test fed {id, scoreA}, which is the compare shape, so
+    // it passed while every real session acceptance stored an empty criteria array.
+    expect(summarizeVerdict('verifier_current_session', { score: 0.6667, baselineScore: 0, winner: 'A', criteria: [{ id: 'specification', name: 'Specification Adherence', score: 1 }, { id: 'error_signals', name: 'Error Signal Detection', score: 0 }] }, 'final', thresholds)).toEqual({
       phase: 'final',
       outcome: 'below-threshold',
       score: 0.6667,
@@ -251,6 +254,12 @@ describe('StatisticsStore', () => {
       criteria: [{ id: 'specification', score: 1 }, { id: 'error_signals', score: 0 }],
       winner: 'A',
       threshold: 0.65,
+    })
+    // The compare-shaped scoreA is still accepted, and a malformed entry is dropped rather than
+    // stored as NaN.
+    expect(summarizeVerdict('verifier_current_session', { score: 0.9, baselineScore: 0, winner: 'A', criteria: [{ id: 'legacy', scoreA: 0.4 }, { id: 'broken', score: 'high' }] }, 'final', thresholds)).toMatchObject({
+      outcome: 'below-threshold',
+      criteria: [{ id: 'legacy', score: 0.4 }],
     })
   })
 

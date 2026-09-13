@@ -95,9 +95,14 @@ export function summarizeVerdict(toolName: VerifierToolName, value: unknown, pha
   const criteria = Array.isArray(row.criteria)
     ? (row.criteria as unknown[])
         .map(entry => (typeof entry === 'object' && entry !== null ? entry as Record<string, unknown> : {}))
-        .filter(entry => typeof entry.id === 'string' && typeof entry.scoreA === 'number' && Number.isFinite(entry.scoreA))
+        // `score` is the shape a session acceptance emits (AcceptanceCriterion); `scoreA` is the
+        // shape a compare result uses. Reading only `scoreA` silently dropped EVERY per-criterion
+        // score a session acceptance ever produced: 11 of 11 stored records on the author's topic
+        // carry no criteria array at all, so the dashboard could never show which requirement
+        // failed. Keep both, because the compare-shaped value is still a valid input here.
+        .map(entry => ({ id: entry.id, score: typeof entry.score === 'number' ? entry.score : entry.scoreA }))
+        .filter((entry): entry is { id: string; score: number } => typeof entry.id === 'string' && typeof entry.score === 'number' && Number.isFinite(entry.score))
         .slice(0, MAX_VERDICT_CRITERIA)
-        .map(entry => ({ id: entry.id as string, score: entry.scoreA as number }))
     : []
   // A session does not pass on the mean alone: one criterion below the threshold fails
   // the record too, which is exactly what the live gate now enforces.
