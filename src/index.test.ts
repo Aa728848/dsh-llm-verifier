@@ -668,3 +668,120 @@ describe('routing-cycle budget through the real hooks', () => {
     expect(calls.map(entry => String(entry.prompt)).filter(isRouter)).toHaveLength(1)
   })
 })
+
+/**
+ * S03/S04 through the registered stop hook.
+ *
+ * S03: a task whose todos are complete AND that carries a real verification run must go
+ * straight to the final acceptance instead of buying a progress score that cannot change
+ * the next action — but only once per finished state, and never in place of an unprocessed
+ * candidate selection.
+ *
+ * S04: a judge tie must reach the agent as a tie, not as "the first-listed candidate won".
+ */
+describe('delivery-phase scheduling and tie feedback', () => {
+  const user = (seq: number, text: string) => ({ type: 'user/message', seq, data: { source: { kind: 'user' }, content: [{ type: 'text', text }] } })
+  const call = (seq: number, id: string, name: string) => ({ type: 'tool/call', seq, data: { turn: 1, step: 1, callId: id, name, arguments: '{}' } })
+  const result = (seq: number, id: string, text: string, ok = true) => ({ type: 'tool/result', seq, data: { turn: 1, step: 1, message: { source: { callId: id }, content: [{ type: 'text', text, ...(ok ? {} : { isError: true }) }] } } })
+  const todo = (seq: number, todos: unknown[]) => ({ type: 'todo/write', seq, data: { todos } })
+  function agent(events: unknown[], steered: unknown[]) {
+    return {
+      id: 'agent-delivery',
+      session: { header: { id: 'agent-delivery' }, snapshotEvents: () => events, requestHeader: () => ({ config: { provider: 'session-provider', model: 'session-model' } }) },
+      steer(message: unknown) { steered.push(message) },
+    }
+  }
+  /** A finished-looking task: two changed todo snapshots, the second all-completed, plus a verification run. */
+  const deliveryEvents = (verification = 'Tests 3 passed', ok = true) => [
+    user(0, 'Implement and test it'),
+    call(1, 'e', 'edit'), result(2, 'e', 'edited the file'),
+    call(3, 't1', 'todo_write'), result(4, 't1', 'Updated todo list (2 items)'),
+    todo(5, [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }]),
+    call(6, 'p', 'pwsh'), result(7, 'p', verification, ok),
+    call(8, 't2', 'todo_write'), result(9, 't2', 'Updated todo list (0 pending)'),
+    todo(10, [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }]),
+  ]
+  /** Track prompts carry the progress tags; everything else is a pairwise judge call. */
+  function deliveryStream(calls: Array<Record<string, unknown>>) {
+    return (options: { messages: readonly unknown[] }) => {
+      const prompt = promptText(options)
+      calls.push({ prompt })
+      if (prompt.includes('<c1>')) return textStream('<c1> A </c1>\n<c2> A </c2>')
+      return textStream('reasoning\n<score_A> ' + verdictLetter(section(prompt, 'TRAJECTORY_A')) + ' </score_A>\n<score_B> ' + verdictLetter(section(prompt, 'TRAJECTORY_B')) + ' </score_B>')
+    }
+  }
+  const isFinalCall = (prompt: string) => prompt.includes('TRAJECTORY_A')
+  const isTrackCall = (prompt: string) => prompt.includes('<c1>')
+
+  it('runs only the final acceptance for a delivery-ready task and records the skipped track', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers, rpc } = assemble(JUDGE, { stream: deliveryStream(calls), sessions: [{ id: 'agent-delivery', createdAt: 1 }] })
+    const steered: unknown[] = []
+    await handlers.get('agent/turn-stopping')!({ agent: agent(deliveryEvents(), steered), signal: new AbortController().signal })
+    const prompts = calls.map(entry => String(entry.prompt))
+    expect(prompts.filter(isTrackCall)).toHaveLength(0)
+    // Exactly the final acceptance: 3 criteria x 2 rounds.
+    expect(prompts.filter(isFinalCall)).toHaveLength(6)
+    expect(JSON.stringify(steered)).not.toContain('routing: track')
+    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ toolName: string; verdict?: { outcome?: string }; route?: { skipReason?: string } }> } }
+    const skipped = overview.value.recent.find(row => row.toolName === 'verifier_track' && row.verdict?.outcome === 'delivery-phase')
+    expect(skipped?.route?.skipReason).toBe('delivery-phase')
+  })
+
+  it('does not skip routing twice on the same finished state', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: deliveryStream(calls), sessions: [{ id: 'agent-delivery', createdAt: 1 }] })
+    const steered: unknown[] = []
+    const handle = handlers.get('agent/turn-stopping')!
+    const events = deliveryEvents()
+    await handle({ agent: agent(events, steered), signal: new AbortController().signal })
+    await handle({ agent: agent(events, steered), signal: new AbortController().signal })
+    // The completion signal was consumed by the first boundary, so the second buys the
+    // progress route again instead of repeatedly skipping it.
+    expect(JSON.stringify(steered)).toContain('routing: track')
+  })
+
+  it('re-arms the fast path when a NEW verification run appears', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: deliveryStream(calls), sessions: [{ id: 'agent-delivery', createdAt: 1 }] })
+    const steered: unknown[] = []
+    const handle = handlers.get('agent/turn-stopping')!
+    const events = deliveryEvents()
+    await handle({ agent: agent(events, steered), signal: new AbortController().signal })
+    events.push(call(11, 'p2', 'pwsh'), result(12, 'p2', 'Tests 4 passed'))
+    await handle({ agent: agent(events, steered), signal: new AbortController().signal })
+    expect(JSON.stringify(steered)).not.toContain('routing: track')
+    expect(calls.map(entry => String(entry.prompt)).filter(isTrackCall)).toHaveLength(0)
+  })
+
+  it('still shows a FAILED verification run to the final judge', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: deliveryStream(calls), sessions: [{ id: 'agent-delivery', createdAt: 1 }] })
+    await handlers.get('agent/turn-stopping')!({ agent: agent(deliveryEvents('Tests 3 failed', false), []), signal: new AbortController().signal })
+    // Skipping the progress route must not hide the failure: the judge still reads it.
+    expect(calls.some(entry => String(entry.prompt).includes('Tests 3 failed'))).toBe(true)
+  })
+
+  it('reports a routed comparison tie as a tie, not as a winner', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const stream = (options: { messages: readonly unknown[] }) => {
+      const prompt = promptText(options)
+      calls.push({ prompt })
+      if (prompt.includes('conservative verifier router')) return textStream(JSON.stringify({ kind: 'compare', confidence: 1, reason: 'two alternatives', candidateCallIds: ['s1', 's2'], checkpointSeqs: [] }))
+      // The judge rates both sides identically.
+      return textStream('reasoning\n<score_A> A </score_A>\n<score_B> A </score_B>')
+    }
+    const { handlers } = assemble(JUDGE, { stream, sessions: [{ id: 'agent-delivery', createdAt: 1 }] })
+    const steered: unknown[] = []
+    const events = [
+      user(0, 'Pick the better one and build it'),
+      call(1, 's1', 'subagent'), result(2, 's1', 'frontend analysis'),
+      call(3, 's2', 'subagent'), result(4, 's2', 'backend analysis'),
+      call(5, 'e', 'edit'), result(6, 'e', 'edited the file'),
+    ]
+    await handlers.get('agent/turn-stopping')!({ agent: agent(events, steered), signal: new AbortController().signal })
+    const rendered = JSON.stringify(steered)
+    expect(rendered).toContain('NO unique winner')
+    expect(rendered).not.toContain('Winner: ')
+  })
+})

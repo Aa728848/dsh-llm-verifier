@@ -154,6 +154,38 @@ interface EvidenceIndex {
     };
 }
 export declare function buildEvidenceIndex(events: readonly SessionEvent[]): EvidenceIndex | undefined;
+/** What the delivery-phase shortcut needs to know about one task. */
+export interface DeliveryPhase {
+    /** The task's newest durable todo snapshot is non-empty and every entry is completed. */
+    todosComplete: boolean;
+    /** The newest verification-shaped run in the task, with the sequence its result settled at. */
+    verification?: {
+        seq: number;
+        name: string;
+        ok: boolean;
+    };
+    /**
+     * Deterministic identity of the completion signal.
+     *
+     * Changes only when the todo snapshot or the newest verification run changes, so the
+     * stop boundary can tell "the same finished state was already sent to the gate" from
+     * "new work or a new verification run reactivated the completion signal".
+     */
+    signature: string;
+}
+/**
+ * Whether a task has reached its delivery phase: every todo is done AND a real verification
+ * run exists.
+ *
+ * This decides ONLY whether the final acceptance is worth running right now; it never decides
+ * whether the task passes, and it deliberately does not look at the verification's success —
+ * a failing run is exactly what the judge must be shown. Todos completing without any
+ * verification evidence is not a delivery phase, because the judge would have nothing to
+ * grade.
+ * @param events - session event log.
+ * @returns The delivery-phase facts, or undefined when the task has no evidence index.
+ */
+export declare function inspectDeliveryPhase(events: readonly SessionEvent[]): DeliveryPhase | undefined;
 /**
  * Upper bound on the checkpoints rendered into one routed track decision.
  *
@@ -340,6 +372,14 @@ export declare class AutoVerifierRouter {
     acceptManual(agent: RoutedAgent): void;
     /** Whether the next stop boundary must skip routing and run the final gate. */
     finalPreferred(agent: RoutedAgent): boolean;
+    /**
+     * Whether this exact delivery-phase signal was already sent to the final acceptance.
+     * @param agent - Agent whose task is being inspected.
+     * @param signature - signature returned by inspectDeliveryPhase.
+     */
+    deliveryConsumed(agent: RoutedAgent, signature: string): boolean;
+    /** Mark the delivery-phase signal as spent, so the same finished state stops skipping routing. */
+    consumeDelivery(agent: RoutedAgent, signature: string): void;
     strictBlocked(agent: RoutedAgent): boolean;
     release(agent: {
         id: unknown;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { analyzeAutoTask, automaticFeedback, failedAcceptanceCriteria, isSubagentSession, sessionAccepted } from './auto.ts'
+import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, topScoreIndices, type RoutedCandidateRef } from './auto.ts'
 
 function taskSession() {
   const session = Session.create('session-00000000-0000-4000-8000-000000000009' as never)
@@ -230,5 +230,88 @@ describe('automatic verification policy', () => {
     expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work' })
     session.append('tool/ptc-dispatch' as never, { subCallId: 'p3', name: 'edit', arguments: '{}', isError: false, content: [{ type: 'text', text: 'done' }] } as never)
     expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: true, toolCalls: 3, consequentialToolCalls: 1 })
+  })
+})
+
+/**
+ * S04: a tie, a byte-identical pair and a real winner are three different outcomes, and
+ * automatic feedback must say which one happened — including the locator the agent needs
+ * to find the object it is being told about.
+ */
+describe('routed selection feedback', () => {
+  const ref = (label: string, id?: string, fromSeq?: number, toSeq?: number): RoutedCandidateRef => ({ label, ...(id === undefined ? {} : { id }), ...(fromSeq === undefined ? {} : { fromSeq }), ...(toSeq === undefined ? {} : { toSeq }) })
+
+  it('names a unique winner with a locator and never the loser', () => {
+    const text = compareRouteFeedbackDetail([ref('A', 'call-a', 1, 2), ref('B', 'call-b', 3, 4)], { winner: 'A', scoreA: 0.9, scoreB: 0.2 })
+    expect(text).toContain('Winner: A (#call-a) @seq 1-2')
+    expect(text).toContain('90.0% vs 20.0%')
+    expect(text).not.toContain('Winner: B')
+    expect(text).toContain('verify the required work')
+  })
+
+  it('reports a tie as no unique winner instead of promoting the first entry', () => {
+    const text = compareRouteFeedbackDetail([ref('A'), ref('B')], { winner: 'tie', scoreA: 0.5, scoreB: 0.5 })
+    expect(text).toContain('NO unique winner')
+    expect(text).not.toContain('Winner:')
+    expect(text).toContain('Tied candidates:')
+  })
+
+  it('reports byte-identical candidates as an unperformed comparison', () => {
+    const text = compareRouteFeedbackDetail([ref('A'), ref('B')], { winner: 'tie', scoreA: 0.5, scoreB: 0.5, identical: true })
+    expect(text).toContain('byte-identical')
+    expect(text).toContain('NO quality comparison')
+    expect(text).not.toContain('NO unique winner')
+  })
+
+  it('reports a shared top score in a selection as a tie set', () => {
+    const text = selectRouteFeedbackDetail([ref('A'), ref('B'), ref('C')], { index: 0, ranking: [0, 1, 2], scores: [0.5, 0.5, 0.25] })
+    expect(text).toContain('top score is shared by 2 candidates')
+    expect(text).toContain('NO unique best')
+    // The stable-sort first entry must not be announced as the pick.
+    expect(text).not.toContain('Proceed with')
+  })
+
+  it('names a unique best with its relative share and locator', () => {
+    const text = selectRouteFeedbackDetail([ref('A', 'x', 1, 2), ref('B', 'y', 3, 4), ref('C', 'z', 5, 6)], { index: 2, ranking: [2, 1, 0], scores: [0.1, 0.3, 0.6] })
+    expect(text).toContain('Proceed with C (#z) @seq 5-6')
+    expect(text).toContain('relative preference')
+  })
+
+  it('reports an all-identical selection without inventing a ranking', () => {
+    const text = selectRouteFeedbackDetail([ref('A'), ref('B')], { index: 0, ranking: [0, 1], scores: [0.5, 0.5], identical: true })
+    expect(text).toContain('byte-identical')
+    expect(text).toContain('NO ranking was computed')
+    expect(text).not.toContain('Proceed with')
+  })
+
+  it('says there is no result when the judge returned no usable scores', () => {
+    expect(selectRouteFeedbackDetail([ref('A'), ref('B')], { index: 0, ranking: [], scores: [] })).toContain('NO result to act on')
+  })
+
+  it('bounds every feedback body, long locators included', () => {
+    const long = 'x'.repeat(5000)
+    const text = selectRouteFeedbackDetail(
+      Array.from({ length: 8 }, (_, index) => ref('label-' + index + '-' + long, 'id-' + index, index, index)),
+      { index: 0, ranking: [0, 1, 2, 3, 4, 5, 6, 7], scores: [1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3] },
+      400,
+    )
+    expect(text.length).toBeLessThanOrEqual(400)
+  })
+
+  it('finds the tied-for-top set and refuses to name one for unusable scores', () => {
+    expect(topScoreIndices([0.2, 0.9, 0.9])).toEqual([1, 2])
+    expect(topScoreIndices([0.5, 0.5, 0.5])).toEqual([0, 1, 2])
+    expect(topScoreIndices([])).toEqual([])
+    expect(topScoreIndices([Number.NaN, Number.NaN])).toEqual([])
+  })
+
+  it('locates the reviewed range and admits a missing or truncated breakdown', () => {
+    const withLocator = automaticFeedback(0.2, 0.1, 'B', 0.65, [], { sessionId: 's-1', fromSeq: 4, toSeq: 9, omittedCharacters: 1200 })
+    expect(withLocator).toContain('no per-criterion breakdown')
+    expect(withLocator).toContain('session s-1 seq 4-9')
+    expect(withLocator).toContain('1200 characters of earlier evidence were omitted')
+    const failed = automaticFeedback(0.2, 0.1, 'A', 0.65, [{ id: 'spec', name: 'Spec', score: 0 }], { sessionId: 's', fromSeq: 0, toSeq: 3 })
+    expect(failed).toContain('Spec 0.0%')
+    expect(failed).not.toContain('no per-criterion breakdown')
   })
 })

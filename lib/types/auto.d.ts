@@ -70,5 +70,64 @@ export declare function sessionAccepted(evidence: {
     winner: 'A' | 'B' | 'tie';
     criteria?: readonly AcceptanceCriterion[];
 }, threshold: number): boolean;
-export declare function automaticFeedback(score: number, baselineScore: number, winner: 'A' | 'B' | 'tie', threshold: number, failedCriteria?: readonly AcceptanceCriterion[]): string;
+export declare function automaticFeedback(score: number, baselineScore: number, winner: 'A' | 'B' | 'tie', threshold: number, failedCriteria?: readonly AcceptanceCriterion[], locator?: {
+    sessionId?: string;
+    fromSeq?: number;
+    toSeq?: number;
+    omittedCharacters?: number;
+}): string;
+/** One automatic feedback message may not exceed this many characters, fixed wording included. */
+export declare const MAX_ROUTE_FEEDBACK_CHARS = 4000;
+/** Locator for one routed candidate: a label plus the identity/event position it can be found by. */
+export interface RoutedCandidateRef {
+    label: string;
+    /** Envelope id or callId; omitted from the locator when it equals the label. */
+    id?: string;
+    fromSeq?: number;
+    toSeq?: number;
+}
+/**
+ * Indices sharing the highest score.
+ *
+ * The engine breaks ties by index, so "the first entry of the ranking" is a stable sort
+ * artefact — exactly what S04 forbids presenting as a unique winner.
+ * @param scores - candidate scores in candidate order.
+ * @returns The tied-for-top indices, empty when no score is finite.
+ */
+export declare function topScoreIndices(scores: readonly number[]): number[];
+/**
+ * Deterministic automatic feedback for one routed comparison.
+ *
+ * Announces a winner only when the judge really named one; a tie or a byte-identical pair
+ * is described as such, with locators instead of copied text. Pure so the wording is
+ * testable without a model or a hook.
+ * @param candidates - the two candidates, in slot order (A then B).
+ * @param result - the engine's comparison result.
+ * @param maxChars - message budget.
+ * @returns The feedback body (the caller wraps and bounds it).
+ */
+export declare function compareRouteFeedbackDetail(candidates: readonly [RoutedCandidateRef, RoutedCandidateRef], result: {
+    winner: 'A' | 'B' | 'tie';
+    scoreA: number;
+    scoreB: number;
+    identical?: boolean;
+}, maxChars?: number): string;
+/**
+ * Deterministic automatic feedback for one routed selection.
+ *
+ * A selection reports relative preference shares only, so this never invents an absolute
+ * quality score or a per-criterion explanation. A shared top score is reported as a tie
+ * set, and an all-identical field is reported as "no ranking happened" rather than as a
+ * confident pick.
+ * @param candidates - candidates in candidate order.
+ * @param result - the engine's selection result.
+ * @param maxChars - message budget.
+ * @returns The feedback body (the caller wraps and bounds it).
+ */
+export declare function selectRouteFeedbackDetail(candidates: readonly RoutedCandidateRef[], result: {
+    index: number;
+    ranking: readonly number[];
+    scores: readonly number[];
+    identical?: boolean;
+}, maxChars?: number): string;
 //# sourceMappingURL=auto.d.ts.map

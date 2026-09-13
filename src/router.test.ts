@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { analyzeStructuredRoute, AutoVerifierRouter, boundDecision, buildSemanticRoutePrompt, buildSemanticRouteView, estimateRoutedCalls, latestDirectUserSeq, MAX_ROUTED_CHECKPOINTS, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type RouterPolicy } from './router.ts'
+import { analyzeStructuredRoute, AutoVerifierRouter, boundDecision, buildSemanticRoutePrompt, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, latestDirectUserSeq, MAX_ROUTED_CHECKPOINTS, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type RouterPolicy } from './router.ts'
 import { sanitizeVerifierText } from './session.ts'
 
 function session() {
@@ -1088,5 +1088,60 @@ describe('one cycle per classification and execution', () => {
     const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
     const manual = { ...policy, mode: 'manual' as const }
     expect(router.reserve(agent, 'semantic', 'semantic', 1, manual)).toBeUndefined()
+  })
+})
+
+/**
+ * S03: the delivery-phase signal decides only whether the PROGRESS route is worth buying.
+ * It must require both a fully completed todo list and a real verification run, and its
+ * signature must not reactivate on unrelated tool traffic.
+ */
+describe('delivery-phase inspection', () => {
+  it('requires a non-empty completed todo list and a real verification run', () => {
+    const value = session()
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    tool(value, 'pwsh', 'p1', 'Tests 3 passed')
+    let phase = inspectDeliveryPhase(value.events)!
+    expect(phase.todosComplete).toBe(false)
+    expect(phase.verification).toMatchObject({ name: 'pwsh', ok: true })
+
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    phase = inspectDeliveryPhase(value.events)!
+    expect(phase.todosComplete).toBe(true)
+    expect(phase.verification).toBeDefined()
+
+    // An empty todo list is "nothing planned", never "everything done".
+    const empty = session()
+    empty.append('todo/write', { todos: [] })
+    expect(inspectDeliveryPhase(empty.events)!.todosComplete).toBe(false)
+
+    // Complete todos without any verification run is not a delivery phase: there would be
+    // nothing for the judge to grade.
+    const noRun = session()
+    noRun.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }] })
+    expect(inspectDeliveryPhase(noRun.events)!.verification).toBeUndefined()
+  })
+
+  it('reactivates only when the todo snapshot or the newest run changes', () => {
+    const value = session()
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }] })
+    tool(value, 'pwsh', 'p1', 'Tests 3 passed')
+    const first = inspectDeliveryPhase(value.events)!
+    // Unrelated traffic does not re-arm the completion signal.
+    tool(value, 'read', 'r1', 'nothing to see here')
+    expect(inspectDeliveryPhase(value.events)!.signature).toBe(first.signature)
+    // A NEW verification run does — and a failing one is still a run the judge must see.
+    value.append('tool/call', { turn: 1, step: 1, callId: 'p2' as never, name: 'pwsh', arguments: '{}' })
+    value.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'p2' as never, content: [{ type: 'text', text: 'Tests 0 passed', isError: true }], isError: true }) }, { surfaceOp: 'append' })
+    const second = inspectDeliveryPhase(value.events)!
+    expect(second.signature).not.toBe(first.signature)
+    expect(second.verification).toMatchObject({ name: 'pwsh', ok: false })
+  })
+
+  it('does not mistake bookkeeping output for a verification run', () => {
+    const value = session()
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }] })
+    tool(value, 'present', 'pres', 'Tests 3 passed')
+    expect(inspectDeliveryPhase(value.events)!.verification).toBeUndefined()
   })
 })

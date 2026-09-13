@@ -121,6 +121,12 @@ interface RouterState {
    */
   finalPreferred: boolean
   strictBlocked: boolean
+  /**
+   * Delivery-phase completion signal already sent to the final acceptance. The same finished
+   * state must not keep skipping the progress route; new work or a new verification run
+   * changes the signature and re-arms it.
+   */
+  deliveryConsumed?: string
 }
 
 const ROUTED_TOOLS = new Set(['verifier_compare', 'verifier_select', 'verifier_track'])
@@ -479,6 +485,52 @@ const VERIFICATION_SIGNATURES: readonly RegExp[] = [
  */
 function looksLikeVerificationRun(text: string): boolean {
   return VERIFICATION_SIGNATURES.some(pattern => pattern.test(text))
+}
+
+/** What the delivery-phase shortcut needs to know about one task. */
+export interface DeliveryPhase {
+  /** The task's newest durable todo snapshot is non-empty and every entry is completed. */
+  todosComplete: boolean
+  /** The newest verification-shaped run in the task, with the sequence its result settled at. */
+  verification?: { seq: number; name: string; ok: boolean }
+  /**
+   * Deterministic identity of the completion signal.
+   *
+   * Changes only when the todo snapshot or the newest verification run changes, so the
+   * stop boundary can tell "the same finished state was already sent to the gate" from
+   * "new work or a new verification run reactivated the completion signal".
+   */
+  signature: string
+}
+
+/**
+ * Whether a task has reached its delivery phase: every todo is done AND a real verification
+ * run exists.
+ *
+ * This decides ONLY whether the final acceptance is worth running right now; it never decides
+ * whether the task passes, and it deliberately does not look at the verification's success —
+ * a failing run is exactly what the judge must be shown. Todos completing without any
+ * verification evidence is not a delivery phase, because the judge would have nothing to
+ * grade.
+ * @param events - session event log.
+ * @returns The delivery-phase facts, or undefined when the task has no evidence index.
+ */
+export function inspectDeliveryPhase(events: readonly SessionEvent[]): DeliveryPhase | undefined {
+  const index = buildEvidenceIndex(events)
+  if (!index) return undefined
+  const snapshots = canonicalTodoSnapshots(index)
+  const newest = snapshots[snapshots.length - 1]
+  const todosComplete = newest !== undefined && newest.todos.length > 0 && newest.todos.every(todo => !todo.status || todo.status === 'completed')
+  let verification: DeliveryPhase['verification']
+  for (const pair of index.calls.values()) {
+    if (!isEvidenceOutput(pair.name, pair.text) || !looksLikeVerificationRun(pair.text)) continue
+    if (verification === undefined || pair.resultSeq > verification.seq) verification = { seq: pair.resultSeq, name: pair.name, ok: pair.ok }
+  }
+  return {
+    todosComplete,
+    ...(verification === undefined ? {} : { verification }),
+    signature: stableHash({ todo: newest?.seq ?? -1, verification: verification?.seq ?? -1, ok: verification?.ok ?? false }),
+  }
 }
 
 /**
@@ -1109,7 +1161,7 @@ export class AutoVerifierRouter {
     const id = String(agent.id)
     const state = this.states.get(id) ?? { taskStartSeq, routeAttempts: 0, finalAttempts: 0, sessionRouteAttempts: 0, sessionFinalAttempts: 0, taskModelCalls: 0, sessionModelCalls: 0, completed: new Set(), failed: new Set(), finalPreferred: false, strictBlocked: false }
     // A new task resets its own attempt and model-call counters, but never the session counters.
-    if (state.taskStartSeq !== taskStartSeq) { state.taskStartSeq = taskStartSeq; state.routeAttempts = 0; state.finalAttempts = 0; state.taskModelCalls = 0; state.completed.clear(); state.failed.clear(); state.inFlight = undefined; state.finalRequiredFromSeq = undefined; state.finalPreferred = false; state.strictBlocked = false; this.exhaustedNotices.delete(id) }
+    if (state.taskStartSeq !== taskStartSeq) { state.taskStartSeq = taskStartSeq; state.routeAttempts = 0; state.finalAttempts = 0; state.taskModelCalls = 0; state.completed.clear(); state.failed.clear(); state.inFlight = undefined; state.finalRequiredFromSeq = undefined; state.finalPreferred = false; state.strictBlocked = false; state.deliveryConsumed = undefined; this.exhaustedNotices.delete(id) }
     this.states.set(id, state)
     return state
   }
@@ -1273,6 +1325,16 @@ export class AutoVerifierRouter {
 
   /** Whether the next stop boundary must skip routing and run the final gate. */
   finalPreferred(agent: RoutedAgent): boolean { return this.state(agent)?.finalPreferred ?? false }
+
+  /**
+   * Whether this exact delivery-phase signal was already sent to the final acceptance.
+   * @param agent - Agent whose task is being inspected.
+   * @param signature - signature returned by inspectDeliveryPhase.
+   */
+  deliveryConsumed(agent: RoutedAgent, signature: string): boolean { return this.state(agent)?.deliveryConsumed === signature }
+
+  /** Mark the delivery-phase signal as spent, so the same finished state stops skipping routing. */
+  consumeDelivery(agent: RoutedAgent, signature: string): void { const state = this.state(agent); if (state) state.deliveryConsumed = signature }
 
   strictBlocked(agent: RoutedAgent): boolean { return this.state(agent)?.strictBlocked ?? false }
   release(agent: { id: unknown }): void { this.states.delete(String(agent.id)); this.exhaustedNotices.delete(String(agent.id)) }

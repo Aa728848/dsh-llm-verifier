@@ -2,6 +2,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 // Shared with the router so both agree on what opens a task; imported (type-only in the
 // other direction) rather than duplicated, because a drift here silently disables gating.
 import { latestDirectUserSeq } from './router.ts'
+import { sanitizeVerifierText } from './session.ts'
 
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict'
 
@@ -260,14 +261,156 @@ export function sessionAccepted(evidence: { score: number; winner: 'A' | 'B' | '
   return failedAcceptanceCriteria(evidence.criteria, threshold).length === 0
 }
 
-export function automaticFeedback(score: number, baselineScore: number, winner: 'A' | 'B' | 'tie', threshold: number, failedCriteria: readonly AcceptanceCriterion[] = []): string {
+export function automaticFeedback(score: number, baselineScore: number, winner: 'A' | 'B' | 'tie', threshold: number, failedCriteria: readonly AcceptanceCriterion[] = [], locator?: { sessionId?: string; fromSeq?: number; toSeq?: number; omittedCharacters?: number }): string {
   const percent = (value: number) => (value * 100).toFixed(1) + '%'
   return [
     '[Automatic verifier gate]',
     `The independent verifier did not clear this task for completion: evidence score ${percent(score)}, baseline ${percent(baselineScore)}, verdict ${winner}, required ${percent(threshold)}.`,
     ...(failedCriteria.length > 0
       ? ['Criteria below the threshold: ' + failedCriteria.map(criterion => (criterion.name ?? criterion.id) + ' ' + percent(criterion.score)).join('; ') + '.']
+      : ['The judge reported no per-criterion breakdown for this review, so there is no per-requirement locator to act on; the score and verdict above are the only evidence returned.']),
+    ...(winner !== 'A' ? ['The verdict did not favour the session over the empty-work baseline.'] : []),
+    ...(locator === undefined
+      ? []
+      : ['Reviewed range: ' + (locator.sessionId === undefined ? 'this session' : 'session ' + locator.sessionId) + ' seq ' + (locator.fromSeq ?? 0) + '-' + (locator.toSeq ?? 0) + '.']),
+    ...(locator?.omittedCharacters !== undefined && locator.omittedCharacters > 0
+      ? [locator.omittedCharacters + ' characters of earlier evidence were omitted by the length bound, so a requirement met only there may not have been visible to the judge.']
       : []),
     'Re-open the task requirements, inspect the actual tool outputs for unresolved errors or missing proof, make any necessary corrections, and run a directly relevant verification command before concluding. Do not merely restate that the task is complete.',
   ].join('\n')
+}
+
+/** One automatic feedback message may not exceed this many characters, fixed wording included. */
+export const MAX_ROUTE_FEEDBACK_CHARS = 4000
+
+/** Locator for one routed candidate: a label plus the identity/event position it can be found by. */
+export interface RoutedCandidateRef {
+  label: string
+  /** Envelope id or callId; omitted from the locator when it equals the label. */
+  id?: string
+  fromSeq?: number
+  toSeq?: number
+}
+
+function percent(value: number): string {
+  return (Number.isFinite(value) ? value * 100 : 0).toFixed(1) + '%'
+}
+
+/**
+ * Render one candidate locator within a character budget.
+ *
+ * Deliberately a label plus an identity/event position rather than the candidate's text:
+ * the feedback must let the agent find the object it is being told about, and copying the
+ * candidate into the message would pay the evidence budget twice.
+ */
+function locate(ref: RoutedCandidateRef, budget: number): string {
+  const at = ref.fromSeq === undefined ? '' : ' @seq ' + ref.fromSeq + (ref.toSeq !== undefined && ref.toSeq !== ref.fromSeq ? '-' + ref.toSeq : '')
+  const id = ref.id === undefined || ref.id === ref.label ? '' : ' (#' + ref.id + ')'
+  return sanitizeVerifierText(ref.label + id + at, Math.max(8, Math.floor(budget)))
+}
+
+/**
+ * Indices sharing the highest score.
+ *
+ * The engine breaks ties by index, so "the first entry of the ranking" is a stable sort
+ * artefact — exactly what S04 forbids presenting as a unique winner.
+ * @param scores - candidate scores in candidate order.
+ * @returns The tied-for-top indices, empty when no score is finite.
+ */
+export function topScoreIndices(scores: readonly number[]): number[] {
+  const finite = scores.filter(score => Number.isFinite(score))
+  if (finite.length === 0) return []
+  const best = Math.max(...finite)
+  return scores.map((score, index) => ({ score, index })).filter(row => Number.isFinite(row.score) && row.score === best).map(row => row.index)
+}
+
+/**
+ * Deterministic automatic feedback for one routed comparison.
+ *
+ * Announces a winner only when the judge really named one; a tie or a byte-identical pair
+ * is described as such, with locators instead of copied text. Pure so the wording is
+ * testable without a model or a hook.
+ * @param candidates - the two candidates, in slot order (A then B).
+ * @param result - the engine's comparison result.
+ * @param maxChars - message budget.
+ * @returns The feedback body (the caller wraps and bounds it).
+ */
+export function compareRouteFeedbackDetail(
+  candidates: readonly [RoutedCandidateRef, RoutedCandidateRef],
+  result: { winner: 'A' | 'B' | 'tie'; scoreA: number; scoreB: number; identical?: boolean },
+  maxChars = MAX_ROUTE_FEEDBACK_CHARS,
+): string {
+  const perItem = Math.max(48, Math.floor(maxChars / 6))
+  const located = [locate(candidates[0], perItem), locate(candidates[1], perItem)]
+  const bound = (text: string): string => sanitizeVerifierText(text, maxChars)
+  if (result.identical === true) {
+    return bound([
+      'The two candidates are byte-identical, so the judge performed NO quality comparison (both sides read as 0.5). Do not buy this comparison again: produce genuinely different options, or proceed with the shared content.',
+      'Candidate A: ' + located[0],
+      'Candidate B: ' + located[1],
+    ].join('\n'))
+  }
+  if (result.winner === 'tie') {
+    return bound([
+      'The judge scored both candidates identically (' + percent(result.scoreA) + ' / ' + percent(result.scoreB) + '), so there is NO unique winner. Do not treat the first-listed candidate as the winner.',
+      'Choose between them on grounds the judge cannot see (fit, risk, cost), or make the options genuinely distinguishable, then implement and verify the required work.',
+      'Tied candidates:',
+      '- ' + located[0],
+      '- ' + located[1],
+    ].join('\n'))
+  }
+  const winnerIndex = result.winner === 'A' ? 0 : 1
+  const winning = result.winner === 'A' ? result.scoreA : result.scoreB
+  const losing = result.winner === 'A' ? result.scoreB : result.scoreA
+  return bound([
+    'Winner: ' + located[winnerIndex] + ' (' + percent(winning) + ' vs ' + percent(losing) + ').',
+    'Implement the winning candidate and verify the required work before concluding.',
+  ].join('\n'))
+}
+
+/**
+ * Deterministic automatic feedback for one routed selection.
+ *
+ * A selection reports relative preference shares only, so this never invents an absolute
+ * quality score or a per-criterion explanation. A shared top score is reported as a tie
+ * set, and an all-identical field is reported as "no ranking happened" rather than as a
+ * confident pick.
+ * @param candidates - candidates in candidate order.
+ * @param result - the engine's selection result.
+ * @param maxChars - message budget.
+ * @returns The feedback body (the caller wraps and bounds it).
+ */
+export function selectRouteFeedbackDetail(
+  candidates: readonly RoutedCandidateRef[],
+  result: { index: number; ranking: readonly number[]; scores: readonly number[]; identical?: boolean },
+  maxChars = MAX_ROUTE_FEEDBACK_CHARS,
+): string {
+  const perItem = Math.max(32, Math.floor(maxChars / Math.max(2, candidates.length + 3)))
+  const located = candidates.map(candidate => locate(candidate, perItem))
+  const bound = (text: string): string => sanitizeVerifierText(text, maxChars)
+  if (result.identical === true) {
+    return bound([
+      'All ' + candidates.length + ' candidates are byte-identical, so NO ranking was computed (every score is 0.5). Do not buy this comparison again: produce genuinely different options, or proceed with the shared content.',
+      ...candidates.map((_, index) => '- ' + located[index]),
+    ].join('\n'))
+  }
+  const top = topScoreIndices(result.scores)
+  if (top.length === 0) {
+    return 'The judge returned no usable candidate scores for this selection, so there is NO result to act on. Re-run it with real candidates, or continue the work without treating any option as chosen.'
+  }
+  if (top.length > 1) {
+    return bound([
+      'The top score is shared by ' + top.length + ' candidates (' + top.map(index => percent(result.scores[index] ?? 0)).join(' / ') + '), so there is NO unique best. The engine listing is a stable sort, not a verdict.',
+      'Choose among them on grounds the judge cannot see (fit, risk, cost), or make the candidates genuinely distinguishable, then implement and verify the required work.',
+      'Tied candidates:',
+      ...top.map(index => '- ' + located[index] + ' (' + percent(result.scores[index] ?? 0) + ')'),
+    ].join('\n'))
+  }
+  const best = top[0]!
+  const order = result.ranking.length > 0 ? [...result.ranking] : candidates.map((_, index) => index)
+  return bound([
+    'Ranking (shares are relative preferences, not an absolute quality score, and a selection has no per-criterion breakdown):',
+    ...order.map((index, rank) => (rank + 1) + '. ' + located[index] + ' (' + percent(result.scores[index] ?? 0) + ')'),
+    'Proceed with ' + located[best] + ', implement it, and verify the required work before concluding.',
+  ].join('\n'))
 }

@@ -13,8 +13,8 @@ import { VerifierEngine, normalizeCriteria, type JudgeScore, type RunStats } fro
 import { loadVerifierImages } from './images.ts'
 import { extractSession, sanitizeVerifierText, sessionEvents } from './session.ts'
 import { CriteriaResolver, type ResolvedCriteria } from './criteria.ts'
-import { analyzeAutoTask, automaticFeedback, failedAcceptanceCriteria, isSubagentSession, sessionAccepted, type AcceptanceCriterion } from './auto.ts'
-import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type Reservation, type RouteDecision, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
+import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, MAX_ROUTE_FEEDBACK_CHARS, type AcceptanceCriterion, type RoutedCandidateRef } from './auto.ts'
+import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type CandidateArtifact, type Reservation, type RouteDecision, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
 import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, buildGenerationPrompt, buildPairwisePrompt, extractScore } from './core.ts'
 import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from './plan-gate.ts'
 import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from './team-gate.ts'
@@ -478,7 +478,15 @@ export function apply(ctx: Context, config: Config = {}): void {
   }, phase, observation)
   const extractTask = async (agent: Agent, fromSeq: number, toSeq: number, maxChars: number, signal: AbortSignal) => extractSession(agent, async (ref: ImageAttachmentRef) => { const stored = await services.attachments.readImage(ref, signal); return { data: stored.data, mediaType: stored.ref.mediaType } }, { fromSeq, toSeq, includeAssistantText: true, maxChars })
   const routePolicy = (selected: ReturnType<typeof current>, minFinalModelCalls: number) => ({ mode: selected.autoVerifyMode, minConfidence: selected.autoRouteMinConfidence, maxCandidates: selected.autoRouteMaxCandidates, maxRoutePerTask: selected.autoRouteMaxPerTask, maxRoutePerSession: selected.autoRouteMaxPerSession, maxFinalPerTask: selected.autoVerifyMaxPerTask, maxFinalPerSession: selected.autoVerifyMaxPerSession, maxModelCallsPerTask: selected.autoMaxModelCallsPerTask, maxModelCallsPerSession: selected.autoMaxModelCallsPerSession, maxInputChars: selected.autoRouteMaxInputChars, maxItemChars: selected.autoRouteMaxItemChars, minFinalModelCalls })
-  const routeFeedback = (decision: RouteDecision, detail: string) => createUserMessage({ content: [{ type: 'text' as const, text: '[Automatic verifier routing: ' + decision.kind + ']\n' + detail + '\nUse this independent result to continue the actual task. Do not merely restate the ranking or progress score; implement, correct, and verify the required work.' }], source: { kind: 'plugin' as const, plugin: 'dsh-llm-verifier', form: 'notice' as const, summary: 'Automatic verifier routed ' + decision.kind } })
+  /** One candidate's locator for automatic feedback: label plus identity/event position, never its text. */
+  const candidateRef = (candidate: CandidateArtifact): RoutedCandidateRef => ({ label: candidate.label, id: candidate.id, fromSeq: candidate.fromSeq, toSeq: candidate.toSeq })
+  /**
+   * Wrap a routed result for steering.
+   *
+   * The whole message — fixed opening, detail and fixed instruction — is redacted and bounded
+   * by one shared budget, because the locator lines added by S04 count against it too.
+   */
+  const routeFeedback = (decision: RouteDecision, detail: string) => createUserMessage({ content: [{ type: 'text' as const, text: sanitizeVerifierText('[Automatic verifier routing: ' + decision.kind + ']\n' + detail + '\nUse this independent result to continue the actual task. Do not merely restate the ranking or progress score; implement, correct, and verify the required work.', MAX_ROUTE_FEEDBACK_CHARS) }], source: { kind: 'plugin' as const, plugin: 'dsh-llm-verifier', form: 'notice' as const, summary: 'Automatic verifier routed ' + decision.kind } })
 
   const handleStatisticsQuery = async (payload: unknown): Promise<{ ok: true; value: StatisticsOverview } | { ok: false; error: { code: 'bad-request'; message: string; details: { issues: never[] } } }> => {
     // A malformed range used to be swallowed by the Promise.allSettled fan-out below and
@@ -759,11 +767,37 @@ export function apply(ctx: Context, config: Config = {}): void {
     // delay it with evidence whose steered text would be identical. The preference is
     // consumed by the final reservation, so a failed acceptance releases routing again.
     const finalPreferred = autoRouter.finalPreferred(agent)
+    // The mandatory gate is read here as well because S03 decides whether the progress route
+    // is worth buying, and a forced gate changes that answer.
+    const forcedFromSeq = autoRouter.finalRequired(agent)
+    // S03 delivery phase: every todo completed AND a real verification run exists. This only
+    // decides whether the progress score is worth buying — never whether the task passes —
+    // and it deliberately ignores the run's success, because a failing run is exactly what
+    // the judge must see.
+    const delivery = inspectDeliveryPhase(snapshot)
+    const deliverySignature = delivery?.signature
+    const deliveryReady = delivery !== undefined && delivery.todosComplete && delivery.verification !== undefined
+      && deliverySignature !== undefined && !autoRouter.deliveryConsumed(agent, deliverySignature)
+      && (evidence.eligible || forcedFromSeq !== undefined)
     const structured = finalPreferred ? undefined : analyzeStructuredRoute(snapshot, selected.autoRouteMaxCandidates, selected.autoRouteMaxItemChars, selected.autoRouteMaxInputChars, { processed: fingerprint => autoRouter.completedFingerprint(agent, fingerprint) }) as RouteDecision
     let decision = finalPreferred ? undefined : boundDecision(structured, policy)
     if (structured !== undefined && decision === undefined) {
       ctx.logger.warn('llm-verifier automatic ' + structured.kind + ' route dropped: its evidence exceeds the per-item/total routing caps (' + selected.autoRouteMaxItemChars + '/' + selected.autoRouteMaxInputChars + ' characters)')
       await recordSkippedRoute(agent, structured.kind, 'structured', 'dropped-over-budget', { cycleId: nextCycleId(), trigger: 'turn-stopping', stage: 'skipped', destination: structured.kind, skipReason: 'dropped-over-budget' })
+    }
+    // S03: the delivery phase skips the PROGRESS route, never an unprocessed candidate
+    // selection (a compare/select is step 3, before this shortcut). The skipped track cycle is
+    // recorded and the completion signal is consumed, so a failed acceptance cannot keep
+    // skipping routing on the same finished state — only new work or a new verification run
+    // changes the signature and re-arms it.
+    const deliveryFastPath = deliveryReady && !finalPreferred && (decision?.kind === 'track' || (decision === undefined && !semanticRouteHint(snapshot)))
+    if (deliveryFastPath) {
+      if (decision?.kind === 'track') {
+        ctx.logger.warn('llm-verifier automatic track route skipped: the task is in its delivery phase (todos complete + verification evidence)')
+        await recordSkippedRoute(agent, 'track', 'structured', 'delivery-phase', { cycleId: nextCycleId(), trigger: 'turn-stopping', stage: 'skipped', destination: 'track', skipReason: 'delivery-phase' })
+      }
+      decision = undefined
+      if (deliverySignature !== undefined) autoRouter.consumeDelivery(agent, deliverySignature)
     }
 
     // One logical routing cycle consumes exactly ONE route attempt. A classification that
@@ -771,7 +805,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // re-reserved: the commit-then-reserve pair spent two attempts per cycle, so the shipped
     // default of two could never afford "plan pre-review → classify → compare".
     let cycleReservation: Reservation | undefined
-    if (!finalPreferred && decision === undefined && selected.autoRouteSemantic && (selected.autoVerifyMode === 'strict' || semanticRouteHint(snapshot))) {
+    if (!finalPreferred && !deliveryFastPath && decision === undefined && selected.autoRouteSemantic && (selected.autoVerifyMode === 'strict' || semanticRouteHint(snapshot))) {
       const fingerprint = stableHash({ phase: 'semantic', from: evidence.taskStartSeq, to: admittedLastSeq, model: selected.provider + '/' + selected.model })
       const reservation = autoRouter.reserve(agent, 'semantic', fingerprint, 1, policy)
       if (reservation) {
@@ -893,8 +927,12 @@ export function apply(ctx: Context, config: Config = {}): void {
               return
             }
             if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
-            const winner = result.winner === 'A' ? decision.candidates[0].label : result.winner === 'B' ? decision.candidates[1].label : 'tie'
-            agent.steer(routeFeedback(decision, 'Winner: ' + winner + '. Scores: ' + (result.scoreA * 100).toFixed(1) + '% / ' + (result.scoreB * 100).toFixed(1) + '%.'))
+            // S04: a tie, a byte-identical pair and a real winner are three different
+            // outcomes and are reported as such, with locators instead of copied candidates.
+            agent.steer(routeFeedback(decision, compareRouteFeedbackDetail(
+              [candidateRef(decision.candidates[0]), candidateRef(decision.candidates[1])],
+              { winner: result.winner, scoreA: result.scoreA, scoreB: result.scoreB, ...(result.identical === true ? { identical: true } : {}) },
+            )))
             return
           }
           if (decision.kind === 'select') {
@@ -905,8 +943,12 @@ export function apply(ctx: Context, config: Config = {}): void {
               return
             }
             if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
-            const ranking = result.ranking.map((index, rank) => (rank + 1) + '. ' + decision.candidates[index]!.label).join('\n')
-            agent.steer(routeFeedback(decision, 'Ranking:\n' + ranking + '\nProceed with ' + decision.candidates[result.index]!.label + '.'))
+            // A selection only has relative shares: a shared top score is reported as a tie
+            // set, and the stable-sort first entry is never called the clear winner.
+            agent.steer(routeFeedback(decision, selectRouteFeedbackDetail(
+              decision.candidates.map(candidateRef),
+              { index: result.index, ranking: result.ranking, scores: result.scores, ...(result.identical === true ? { identical: true } : {}) },
+            )))
             return
           }
           const result = await trackProgress(agent, extracted.problem, decision.steps, decision.checkpoints, repeats, signal, extracted.images, 'track', routedObservation)
@@ -938,7 +980,6 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
     }
 
-    const forcedFromSeq = autoRouter.finalRequired(agent)
     if (forcedFromSeq === undefined && !evidence.eligible) {
       if (selected.autoVerifyMode === 'strict' && autoRouter.strictBlocked(agent)) {
         // Budget-exhausted states can never be cleared, so steering every stop
@@ -980,7 +1021,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (passed) autoRouter.commit(agent, finalReservation)
       else {
         autoRouter.fail(agent, finalReservation, selected.autoVerifyMode === 'strict')
-        agent.steer(createUserMessage({ content: [{ type: 'text', text: automaticFeedback(result.score, result.baselineScore, result.winner, selected.autoVerifyThreshold, failed) }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+        // S04: the failure names the criteria that failed AND the interval the judge actually
+        // read, and says so explicitly when it reported no breakdown or the bound omitted evidence.
+        agent.steer(createUserMessage({ content: [{ type: 'text', text: sanitizeVerifierText(automaticFeedback(result.score, result.baselineScore, result.winner, selected.autoVerifyThreshold, failed, { sessionId: result.sessionId, fromSeq: result.fromSeq, toSeq: result.toSeq, omittedCharacters: result.omittedCharacters }), MAX_ROUTE_FEEDBACK_CHARS) }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
       }
     } catch (error) {
       autoRouter.fail(agent, finalReservation, selected.autoVerifyMode === 'strict')
