@@ -228,6 +228,13 @@ export declare const zh: {
     'models.calls': string;
     'models.tokens': string;
     'models.empty': string;
+    'activity.route.classifying': string;
+    'activity.route.compare': string;
+    'activity.route.select': string;
+    'activity.route.track': string;
+    'activity.final.accepting': string;
+    'activity.final.accepted': string;
+    'activity.final.rejected': string;
     'process.generating': string;
     'process.comparing': string;
     'process.replaced': string;
@@ -532,6 +539,13 @@ export declare const dictionaries: {
         'models.calls': string;
         'models.tokens': string;
         'models.empty': string;
+        'activity.route.classifying': string;
+        'activity.route.compare': string;
+        'activity.route.select': string;
+        'activity.route.track': string;
+        'activity.final.accepting': string;
+        'activity.final.accepted': string;
+        'activity.final.rejected': string;
         'process.generating': string;
         'process.comparing': string;
         'process.replaced': string;
@@ -833,6 +847,13 @@ export declare const dictionaries: {
         'models.calls': string;
         'models.tokens': string;
         'models.empty': string;
+        'activity.route.classifying': string;
+        'activity.route.compare': string;
+        'activity.route.select': string;
+        'activity.route.track': string;
+        'activity.final.accepting': string;
+        'activity.final.accepted': string;
+        'activity.final.rejected': string;
         'process.generating': string;
         'process.comparing': string;
         'process.replaced': string;
@@ -907,33 +928,34 @@ export declare const dictionaries: {
 };
 export declare const toolLabels: Record<'zh' | 'en', Record<string, string>>;
 export declare function tFormat(template: string, params?: Record<string, string | number>): string;
-/** The process-selection chip's wire shape (a subset of the server's `ProcessActivityView`). */
-export interface ProcessActivityChipView {
+/** The chat chip's wire shape (a subset of the server's `ActivityView`). */
+export interface ActivityChipView {
     active?: {
+        stage?: unknown;
         phase?: unknown;
+        destination?: unknown;
         candidates?: unknown;
-        alternativeModel?: unknown;
+        expectedCalls?: unknown;
     };
     settled?: {
+        stage?: unknown;
         outcome?: unknown;
-        candidates?: unknown;
-        at?: unknown;
     };
 }
 /** How the chip renders: a busy accent, a settled confirmation, or a failure note. */
-export type ProcessActivityTone = 'busy' | 'ok' | 'error';
+export type ActivityTone = 'busy' | 'ok' | 'error';
 /**
- * Render the process-selection chip, or nothing when there is nothing to say.
+ * Render the chat chip, or nothing when there is nothing to say.
  *
  * Pure on purpose (no React, no locale detection): both the chip and its regression tests read the
- * same mapping. An unknown phase counts as generating — a newer host describing a phase this build
- * does not know must still show that work is happening, not disappear.
+ * same mapping. Unknown enum values degrade to the least surprising copy — a newer host describing a
+ * phase or a stage this build does not know must still show that work is happening, not disappear.
  * @param view - the server's activity view, or nothing.
  * @param t - the active dictionary.
  * @returns The tone and copy, or null to render no row at all.
  */
-export declare function processActivityText(view: ProcessActivityChipView | null | undefined, t: I18nDict): {
-    tone: ProcessActivityTone;
+export declare function verifierActivityText(view: ActivityChipView | null | undefined, t: I18nDict): {
+    tone: ActivityTone;
     text: string;
 } | null;
 export declare function detectLanguage(): 'zh' | 'en';

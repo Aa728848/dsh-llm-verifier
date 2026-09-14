@@ -22,7 +22,7 @@ import { addUsage, emptyUsage, GENERATION_TEMPERATURE, type UsageStats } from '.
 import { stableHash } from './cache.ts'
 import { PROCESS_CRITERIA, type Criterion } from './core.ts'
 import { mergeRunStats, partialStats, type CompareResult, type RunStats, type SelectResult } from './engine.ts'
-import { ProcessActivities, type ProcessActivityView } from './process-activity.ts'
+import { VerifierActivities, classifyProcessOutcome, type ActivityView } from './verifier-activity.ts'
 import { estimateRoutedCalls, itemBudget, type AutoVerifierRouter, type Reservation, type RouterPolicy, type RoutedAgent } from './router.ts'
 import type { RouteObservation } from './statistics.ts'
 
@@ -209,6 +209,13 @@ export interface ProcessSelectorDeps {
   /** The routing policy in force, including the final-acceptance floor and the process allowance. */
   policy(): Promise<RouterPolicy>
   router(): AutoVerifierRouter
+  /**
+   * Shared activity table the router's cycles and these P06 cycles are published to.
+   *
+   * Injected so one plugin instance has ONE table: the chip's read must see a routed review and a
+   * process cycle in the same place. Defaults to a private table, which is all a focused test needs.
+   */
+  activities?: VerifierActivities
   /** Durable cycle log of one topic. */
   store(agent: unknown): ProcessCycleStore
   /** Newest session state, used for staleness and for the comparison's task evidence. */
@@ -812,17 +819,22 @@ export class ProcessSelector {
    *
    * Host-only and in memory: a session event would carry the same information, but the persistence
    * read path refuses unknown event types for an out-of-repo plugin, and `Session.append` cannot
-   * set the `ignorable` marker that would make one loadable (see `process-activity.ts`).
+   * set the `ignorable` marker that would make one loadable (see `verifier-activity.ts`).
    */
-  private readonly activities = new ProcessActivities()
+  private readonly activities: VerifierActivities
 
-  constructor(private readonly deps: ProcessSelectorDeps) {}
+  constructor(private readonly deps: ProcessSelectorDeps) {
+    this.activities = deps.activities ?? new VerifierActivities()
+  }
 
   /**
    * The cycle one session has to show right now, for the UI chip (in flight, or just settled).
+   *
+   * Reads the SAME table the router publishes into, so a routed review and a process cycle are never
+   * two different answers to "what is this session doing".
    * @param sessionId - the session to read.
    */
-  activity(sessionId: string): ProcessActivityView { return this.activities.read(sessionId, this.deps.now()) }
+  activity(sessionId: string): ActivityView { return this.activities.read(sessionId, this.deps.now()) }
 
   /** Register (or replace) the pending intent of one session. */
   register(intent: ProcessIntent): void { this.intents.set(intent.sessionId, intent) }
@@ -966,6 +978,7 @@ export class ProcessSelector {
     // streaming text of its own, so the chip is the only thing that can explain it.
     this.activities.begin(intent.sessionId, {
       cycleId: reservation.id,
+      stage: 'process',
       phase: 'generating',
       candidates: count,
       ...(observation.alternativeModel === undefined ? {} : { alternativeModel: observation.alternativeModel }),
@@ -1230,7 +1243,7 @@ export class ProcessSelector {
       }
       // The generation and the buffering are behind us; everything this cycle still owes the user
       // is judge latency.
-      this.activities.phase(intent.sessionId, reservation.id, 'comparing')
+      this.activities.update(intent.sessionId, reservation.id, { phase: 'comparing' })
       let judged: { judgeCalls: number; winner: BufferedCandidate | undefined; tie: boolean; stats: RunStats; compare?: CompareResult; select?: SelectResult }
       try {
         if ('candidateA' in view) {
@@ -1306,7 +1319,7 @@ export class ProcessSelector {
           // dep. Both must state the delivery, and `finish` overwrites the cycle's own record.
           await this.deps.store(intent.agent).finish(reservation.id, outcome, 'original')
           // The chip follows the same correction: it was already settled as a replacement.
-          this.activities.finish(intent.sessionId, reservation.id, outcome, 'original', this.deps.now())
+          this.activities.finish(intent.sessionId, reservation.id, classifyProcessOutcome(outcome, 'original'), this.deps.now())
           try {
             await this.deps.correctDelivery({ agent: intent.agent, cycleId: reservation.id, outcome, replayed: 'original' })
           } catch (error) {
@@ -1369,7 +1382,7 @@ export class ProcessSelector {
   private async report(input: { intent: ProcessIntent; reservation: Reservation; observation: RouteObservation; startedAt: number; outcome: string; replayed: 'original' | 'candidate'; generatedCalls: number; judgeCalls: number; sameCandidate: boolean; usage: RunStats; compare?: CompareResult; select?: SelectResult; error?: string }): Promise<void> {
     // The chip is told first: it is live UI state, and it must not depend on the cycle log or the
     // statistics row being writable (a read-only topic still gets an honest indicator).
-    this.activities.finish(input.intent.sessionId, input.reservation.id, input.outcome, input.replayed, this.deps.now())
+    this.activities.finish(input.intent.sessionId, input.reservation.id, classifyProcessOutcome(input.outcome, input.replayed), this.deps.now())
     await this.deps.store(input.intent.agent).finish(input.reservation.id, input.outcome, input.replayed)
     await this.deps.record({
       agent: input.intent.agent,

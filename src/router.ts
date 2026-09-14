@@ -1412,6 +1412,22 @@ export function boundDecision(decision: RouteDecision | undefined, policy: Route
   return decision
 }
 
+/**
+ * Advisory observer of granted routing cycles, used by the chat indicator.
+ *
+ * The router is the only component that knows a cycle was GRANTED and when it settled, but it must
+ * not know what the UI says about it. Every callback is optional and exception-safe: an observer is
+ * a reporting channel, and it must never be able to change routing, budgets or verdicts.
+ */
+export interface RouterCycleObserver {
+  /** A cycle was granted (the reservation now owns the agent's in-flight slot). */
+  begin?(agent: RoutedAgent, reservation: Reservation): void
+  /** A classification cycle was promoted into the decision it resolved, on the same reservation. */
+  promoted?(agent: RoutedAgent, reservation: Reservation): void
+  /** The cycle was committed (accepted) or failed (rejected / abandoned). */
+  settled?(agent: RoutedAgent, reservation: Reservation, outcome: 'committed' | 'failed'): void
+}
+
 export class AutoVerifierRouter {
   private readonly states = new Map<string, RouterState>()
   /** Agent ids that already received this task's budget-exhaustion notice. */
@@ -1419,6 +1435,17 @@ export class AutoVerifierRouter {
   private serial = 0
   /** Namespace for this router's cycle ids; unique per router and per process incarnation. */
   private readonly instance = ROUTER_EPOCH + '-' + (++routerInstanceSerial)
+
+  /**
+   * @param observer - optional reporting channel for the chat indicator.
+   */
+  constructor(private readonly observer?: RouterCycleObserver) {}
+
+  /** Report one lifecycle edge, swallowing anything the observer throws. */
+  private observe(report: (observer: RouterCycleObserver) => void): void {
+    if (this.observer === undefined) return
+    try { report(this.observer) } catch { /* an advisory UI observer must never change routing */ }
+  }
 
   private state(agent: RoutedAgent): RouterState | undefined {
     const taskStartSeq = latestDirectUserSeq(sessionEvents(agent.session))
@@ -1472,6 +1499,7 @@ export class AutoVerifierRouter {
     }
     state.taskModelCalls += expectedCalls
     state.sessionModelCalls += expectedCalls
+    this.observe(observer => observer.begin?.(agent, reservation))
     return reservation
   }
 
@@ -1519,6 +1547,7 @@ export class AutoVerifierRouter {
     reservation.expectedCalls += expectedCalls
     state.taskModelCalls += expectedCalls
     state.sessionModelCalls += expectedCalls
+    this.observe(observer => observer.promoted?.(agent, reservation))
     return true
   }
 
@@ -1531,6 +1560,7 @@ export class AutoVerifierRouter {
     // (and, in strict mode, burn an attempt and set strictBlocked on that empty review).
     if (reservation.phase !== 'semantic' && reservation.phase !== 'final' && reservation.phase !== 'plan_review') state.finalRequiredFromSeq = Math.max(state.finalRequiredFromSeq ?? 0, evidenceSeq ?? reservation.taskStartSeq)
     if (reservation.phase === 'final') { state.finalRequiredFromSeq = undefined; state.finalPreferred = false }
+    this.observe(observer => observer.settled?.(agent, reservation, 'committed'))
     return true
   }
 
@@ -1539,6 +1569,7 @@ export class AutoVerifierRouter {
     if (!state || state.inFlight?.id !== reservation.id) return
     state.inFlight = undefined; state.failed.add(reservation.fingerprint); if (strict) state.strictBlocked = true
     if (reservation.phase === 'final') state.finalPreferred = false
+    this.observe(observer => observer.settled?.(agent, reservation, 'failed'))
   }
 
   /**

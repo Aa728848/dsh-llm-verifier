@@ -913,6 +913,52 @@ describe('structured route dedup and selection', () => {
   })
 })
 
+describe('cycle observer for the chat chip', () => {
+  it('reports the grant, the promotion and the settlement of one cycle', () => {
+    const value = session(); const agent = { id: value.id, session: value }
+    const seen: string[] = []
+    const router = new AutoVerifierRouter({
+      begin: (_agent, reservation) => { seen.push('begin:' + reservation.phase + ':' + String(reservation.expectedCalls)) },
+      promoted: (_agent, reservation) => { seen.push('promoted:' + reservation.phase + ':' + String(reservation.expectedCalls)) },
+      settled: (_agent, reservation, outcome) => { seen.push('settled:' + reservation.phase + ':' + outcome) },
+    })
+    const classified = router.reserve(agent, 'semantic', 'classify', 1, policy)!
+    router.promote(agent, classified, 'compare', 'resolve', 5, policy)
+    expect(router.commit(agent, classified, 3)).toBe(true)
+    // The promotion is reported on the SAME reservation, which is what lets the chip move from
+    // "classifying" to "reviewing" instead of leaving a second cycle behind.
+    expect(seen).toEqual(['begin:semantic:1', 'promoted:compare:6', 'settled:compare:committed'])
+
+    const final = router.reserve(agent, 'final', 'final', 4, policy)!
+    router.fail(agent, final, false)
+    expect(seen.at(-1)).toBe('settled:final:failed')
+  })
+
+  it('reports nothing twice when a settlement is refused', () => {
+    const value = session(); const agent = { id: value.id, session: value }
+    let settled = 0
+    const router = new AutoVerifierRouter({ settled: () => { settled += 1 } })
+    const route = router.reserve(agent, 'compare', 'route', 4, policy)!
+    expect(router.commit(agent, route, 1)).toBe(true)
+    // A second commit for the same reservation is a no-op, and must not fake an edge.
+    expect(router.commit(agent, route, 1)).toBe(false)
+    expect(settled).toBe(1)
+  })
+
+  it('lets a broken observer throw without changing routing', () => {
+    // The observer is a reporting channel: a bug in the UI path must never cost a reservation, a
+    // verdict or the ability to route again.
+    const value = session(); const agent = { id: value.id, session: value }
+    const explode = () => { throw new Error('observer exploded') }
+    const router = new AutoVerifierRouter({ begin: explode, promoted: explode, settled: explode })
+    const classified = router.reserve(agent, 'semantic', 'classify', 1, policy)!
+    expect(router.promote(agent, classified, 'track', 'resolve', 2, policy)).toBe(true)
+    expect(router.fail(agent, classified, false)).toBeUndefined()
+    // The failed cycle released the in-flight slot, so routing continues.
+    expect(router.reserve(agent, 'compare', 'next', 4, policy)).toBeDefined()
+  })
+})
+
 describe('transactional router state', () => {
   it('commits, requires final verification, and clears it only after final commit', () => {
     const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()

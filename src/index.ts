@@ -15,7 +15,7 @@ import { extractSession, sanitizeVerifierText, sessionEvents } from './session.t
 import { CriteriaResolver, type ResolvedCriteria } from './criteria.ts'
 import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, MAX_ROUTE_FEEDBACK_CHARS, type AcceptanceCriterion, type RoutedCandidateRef } from './auto.ts'
 import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, inspectRecoverySignal, latestDirectUserSeq, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type CandidateArtifact, type Reservation, type RouteDecision, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
-import type { ProcessActivityView } from './process-activity.ts'
+import { VerifierActivities, createActivityObserver, type ActivityView } from './verifier-activity.ts'
 import { ProcessCycleStore, ProcessSelector, resolveProcessFile, type ProcessCycleReport } from './process-selection.ts'
 import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, PROPOSAL_CRITERIA, buildGenerationPrompt, buildPairwisePrompt, extractScore, renderDiagnostics, renderReferenceContext, type Diagnostic, type ReviewStage } from './core.ts'
 import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from './plan-gate.ts'
@@ -198,7 +198,11 @@ export function apply(ctx: Context, config: Config = {}): void {
   // this closure, so the callback goes through a holder instead of capturing a TDZ binding.
   let clearProcessIntents: () => void = () => {}
   const current = installVerifierSettings(ctx, entry, () => { limiter = new RequestLimiter(current().maxConcurrency); clearProcessIntents() })
-  const autoRouter = new AutoVerifierRouter()
+  // ONE activity table per plugin instance: the router publishes every granted cycle into it, P06
+  // adds its own richer records, and the chat chip's RPC reads it. It is UI state only — never a
+  // verdict, never the model history (see `verifier-activity.ts` for why it is not a session event).
+  const activities = new VerifierActivities()
+  const autoRouter = new AutoVerifierRouter(createActivityObserver(activities))
   const topics = new Map<string, { dataDir: string; cache: ScoreCache; capabilities: TopLogprobCapabilityCache; flights: SingleFlight<{ value: CachedPairScore; hit: boolean }>; statistics: StatisticsStore; decisions: DecisionStore; process: ProcessCycleStore }>()
   const topic = (header: SessionHeader) => {
     const selected = current()
@@ -754,6 +758,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     sanitize: (text, maxChars) => sanitizeVerifierText(text, maxChars),
     policy: processPolicy,
     router: () => autoRouter,
+    activities,
     store: agent => topic((agent as Agent).session.header).process,
     // The whole task, not just the user's question: the judge has to judge whether the next step
     // addresses the REAL failure, which needs the constraints the request was made under, the
@@ -953,23 +958,26 @@ export function apply(ctx: Context, config: Config = {}): void {
   const isDecisionQuery = (payload: unknown): boolean => typeof payload === 'object' && payload !== null && (payload as { kind?: unknown }).kind === 'decision'
 
   /**
-   * Whether a payload asks what the process-selection (P06) cycle of one session is doing.
+   * Whether a payload asks what this plugin is doing for one session.
    *
-   * This is what the chat chip polls while a turn runs. The answer is in-memory state only: no
-   * sidecar read, no model call, and nothing durable, so polling it cannot cost anything or change
-   * a verdict. A session that never bought a cycle answers with an empty object.
+   * This is what the chat chip polls while a turn runs: a P06 cycle (which buffers the reply), a
+   * routed review, or the final acceptance. The wire name is historical — it covers every stage now,
+   * and keeping it means a page holding the older client bundle keeps working.
    */
   const isProcessQuery = (payload: unknown): boolean => typeof payload === 'object' && payload !== null && (payload as { kind?: unknown }).kind === 'process'
 
   /**
-   * Read the in-flight / just-settled process cycle of one session.
+   * Read the in-flight / just-settled cycle of one session.
+   *
+   * In-memory state only: no sidecar read, no model call, nothing durable, so polling it cannot cost
+   * anything or change a verdict. A session with nothing to show answers with an empty object.
    * @param payload - the RPC payload; `sessionId` is required.
    * @returns The activity view, or a bad-request failure.
    */
-  const handleProcessQuery = async (payload: unknown): Promise<{ ok: true; value: { sessionId: string } & ProcessActivityView } | ReturnType<typeof rpcFailure>> => {
+  const handleProcessQuery = async (payload: unknown): Promise<{ ok: true; value: { sessionId: string } & ActivityView } | ReturnType<typeof rpcFailure>> => {
     const sessionId = (payload as { sessionId?: unknown } | null)?.sessionId
     if (typeof sessionId !== 'string' || sessionId === '') return rpcFailure('a sessionId is required')
-    return rpcSuccess({ sessionId, ...processSelector.activity(sessionId) })
+    return rpcSuccess({ sessionId, ...activities.read(sessionId, Date.now()) })
   }
 
   /**

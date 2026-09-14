@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { zh, en, toolLabels, tFormat, detectLanguage, compact, dateTime, processActivityText } from './client-i18n.ts'
+import { zh, en, toolLabels, tFormat, detectLanguage, compact, dateTime, verifierActivityText } from './client-i18n.ts'
 import {
   resolveCacheDirOnSave,
   sameSettingValue,
@@ -30,26 +30,45 @@ import {
   serializeExtraJudges,
 } from './client-judges.ts'
 
-describe('process activity chip copy', () => {
-  it('says which half of the cycle is running and how many candidates there are', () => {
-    expect(processActivityText({ active: { phase: 'generating', candidates: 3 } }, zh)).toEqual({ tone: 'busy', text: '正在过程选优：生成 3 份候选…' })
-    expect(processActivityText({ active: { phase: 'comparing', candidates: 4 } }, en)).toEqual({ tone: 'busy', text: 'Selecting the best reply: judging 4 candidates…' })
+describe('activity chip copy', () => {
+  it('says which half of the process cycle is running and how many candidates there are', () => {
+    expect(verifierActivityText({ active: { stage: 'process', phase: 'generating', candidates: 3 } }, zh)).toEqual({ tone: 'busy', text: '正在过程选优：生成 3 份候选…' })
+    expect(verifierActivityText({ active: { stage: 'process', phase: 'comparing', candidates: 4 } }, en)).toEqual({ tone: 'busy', text: 'Selecting the best reply: judging 4 candidates…' })
   })
 
-  it('treats an unknown phase as work in progress and a broken count as the default pair', () => {
-    // A newer host describing a phase this build does not know must still show that something runs.
-    expect(processActivityText({ active: { phase: 'verifying', candidates: Number.NaN } }, en)?.text).toBe('Selecting the best reply: generating 2 candidates…')
+  it('names the routed phase, the decision it promoted to, and how many calls it reserved', () => {
+    expect(verifierActivityText({ active: { stage: 'route', phase: 'classifying', expectedCalls: 1 } }, zh)?.text).toBe('正在识别需要独立复核的对象…')
+    expect(verifierActivityText({ active: { stage: 'route', phase: 'reviewing', destination: 'compare', expectedCalls: 6 } }, en)?.text).toBe('Comparing the candidate replies (about 6 calls)…')
+    expect(verifierActivityText({ active: { stage: 'route', phase: 'reviewing', destination: 'select', expectedCalls: 30 } }, zh)?.text).toBe('正在为多个候选排名（约 30 次调用）…')
+    expect(verifierActivityText({ active: { stage: 'route', phase: 'reviewing', destination: 'track', expectedCalls: 9 } }, en)?.text).toBe('Reviewing task progress (about 9 calls)…')
+    // A reviewing cycle without a known destination is a comparison, not a silent row.
+    expect(verifierActivityText({ active: { stage: 'route', phase: 'reviewing' } }, zh)?.text).toBe('正在比较候选方案（约 1 次调用）…')
   })
 
-  it('maps the settled outcome onto a tone, and says nothing when there is nothing', () => {
-    expect(processActivityText({ settled: { outcome: 'replaced' } }, zh)).toEqual({ tone: 'ok', text: zh['process.replaced'] })
-    expect(processActivityText({ settled: { outcome: 'same' } }, en)).toEqual({ tone: 'ok', text: en['process.same'] })
-    expect(processActivityText({ settled: { outcome: 'failed' } }, zh)?.tone).toBe('error')
-    expect(processActivityText({ settled: { outcome: 'unknown-to-this-build' } }, zh)).toBeNull()
-    expect(processActivityText(null, zh)).toBeNull()
-    expect(processActivityText(undefined, zh)).toBeNull()
+  it('announces the final gate and its outcome, including the pass that says nothing in chat', () => {
+    expect(verifierActivityText({ active: { stage: 'final', phase: 'accepting', expectedCalls: 12 } }, en)).toEqual({ tone: 'busy', text: 'Running the final acceptance (about 12 calls)…' })
+    expect(verifierActivityText({ settled: { stage: 'final', outcome: 'accepted' } }, zh)).toEqual({ tone: 'ok', text: '最终验收通过' })
+    expect(verifierActivityText({ settled: { stage: 'final', outcome: 'rejected' } }, en)?.tone).toBe('error')
+    expect(verifierActivityText({ settled: { stage: 'final', outcome: 'unknown-to-this-build' } }, zh)).toBeNull()
+  })
+
+  it('treats an unknown phase as work in progress and a broken count as the minimum', () => {
+    // A newer host describing a phase or a stage this build does not know must still show that
+    // something is running, not disappear.
+    expect(verifierActivityText({ active: { phase: 'verifying', candidates: Number.NaN } }, en)?.text).toBe('Selecting the best reply: generating 2 candidates…')
+    expect(verifierActivityText({ active: { stage: 'route', phase: 'something-new' } }, en)?.text).toBe('Identifying what needs independent review…')
+    expect(verifierActivityText({ active: { stage: 'final', phase: 'accepting', expectedCalls: Number.NaN } }, en)?.text).toBe('Running the final acceptance (about 1 calls)…')
+  })
+
+  it('maps the settled process outcome onto a tone, and says nothing when there is nothing', () => {
+    expect(verifierActivityText({ settled: { stage: 'process', outcome: 'replaced' } }, zh)).toEqual({ tone: 'ok', text: zh['process.replaced'] })
+    expect(verifierActivityText({ settled: { outcome: 'same' } }, en)).toEqual({ tone: 'ok', text: en['process.same'] })
+    expect(verifierActivityText({ settled: { outcome: 'failed' } }, zh)?.tone).toBe('error')
+    expect(verifierActivityText({ settled: { outcome: 'unknown-to-this-build' } }, zh)).toBeNull()
+    expect(verifierActivityText(null, zh)).toBeNull()
+    expect(verifierActivityText(undefined, zh)).toBeNull()
     // An active cycle outranks a settled record; the server never sends both, but the mapping decides.
-    expect(processActivityText({ active: { phase: 'comparing', candidates: 2 }, settled: { outcome: 'kept' } }, en)?.tone).toBe('busy')
+    expect(verifierActivityText({ active: { stage: 'process', phase: 'comparing', candidates: 2 }, settled: { stage: 'final', outcome: 'accepted' } }, en)?.tone).toBe('busy')
   })
 })
 

@@ -173,16 +173,18 @@ export declare function RightSidebarVerifierPanel({ rpc, sessionId }: {
 }): import("react").JSX.Element;
 export declare function RightSidebarVerifierTitle(): import("react").JSX.Element;
 export declare const inject: string[];
-/** Poll interval of the process-selection chip while a turn runs (the answer is in-memory). */
-export declare const PROCESS_ACTIVITY_POLL_MS = 1000;
+/** Poll interval of the chat chip while a turn runs (the answer is in-memory and cheap). */
+export declare const VERIFIER_ACTIVITY_POLL_MS = 1000;
 /**
- * The chat-visible half of P06: what the bought cycle is doing while the reply is being buffered.
+ * The chat-visible half of the automatic stages: what the plugin is doing for this session right now.
  *
- * Polls only while a read can change the answer — while the turn runs, and while a settled cycle is
- * still inside its server-side TTL — so an idle conversation makes no requests at all.
+ * It answers the pauses the chat cannot explain: a P06 cycle buffers the reply, a routed review and
+ * the final acceptance hold the turn open while the judges run, and a PASSING acceptance otherwise
+ * says nothing at all. Polls only while a read can change the answer — while the turn runs, and
+ * while something is still being shown — so an idle conversation makes no requests.
  * @param props - the input-dock owner values (the session snapshot) plus the injected RPC handle.
  */
-export declare function ProcessActivityChip({ session, rpc }: {
+export declare function VerifierActivityChip({ session, rpc }: {
     session?: {
         sessionId?: unknown;
         running?: unknown;

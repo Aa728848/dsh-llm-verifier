@@ -438,13 +438,35 @@ export declare function semanticDecision(output: SemanticRouteOutput, events: re
 export declare function routedRepeats(decision: RouteDecision, configured: number, trackRepeats?: number): number;
 export declare function estimateRoutedCalls(decision: RouteDecision, repeats: number, criteriaCount: number): number;
 export declare function boundDecision(decision: RouteDecision | undefined, policy: RouterPolicy): RouteDecision | undefined;
+/**
+ * Advisory observer of granted routing cycles, used by the chat indicator.
+ *
+ * The router is the only component that knows a cycle was GRANTED and when it settled, but it must
+ * not know what the UI says about it. Every callback is optional and exception-safe: an observer is
+ * a reporting channel, and it must never be able to change routing, budgets or verdicts.
+ */
+export interface RouterCycleObserver {
+    /** A cycle was granted (the reservation now owns the agent's in-flight slot). */
+    begin?(agent: RoutedAgent, reservation: Reservation): void;
+    /** A classification cycle was promoted into the decision it resolved, on the same reservation. */
+    promoted?(agent: RoutedAgent, reservation: Reservation): void;
+    /** The cycle was committed (accepted) or failed (rejected / abandoned). */
+    settled?(agent: RoutedAgent, reservation: Reservation, outcome: 'committed' | 'failed'): void;
+}
 export declare class AutoVerifierRouter {
+    private readonly observer?;
     private readonly states;
     /** Agent ids that already received this task's budget-exhaustion notice. */
     private readonly exhaustedNotices;
     private serial;
     /** Namespace for this router's cycle ids; unique per router and per process incarnation. */
     private readonly instance;
+    /**
+     * @param observer - optional reporting channel for the chat indicator.
+     */
+    constructor(observer?: RouterCycleObserver | undefined);
+    /** Report one lifecycle edge, swallowing anything the observer throws. */
+    private observe;
     private state;
     reserve(agent: RoutedAgent, phase: RoutePhase, fingerprint: string, expectedCalls: number, policy: RouterPolicy): Reservation | undefined;
     /**

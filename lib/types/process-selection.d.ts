@@ -19,7 +19,7 @@ import { type GenerateOptions, type Message, type StreamChunk } from '@deepseek-
 import { type UsageStats } from './caller.ts';
 import { type Criterion } from './core.ts';
 import { type CompareResult, type RunStats, type SelectResult } from './engine.ts';
-import { type ProcessActivityView } from './process-activity.ts';
+import { VerifierActivities, type ActivityView } from './verifier-activity.ts';
 import { type AutoVerifierRouter, type RouterPolicy } from './router.ts';
 import type { RouteObservation } from './statistics.ts';
 /**
@@ -188,6 +188,13 @@ export interface ProcessSelectorDeps {
     /** The routing policy in force, including the final-acceptance floor and the process allowance. */
     policy(): Promise<RouterPolicy>;
     router(): AutoVerifierRouter;
+    /**
+     * Shared activity table the router's cycles and these P06 cycles are published to.
+     *
+     * Injected so one plugin instance has ONE table: the chip's read must see a routed review and a
+     * process cycle in the same place. Defaults to a private table, which is all a focused test needs.
+     */
+    activities?: VerifierActivities;
     /** Durable cycle log of one topic. */
     store(agent: unknown): ProcessCycleStore;
     /** Newest session state, used for staleness and for the comparison's task evidence. */
@@ -468,15 +475,18 @@ export declare class ProcessSelector {
      *
      * Host-only and in memory: a session event would carry the same information, but the persistence
      * read path refuses unknown event types for an out-of-repo plugin, and `Session.append` cannot
-     * set the `ignorable` marker that would make one loadable (see `process-activity.ts`).
+     * set the `ignorable` marker that would make one loadable (see `verifier-activity.ts`).
      */
     private readonly activities;
     constructor(deps: ProcessSelectorDeps);
     /**
      * The cycle one session has to show right now, for the UI chip (in flight, or just settled).
+     *
+     * Reads the SAME table the router publishes into, so a routed review and a process cycle are never
+     * two different answers to "what is this session doing".
      * @param sessionId - the session to read.
      */
-    activity(sessionId: string): ProcessActivityView;
+    activity(sessionId: string): ActivityView;
     /** Register (or replace) the pending intent of one session. */
     register(intent: ProcessIntent): void;
     /** Drop a session's pending intent and cancel its in-flight cycle (new task, disposal). */
