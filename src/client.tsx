@@ -3,7 +3,7 @@ import type { ModelProviderGroup, SettingsNamespaceView } from '@deepseek-ai/dsh
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-import { Button, IconDataOutline16, IconRefreshOutline16, Input } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconDataOutline16, IconRefreshOutline16, Input, StateDot, type StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage,
@@ -145,7 +145,7 @@ const sectionTitle: React.CSSProperties = { display: 'flex', alignItems: 'center
 const sectionHeadingStyle: React.CSSProperties = { fontSize: 14, fontWeight: 500, lineHeight: '22px' }
 const sectionSummaryStyle: React.CSSProperties = { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: '1 1 auto' }
 const badgeStyle: React.CSSProperties = { flex: '0 0 auto', padding: '0 6px', borderRadius: 999, fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)', border: '1px solid var(--dsw-alias-border-l2)' }
-const linkButton: React.CSSProperties = { border: 0, background: 'transparent', padding: 0, font: 'inherit', fontSize: 12, lineHeight: '18px', cursor: 'pointer', color: 'var(--dsw-alias-brand-primary, #4f8cff)' }
+const linkButton: React.CSSProperties = { border: 0, background: 'transparent', padding: 0, font: 'inherit', fontSize: 12, lineHeight: '18px', cursor: 'pointer', color: 'var(--dsw-alias-link)' }
 const row: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px 24px', minHeight: 56, padding: '10px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)' }
 const labelCell: React.CSSProperties = { flex: '1 1 220px', minWidth: 0 }
 const controlCell: React.CSSProperties = { flex: '0 1 268px', minWidth: 170, display: 'flex', justifyContent: 'flex-end' }
@@ -153,16 +153,33 @@ const fieldTitle: React.CSSProperties = { fontSize: 14, fontWeight: 400, lineHei
 const fieldHelp: React.CSSProperties = { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)', marginTop: 2 }
 const fullLine: React.CSSProperties = { flex: '1 1 100%', margin: '0 0 2px', fontSize: 12, lineHeight: '18px' }
 const unitStyle: React.CSSProperties = { flex: '0 0 auto', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }
-const sliderStyle: React.CSSProperties = { width: '100%', margin: 0, accentColor: 'var(--dsw-alias-brand-primary, #4f8cff)' }
+const sliderStyle: React.CSSProperties = { width: '100%', margin: 0, accentColor: 'var(--dsw-alias-state-business-primary)' }
 const toolbarStyle: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '10px 0', borderTop: '1px solid var(--dsw-alias-border-l2)' }
 const summaryLineStyle: React.CSSProperties = { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' }
-const stickyBar: React.CSSProperties = { position: 'sticky', bottom: 0, zIndex: 5, display: 'flex', flexDirection: 'column', gap: 6, padding: '10px 0 12px', borderTop: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-alias-bg-module, #171925)', boxShadow: '0 -10px 24px rgba(0,0,0,.18)' }
+const stickyBar: React.CSSProperties = { position: 'sticky', bottom: 0, zIndex: 5, display: 'flex', flexDirection: 'column', gap: 6, padding: '10px 0 12px', borderTop: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-alias-bg-module-platform)', boxShadow: '0 -10px 24px var(--dsw-alias-bg-mask-2)' }
 const statusStyle: React.CSSProperties = { fontSize: 12, lineHeight: '18px', display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'wrap' }
-const selectStyle: React.CSSProperties = { boxSizing: 'border-box', width: '100%', height: 36, padding: '0 34px 0 12px', borderRadius: 8, color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-input)', border: '1px solid var(--dsw-alias-border-l2)', font: 'inherit', fontSize: 14, lineHeight: '22px', outline: 'none' }
-const toggleStyle = (enabled: boolean): React.CSSProperties => ({ position: 'relative', flex: '0 0 auto', width: 40, height: 22, padding: 0, border: 0, borderRadius: 999, cursor: 'pointer', transition: 'background .15s ease', background: enabled ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-bg-input)' })
-const toggleThumbStyle = (enabled: boolean): React.CSSProperties => ({ position: 'absolute', top: 3, left: enabled ? 21 : 3, width: 16, height: 16, borderRadius: '50%', background: 'var(--dsw-static-neutral-00, #fff)', boxShadow: '0 1px 3px rgba(0,0,0,.28)', transition: 'left .15s ease' })
-const dashboardCard: React.CSSProperties = { border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.13))', background: 'color-mix(in srgb, var(--dsw-alias-bg-module, #171925) 88%, transparent)', borderRadius: 16, boxShadow: '0 12px 36px rgba(0,0,0,.12)' }
-const muted: React.CSSProperties = { color: 'var(--dsw-text-secondary)', fontSize: 12 }
+const selectStyle: React.CSSProperties = { boxSizing: 'border-box', width: '100%', height: 36, padding: '0 34px 0 12px', borderRadius: 8, color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-specific-input-major)', border: '1px solid var(--dsw-alias-border-l2)', font: 'inherit', fontSize: 14, lineHeight: '22px', outline: 'none' }
+const toggleStyle = (enabled: boolean): React.CSSProperties => ({ position: 'relative', flex: '0 0 auto', width: 40, height: 22, padding: 0, border: 0, borderRadius: 999, cursor: 'pointer', transition: 'background .15s ease', background: enabled ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-specific-input-major)' })
+const toggleThumbStyle = (enabled: boolean): React.CSSProperties => ({ position: 'absolute', top: 3, left: enabled ? 21 : 3, width: 16, height: 16, borderRadius: '50%', background: 'var(--dsw-static-neutral-00)', boxShadow: '0 1px 3px rgba(0,0,0,.28)', transition: 'left .15s ease' })
+const dashboardCard: React.CSSProperties = { border: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-alias-bg-module-platform)', borderRadius: 16, boxShadow: '0 12px 36px var(--dsw-alias-bg-mask-2)' }
+const muted: React.CSSProperties = { color: 'var(--dsw-alias-label-tertiary)', fontSize: 12 }
+/** Chart palette rides the state aliases so bars and line stay legible in both themes. */
+const chartBarColor = 'var(--dsw-alias-state-business-primary)'
+const chartLineColor = 'var(--dsw-alias-state-warn-primary)'
+/** Status chip tones; each one mixes its own state token, so a fill, a ring and its text move together. */
+type StatusTone = 'pass' | 'warn' | 'error' | 'neutral'
+function toneChip(tone: StatusTone): React.CSSProperties {
+  const token = tone === 'error' ? 'var(--dsw-alias-state-error-primary)'
+    : tone === 'warn' ? 'var(--dsw-alias-state-warn-primary)'
+      : tone === 'pass' ? 'var(--dsw-alias-state-success-primary)'
+        : 'var(--dsw-alias-state-business-primary)'
+  return {
+    background: `color-mix(in srgb, ${token} 14%, transparent)`,
+    border: `1px solid color-mix(in srgb, ${token} 32%, transparent)`,
+    // Amber's 500 step is a fill; its 600 step is the readable text rung.
+    color: tone === 'warn' ? 'var(--dsw-alias-state-warn-label)' : token,
+  }
+}
 const toolColors: Record<string, string> = { verifier_route_classify: '#d97706', verifier_compare: '#4f8cff', verifier_select: '#8b6df6', verifier_track: '#2fc5c9', verifier_best_of_n: '#e2569b', verifier_current_session: '#f5a524' }
 
 function record(value: unknown): Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {} }
@@ -478,8 +495,8 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
       const first = preset[0]
       if (!first) return null
       return <details style={{ margin: '2px 0 6px 4px', fontSize: 12 }}>
-        <summary style={{ cursor: 'pointer', color: 'var(--dsw-text-secondary)' }}>{tFormat(t['field.criteriaPreset.previewSummary'], { count: preset.length })}</summary>
-        <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 240, overflow: 'auto', background: 'var(--dsw-surface-sunken)', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.12))', borderRadius: 8, padding: 10, marginTop: 8 }}>{buildPairwisePrompt(t['field.criteriaPreset.sampleTask'], t['field.criteriaPreset.sampleA'], t['field.criteriaPreset.sampleB'], first, DEFAULT_GROUND_TRUTH_NOTE)}</pre>
+        <summary style={{ cursor: 'pointer', color: 'var(--dsw-alias-label-secondary)' }}>{tFormat(t['field.criteriaPreset.previewSummary'], { count: preset.length })}</summary>
+        <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 240, overflow: 'auto', background: 'var(--dsw-alias-markdown-code-block)', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 8, padding: 10, marginTop: 8 }}>{buildPairwisePrompt(t['field.criteriaPreset.sampleTask'], t['field.criteriaPreset.sampleA'], t['field.criteriaPreset.sampleB'], first, DEFAULT_GROUND_TRUTH_NOTE)}</pre>
       </details>
     })() : null
     return <Fragment key={String(field.key)}>
@@ -549,7 +566,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
       </section>
     })}
 
-    {loaded.failures.length > 0 && <div style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--dsw-alias-state-warn-bg)', color: 'var(--dsw-alias-state-warn-label)', fontSize: 12, lineHeight: '18px' }}>
+    {loaded.failures.length > 0 && <div style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--dsw-alias-state-warn-tertiary)', color: 'var(--dsw-alias-state-warn-label)', fontSize: 12, lineHeight: '18px' }}>
       <div style={{ fontWeight: 500, marginBottom: 3 }}>{t['settings.catalogFailures']}</div>
       {loaded.failures.map(failure => <div key={failure}>{failure}</div>)}
     </div>}
@@ -585,11 +602,11 @@ function TrendChart({ daily, days, lang }:{daily:DailyStatistics[];days:number;l
   const max=Math.max(1,...rows.flatMap(row=>[row.invocations,row.calls]));const x=(index:number)=>pad.l+(rows.length<=1?innerW/2:index*innerW/(rows.length-1));const y=(value:number)=>pad.t+innerH-value/max*innerH
   const points=rows.map((row,index)=>`${x(index)},${y(row.calls)}`).join(' ');const step=rows.length>16?Math.ceil(rows.length/7):Math.max(1,Math.ceil(rows.length/7));const barWidth=Math.max(3,Math.min(18,innerW/Math.max(rows.length,1)*.55))
   return <div style={{width:'100%',overflowX:'auto'}}><svg viewBox={`0 0 ${width} ${height}`} style={{display:'block',width:'100%',minWidth:620,height:'auto'}} aria-label={t['chart.ariaLabel']}>
-    {[0,.25,.5,.75,1].map(ratio=><g key={ratio}><line x1={pad.l} x2={width-pad.r} y1={pad.t+innerH*ratio} y2={pad.t+innerH*ratio} stroke="rgba(148,163,184,.16)"/><text x={pad.l-8} y={pad.t+innerH*ratio+4} textAnchor="end" fontSize="10" fill="var(--dsw-text-secondary)">{Math.round(max*(1-ratio))}</text></g>)}
-    {rows.map((row,index)=><rect key={row.date} x={x(index)-barWidth/2} y={y(row.invocations)} width={barWidth} height={pad.t+innerH-y(row.invocations)} rx="2" fill="#4f8cff" opacity=".82"/>)}
-    <polyline points={points} fill="none" stroke="#5ed7e8" strokeWidth="2.4" strokeLinejoin="round" strokeLinecap="round"/>
-    {rows.map((row,index)=>index%step===0||index===rows.length-1?<text key={row.date} x={x(index)} y={height-14} textAnchor="middle" fontSize="10" fill="var(--dsw-text-secondary)">{Number(row.date.slice(5,7))}/{Number(row.date.slice(8,10))}</text>:null)}
-  </svg><div style={{display:'flex',justifyContent:'center',gap:18,...muted}}><span><i style={{display:'inline-block',width:8,height:8,borderRadius:2,background:'#4f8cff',marginRight:6}}/>{t['chart.legendToolCalls']}</span><span><i style={{display:'inline-block',width:14,height:2,background:'#5ed7e8',marginRight:6,verticalAlign:'middle'}}/>{t['chart.legendModelCalls']}</span></div></div>
+    {[0,.25,.5,.75,1].map(ratio=><g key={ratio}><line x1={pad.l} x2={width-pad.r} y1={pad.t+innerH*ratio} y2={pad.t+innerH*ratio} stroke="var(--dsw-alias-border-l2)"/><text x={pad.l-8} y={pad.t+innerH*ratio+4} textAnchor="end" fontSize="10" fill="var(--dsw-alias-label-secondary)">{Math.round(max*(1-ratio))}</text></g>)}
+    {rows.map((row,index)=><rect key={row.date} x={x(index)-barWidth/2} y={y(row.invocations)} width={barWidth} height={pad.t+innerH-y(row.invocations)} rx="2" fill={chartBarColor} opacity=".82"/>)}
+    <polyline points={points} fill="none" stroke={chartLineColor} strokeWidth="2.4" strokeLinejoin="round" strokeLinecap="round"/>
+    {rows.map((row,index)=>index%step===0||index===rows.length-1?<text key={row.date} x={x(index)} y={height-14} textAnchor="middle" fontSize="10" fill="var(--dsw-alias-label-secondary)">{Number(row.date.slice(5,7))}/{Number(row.date.slice(8,10))}</text>:null)}
+  </svg><div style={{display:'flex',justifyContent:'center',gap:18,...muted}}><span><i style={{display:'inline-block',width:8,height:8,borderRadius:2,background:chartBarColor,marginRight:6}}/>{t['chart.legendToolCalls']}</span><span><i style={{display:'inline-block',width:14,height:2,background:chartLineColor,marginRight:6,verticalAlign:'middle'}}/>{t['chart.legendModelCalls']}</span></div></div>
 }
 
 export function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: StatisticsPageProps) {
@@ -764,12 +781,12 @@ export function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: 
   }, [days, sessionOnly, sessionId, refresh, rpc, t, queryKey])
 
   const totals = data?.totals
-  return <main style={{ height: '100%', overflow: 'auto', boxSizing: 'border-box', padding: '22px clamp(16px, 3vw, 38px) 48px', color: 'var(--dsw-text-primary)', background: 'radial-gradient(circle at 10% 0%, rgba(115,77,255,.09), transparent 32%), radial-gradient(circle at 100% 8%, rgba(47,197,201,.07), transparent 28%)' }}>
+  return <main style={{ height: '100%', overflow: 'auto', boxSizing: 'border-box', padding: '22px clamp(16px, 3vw, 38px) 48px', color: 'var(--dsw-alias-label-primary)', background: 'radial-gradient(circle at 10% 0%, rgba(115,77,255,.09), transparent 32%), radial-gradient(circle at 100% 8%, rgba(47,197,201,.07), transparent 28%)' }}>
     <div style={{ maxWidth: 1180, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 16 }}>
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ display: 'grid', placeItems: 'center', width: 34, height: 34, borderRadius: 10, background: 'rgba(79,140,255,.14)', color: '#6da0ff' }}>
+            <span style={{ display: 'grid', placeItems: 'center', width: 34, height: 34, borderRadius: 10, background: 'color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent)', color: 'var(--dsw-alias-state-business-primary)' }}>
               <IconDataOutline16 size={18} />
             </span>
             <h2 style={{ margin: 0, fontSize: 23 }}>{isGlobal ? t['global.panelTitle'] : t['stats.pageTitle']}</h2>
@@ -777,24 +794,24 @@ export function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: 
           <p style={{ margin: '7px 0 0 44px', ...muted }}>{isGlobal ? t['global.panelIntro'] : tFormat(t['stats.updatedAt'], { time: data ? dateTime(data.generatedAt, lang) : '--' })}</p>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', padding: 3, borderRadius: 10, background: 'var(--dsw-surface-sunken)', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.12))' }}>
-            {[7, 30, 90].map(value => <button key={value} aria-pressed={days === value} onClick={() => setDays(value)} style={{ border: 0, borderRadius: 7, padding: '6px 10px', cursor: 'pointer', color: days === value ? '#fff' : 'var(--dsw-text-secondary)', background: days === value ? '#3f68d8' : 'transparent' }}>{tFormat(t['stats.daysUnit'], { days: value })}</button>)}
+          <div style={{ display: 'flex', padding: 3, borderRadius: 10, background: 'var(--dsw-alias-bg-multi-select)', border: '1px solid var(--dsw-alias-border-l2)' }}>
+            {[7, 30, 90].map(value => <button key={value} aria-pressed={days === value} onClick={() => setDays(value)} style={{ border: 0, borderRadius: 7, padding: '6px 10px', cursor: 'pointer', color: days === value ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-label-secondary)', background: days === value ? 'color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, transparent)' : 'transparent' }}>{tFormat(t['stats.daysUnit'], { days: value })}</button>)}
           </div>
-          {Boolean(sessionId) && <button aria-pressed={sessionOnly} onClick={() => setSessionOnly(value => !value)} style={{ border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.15))', borderRadius: 9, padding: '7px 11px', cursor: 'pointer', color: 'var(--dsw-text-primary)', background: sessionOnly ? 'rgba(79,140,255,.18)' : 'var(--dsw-surface-sunken)' }}>{sessionOnly ? t['stats.currentSession'] : t['stats.allSessions']}</button>}
-          <button type="button" disabled={probe?.busy === true} onClick={() => void runProbe()} style={{ border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.15))', borderRadius: 9, padding: '7px 11px', cursor: 'pointer', color: 'var(--dsw-text-primary)', background: 'var(--dsw-surface-sunken)' }}>{probe?.busy === true ? t['probe.running'] : t['probe.button']}</button>
-          <button title={t['stats.refresh']} onClick={() => setRefresh(value => value + 1)} style={{ display: 'grid', placeItems: 'center', width: 34, height: 34, borderRadius: 9, border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.15))', color: 'var(--dsw-text-primary)', background: 'var(--dsw-surface-sunken)', cursor: 'pointer' }}><IconRefreshOutline16 size={16} /></button>
+          {Boolean(sessionId) && <button aria-pressed={sessionOnly} onClick={() => setSessionOnly(value => !value)} style={{ border: '1px solid var(--dsw-alias-border-l3)', borderRadius: 9, padding: '7px 11px', cursor: 'pointer', color: sessionOnly ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-label-primary)', background: sessionOnly ? 'color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent)' : 'var(--dsw-alias-interactive-bg-hover)' }}>{sessionOnly ? t['stats.currentSession'] : t['stats.allSessions']}</button>}
+          <button type="button" disabled={probe?.busy === true} onClick={() => void runProbe()} style={{ border: '1px solid var(--dsw-alias-border-l3)', borderRadius: 9, padding: '7px 11px', cursor: 'pointer', color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-interactive-bg-hover)' }}>{probe?.busy === true ? t['probe.running'] : t['probe.button']}</button>
+          <button title={t['stats.refresh']} onClick={() => setRefresh(value => value + 1)} style={{ display: 'grid', placeItems: 'center', width: 34, height: 34, borderRadius: 9, border: '1px solid var(--dsw-alias-border-l3)', color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-interactive-bg-hover)', cursor: 'pointer' }}><IconRefreshOutline16 size={16} /></button>
         </div>
       </header>
-      {error && <div style={{ ...dashboardCard, padding: 18, borderColor: 'var(--dsw-danger, #e85858)', color: 'var(--dsw-danger, #e85858)' }}>{error}<div style={{ ...muted, marginTop: 6 }}>{t['stats.hostRestartHint']}</div></div>}
+      {error && <div style={{ ...dashboardCard, padding: 18, borderColor: 'var(--dsw-alias-state-error-primary)', color: 'var(--dsw-alias-state-error-primary)' }}>{error}<div style={{ ...muted, marginTop: 6 }}>{t['stats.hostRestartHint']}</div></div>}
       {probe !== null && <section style={{ ...dashboardCard, padding: '16px 18px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><strong>{t['probe.title']}</strong><span style={muted}>{t['probe.note']}</span></div>
-        {probe.error !== undefined && <div style={{ marginTop: 10, fontSize: 12, color: '#e76565' }}>{probe.error}</div>}
+        {probe.error !== undefined && <div style={{ marginTop: 10, fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' }}>{probe.error}</div>}
         {probe.value !== undefined && <>
           <div style={{ ...muted, marginTop: 8 }}>{tFormat(t['probe.rubric'], { source: probe.value.rubric.source, count: probe.value.rubric.count, file: probe.value.rubric.file ?? '' })}</div>
-          {probe.value.rubric.error !== undefined && <div style={{ marginTop: 6, fontSize: 12, color: '#e3bd63' }}>{tFormat(t['probe.rubricFallback'], { error: probe.value.rubric.error })}</div>}
+          {probe.value.rubric.error !== undefined && <div style={{ marginTop: 6, fontSize: 12, color: 'var(--dsw-alias-state-warn-label)' }}>{tFormat(t['probe.rubricFallback'], { error: probe.value.rubric.error })}</div>}
           <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {probe.value.judges.map(judge => <div key={judge.label + judge.model} style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', fontSize: 12, padding: '9px 11px', borderRadius: 9, background: 'var(--dsw-surface-sunken)' }}>
-              <span style={{ color: judge.ok ? '#77d49b' : '#e76565', fontWeight: 600 }}>{judge.ok ? 'OK' : t['probe.failed']}</span>
+            {probe.value.judges.map(judge => <div key={judge.label + judge.model} style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', fontSize: 12, padding: '9px 11px', borderRadius: 9, background: 'var(--dsw-alias-interactive-bg-hover)' }}>
+              <span style={{ color: judge.ok ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)', fontWeight: 600 }}>{judge.ok ? 'OK' : t['probe.failed']}</span>
               <strong>{judge.label}</strong>
               <span style={muted}>{judge.provider}/{judge.model}</span>
               {judge.ok ? <>
@@ -802,7 +819,7 @@ export function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: 
                 {judge.scoreA !== undefined && judge.scoreB !== undefined && <span style={muted}>{tFormat(t['probe.scores'], { a: formatPercentage(judge.scoreA), b: formatPercentage(judge.scoreB) })}</span>}
                 <span style={muted}>{tFormat(t['probe.latency'], { ms: String(judge.latencyMs) })}</span>
                 {judge.calls !== undefined && <span style={muted}>{tFormat(t['probe.calls'], { calls: String(judge.calls) })}</span>}
-              </> : <span style={{ color: '#e76565' }}>{judge.error}</span>}
+              </> : <span style={{ color: 'var(--dsw-alias-state-error-primary)' }}>{judge.error}</span>}
             </div>)}
           </div>
         </>}
@@ -815,46 +832,46 @@ export function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: 
             <div style={muted}>{tFormat(t['stats.callsSummary'], { invocations: compact(totals?.invocations ?? 0, lang), calls: compact(totals?.calls ?? 0, lang) })}</div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '9px 16px', fontSize: 13 }}>
-            <span style={muted}>{t['stats.successCalls']}</span><strong>{compact(totals?.successes ?? 0, lang)} <small style={{ color: '#77d49b' }}>▲ {((totals?.successRate ?? 0) * 100).toFixed(1)}%</small></strong>
+            <span style={muted}>{t['stats.successCalls']}</span><strong>{compact(totals?.successes ?? 0, lang)} <small style={{ color: 'var(--dsw-alias-state-success-primary)' }}>▲ {((totals?.successRate ?? 0) * 100).toFixed(1)}%</small></strong>
             <span style={muted}>{t['stats.failedCalls']}</span><strong>{compact(totals?.failures ?? 0, lang)}</strong>
             <span style={muted}>{t['stats.avgDuration']}</span><strong>{duration(totals?.averageDurationMs ?? 0)}</strong>
           </div>
         </section>
         <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: 12 }}>
-          <Metric label={t['metric.cacheHitRate']} value={((totals?.cacheHitRate ?? 0) * 100).toFixed(1) + '%'} note={tFormat(t['metric.cacheHitNote'], { hits: compact(totals?.cacheHits ?? 0, lang), total: compact((totals?.cacheHits ?? 0) + (totals?.cacheMisses ?? 0), lang) })} accent="#b7dd64" />
+          <Metric label={t['metric.cacheHitRate']} value={((totals?.cacheHitRate ?? 0) * 100).toFixed(1) + '%'} note={tFormat(t['metric.cacheHitNote'], { hits: compact(totals?.cacheHits ?? 0, lang), total: compact((totals?.cacheHits ?? 0) + (totals?.cacheMisses ?? 0), lang) })} accent="var(--dsw-alias-state-success-primary)" />
           <Metric label={t['metric.prefixCacheHitRate']} value={((totals?.prefixCacheHitRate ?? 0) * 100).toFixed(1) + '%'} note={tFormat(t['metric.prefixCacheHitNote'], { cached: compact(totals?.cachedInputTokens ?? 0, lang), input: compact((totals?.inputTokens ?? 0) + (totals?.cachedInputTokens ?? 0), lang) })} />
           <Metric label={t['metric.tokens']} value={compact(totals?.tokens ?? 0, lang)} note={tFormat(t['metric.tokensNote'], { input: compact((totals?.inputTokens ?? 0) + (totals?.cachedInputTokens ?? 0), lang), output: compact(totals?.outputTokens ?? 0, lang) })} />
           <Metric label={t['metric.avgModelCalls']} value={(totals?.invocations ?? 0) > 0 ? ((totals?.calls ?? 0) / (totals?.invocations ?? 1)).toFixed(1) : '0'} note={tFormat(t['metric.avgModelCallsNote'], { attempts: compact(totals?.attempts ?? 0, lang), retries: compact(totals?.retries ?? 0, lang) })} />
           <Metric label={t['metric.scoringMode']} value={compact(totals?.topLogprobScores ?? 0, lang)} note={tFormat(t['metric.scoringModeNote'], { explicit: compact(totals?.explicitTagScores ?? 0, lang) })} />
         </section>
         <section style={{ ...dashboardCard, padding: '18px 20px 16px' }}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}><strong>{t['chart.title']}</strong><span style={muted}>{sessionOnly ? t['stats.currentSession'] : t['stats.allSessions']}</span></div><TrendChart daily={data?.daily ?? []} days={days} lang={lang} /></section>
-        <section style={{ ...dashboardCard, padding: '18px 18px 8px', overflow: 'hidden' }}><div style={{ display: 'flex', justifyContent: 'space-between', margin: '0 2px 12px' }}><strong>{t['table.title']}</strong><span style={muted}>{tFormat(t['table.toolCount'], { count: (data?.tools ?? []).length })}</span></div><div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 760 }}><thead><tr style={{ textAlign: 'left', color: 'var(--dsw-text-secondary)', background: 'var(--dsw-surface-sunken)' }}>{[t['table.colTool'], t['table.colInvocations'], t['table.colSuccessRate'], t['table.colAvgDuration'], t['table.colModelCalls'], t['table.colTokens'], t['table.colCacheHits'], t['table.colEstimatedCost']].map(value => <th key={value} style={{ padding: '10px 12px', fontWeight: 500 }}>{value}</th>)}</tr></thead><tbody>{(data?.tools ?? []).map(tool => <tr key={tool.toolName} style={{ borderTop: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.1))' }}><td style={{ padding: '13px 12px' }}><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: toolColors[tool.toolName] ?? '#8691a8', marginRight: 8 }} /><strong>{labels[tool.toolName] ?? tool.toolName}</strong><div style={{ ...muted, margin: '3px 0 0 16px' }}>{tool.toolName}</div></td><td style={{ padding: '13px 12px' }}>{compact(tool.invocations, lang)}</td><td style={{ padding: '13px 12px', color: tool.successRate >= .9 ? '#77d49b' : tool.successRate >= .7 ? '#e3bd63' : '#ed7777' }}>{(tool.successRate * 100).toFixed(1)}%</td><td style={{ padding: '13px 12px' }}>{duration(tool.averageDurationMs)}</td><td style={{ padding: '13px 12px' }}>{compact(tool.calls, lang)}</td><td style={{ padding: '13px 12px' }}>{compact(tool.tokens, lang)}</td><td style={{ padding: '13px 12px' }}>{tool.cacheHits}/{tool.cacheHits + tool.cacheMisses}</td><td style={{ padding: '13px 12px' }}>{money(tool.estimatedCostUsd)}</td></tr>)}{(data?.tools.length ?? 0) === 0 && <tr><td colSpan={8} style={{ padding: 28, textAlign: 'center', ...muted }}>{t['table.empty']}</td></tr>}</tbody></table></div></section>
+        <section style={{ ...dashboardCard, padding: '18px 18px 8px', overflow: 'hidden' }}><div style={{ display: 'flex', justifyContent: 'space-between', margin: '0 2px 12px' }}><strong>{t['table.title']}</strong><span style={muted}>{tFormat(t['table.toolCount'], { count: (data?.tools ?? []).length })}</span></div><div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 760 }}><thead><tr style={{ textAlign: 'left', color: 'var(--dsw-alias-label-secondary)', background: 'var(--dsw-alias-interactive-bg-hover)' }}>{[t['table.colTool'], t['table.colInvocations'], t['table.colSuccessRate'], t['table.colAvgDuration'], t['table.colModelCalls'], t['table.colTokens'], t['table.colCacheHits'], t['table.colEstimatedCost']].map(value => <th key={value} style={{ padding: '10px 12px', fontWeight: 500 }}>{value}</th>)}</tr></thead><tbody>{(data?.tools ?? []).map(tool => <tr key={tool.toolName} style={{ borderTop: '1px solid var(--dsw-alias-border-l2)' }}><td style={{ padding: '13px 12px' }}><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: toolColors[tool.toolName] ?? '#8691a8', marginRight: 8 }} /><strong>{labels[tool.toolName] ?? tool.toolName}</strong><div style={{ ...muted, margin: '3px 0 0 16px' }}>{tool.toolName}</div></td><td style={{ padding: '13px 12px' }}>{compact(tool.invocations, lang)}</td><td style={{ padding: '13px 12px', color: tool.successRate >= .9 ? 'var(--dsw-alias-state-success-primary)' : tool.successRate >= .7 ? 'var(--dsw-alias-state-warn-label)' : 'var(--dsw-alias-state-error-primary)' }}>{(tool.successRate * 100).toFixed(1)}%</td><td style={{ padding: '13px 12px' }}>{duration(tool.averageDurationMs)}</td><td style={{ padding: '13px 12px' }}>{compact(tool.calls, lang)}</td><td style={{ padding: '13px 12px' }}>{compact(tool.tokens, lang)}</td><td style={{ padding: '13px 12px' }}>{tool.cacheHits}/{tool.cacheHits + tool.cacheMisses}</td><td style={{ padding: '13px 12px' }}>{money(tool.estimatedCostUsd)}</td></tr>)}{(data?.tools.length ?? 0) === 0 && <tr><td colSpan={8} style={{ padding: 28, textAlign: 'center', ...muted }}>{t['table.empty']}</td></tr>}</tbody></table></div></section>
         <section style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(290px,.45fr)', gap: 16, alignItems: 'start' }}><div style={{ ...dashboardCard, padding: '18px 18px 8px', overflow: 'hidden' }}><div style={{ display: 'flex', justifyContent: 'space-between', margin: '0 2px 12px' }}><strong>{t['recent.title']}</strong><span style={muted}>{t['recent.maxCount']}</span></div><div style={{ maxHeight: 360, overflow: 'auto' }}>{(data?.recent ?? []).map(item => {
             const verdictInfo = item.verdict ? formatVerdictDetails(item.verdict, t) : undefined
             const failed = !item.success || (verdictInfo ? verdictInfo.isFailed : false)
             const detailsOpen = openDetails === item.id
-            const panelStyle: React.CSSProperties = { margin: '8px 0 0 15px', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))', borderRadius: 8, padding: '8px 10px', background: 'var(--dsw-surface-sunken)', fontSize: 11 }
+            const panelStyle: React.CSSProperties = { margin: '8px 0 0 15px', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8, padding: '8px 10px', background: 'var(--dsw-alias-interactive-bg-hover)', fontSize: 11 }
             // The row is a column: identity plus timing on the first line, then the two controls on
             // one line, then whichever panel they opened. Panels therefore span the whole row
             // instead of being squeezed into the identity column.
-            return <div key={item.id} style={{ padding: '11px 8px', borderTop: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.1))' }}>
+            return <div key={item.id} style={{ padding: '11px 8px', borderTop: '1px solid var(--dsw-alias-border-l2)' }}>
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(170px,1fr) auto', gap: 12 }}>
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: failed ? '#e76565' : '#59c985' }} />
+                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: failed ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-success-primary)' }} />
                   <strong style={{ fontSize: 13 }}>{labels[item.toolName] ?? item.toolName}</strong>
                   <span style={muted}>{item.provider}/{item.model}</span>
                 </div>
-                {!item.success && <div title={item.errorMessage} style={{ margin: '5px 0 0 15px', fontSize: 11, color: '#e76565', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.errorMessage ?? item.errorName}</div>}
+                {!item.success && <div title={item.errorMessage} style={{ margin: '5px 0 0 15px', fontSize: 11, color: 'var(--dsw-alias-state-error-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.errorMessage ?? item.errorName}</div>}
                 {item.verdict && verdictInfo && <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, margin: '6px 0 0 15px', fontSize: 11 }}>
-                  {verdictInfo.outcomeText && <span style={{ padding: '1px 5px', borderRadius: 4, fontWeight: 500, fontSize: 11, background: verdictInfo.isFailed ? 'rgba(231,101,101,.16)' : item.verdict.outcome === 'tie' ? 'rgba(227,189,99,.16)' : 'rgba(89,201,133,.16)', color: verdictInfo.isFailed ? '#e76565' : item.verdict.outcome === 'tie' ? '#e3bd63' : '#77d49b', border: `1px solid ${verdictInfo.isFailed ? 'rgba(231,101,101,.3)' : item.verdict.outcome === 'tie' ? 'rgba(227,189,99,.3)' : 'rgba(89,201,133,.3)'}` }}>{verdictInfo.outcomeText}</span>}
-                  {verdictInfo.phaseText && <span style={{ padding: '1px 5px', borderRadius: 4, background: 'var(--dsw-surface-sunken)', color: 'var(--dsw-text-secondary)', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.1))' }}>{verdictInfo.phaseText}</span>}
-                  {verdictInfo.scoreText && <span style={{ color: (typeof item.verdict.threshold === 'number' && typeof item.verdict.score === 'number' && item.verdict.score < item.verdict.threshold) ? '#e76565' : 'var(--dsw-text-primary)' }}>{verdictInfo.scoreText}</span>}
-                  {verdictInfo.checkpointsText && <span style={{ color: 'var(--dsw-text-secondary)' }}>{verdictInfo.checkpointsText}</span>}
-                  {verdictInfo.criteriaText && <span style={{ color: 'var(--dsw-text-secondary)' }}>{verdictInfo.criteriaText}</span>}
-                  {verdictInfo.winnerText && <span style={{ color: 'var(--dsw-text-secondary)' }}>{verdictInfo.winnerText}</span>}
-                  {item.route && <span style={{ padding: '1px 5px', borderRadius: 4, fontSize: 11, background: 'rgba(120,140,220,.14)', color: 'var(--dsw-text-secondary)', border: '1px solid rgba(120,140,220,.3)' }}>{tFormat(t['recent.route.badge'], { stage: item.route.stage, destination: item.route.destination })}</span>}
-                  {item.stats.usageIncomplete === true && <span style={{ padding: '1px 5px', borderRadius: 4, fontSize: 11, background: 'rgba(227,189,99,.16)', color: '#e3bd63', border: '1px solid rgba(227,189,99,.3)' }}>{t['recent.detail.usageIncomplete']}</span>}
+                  {verdictInfo.outcomeText && <span style={{ padding: '1px 5px', borderRadius: 4, fontWeight: 500, fontSize: 11, ...toneChip(verdictInfo.isFailed ? 'error' : item.verdict.outcome === 'tie' ? 'warn' : 'pass') }}>{verdictInfo.outcomeText}</span>}
+                  {verdictInfo.phaseText && <span style={{ padding: '1px 5px', borderRadius: 4, background: 'var(--dsw-alias-interactive-bg-hover)', color: 'var(--dsw-alias-label-secondary)', border: '1px solid var(--dsw-alias-border-l2)' }}>{verdictInfo.phaseText}</span>}
+                  {verdictInfo.scoreText && <span style={{ color: (typeof item.verdict.threshold === 'number' && typeof item.verdict.score === 'number' && item.verdict.score < item.verdict.threshold) ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-label-primary)' }}>{verdictInfo.scoreText}</span>}
+                  {verdictInfo.checkpointsText && <span style={{ color: 'var(--dsw-alias-label-secondary)' }}>{verdictInfo.checkpointsText}</span>}
+                  {verdictInfo.criteriaText && <span style={{ color: 'var(--dsw-alias-label-secondary)' }}>{verdictInfo.criteriaText}</span>}
+                  {verdictInfo.winnerText && <span style={{ color: 'var(--dsw-alias-label-secondary)' }}>{verdictInfo.winnerText}</span>}
+                  {item.route && <span style={{ padding: '1px 5px', borderRadius: 4, fontSize: 11, color: 'var(--dsw-alias-label-secondary)', ...toneChip('neutral') }}>{tFormat(t['recent.route.badge'], { stage: item.route.stage, destination: item.route.destination })}</span>}
+                  {item.stats.usageIncomplete === true && <span style={{ padding: '1px 5px', borderRadius: 4, fontSize: 11, ...toneChip('warn') }}>{t['recent.detail.usageIncomplete']}</span>}
                 </div>}
               </div>
               <div style={{ textAlign: 'right' }}><div style={{ fontSize: 12 }}>{duration(item.durationMs)}</div><div style={{ ...muted, marginTop: 3 }}>{dateTime(item.startedAt, lang)}</div></div>
@@ -863,37 +880,37 @@ export function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: 
                   that opened it: the snapshot used to render after a details block that merely
                   happened to be expanded, which read as if it belonged to that block. */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0 0 15px' }}>
-                <button type="button" aria-expanded={snapshot?.id === item.id} onClick={() => void toggleSnapshot(item.id)} style={{ fontSize: 11, padding: '2px 7px', borderRadius: 5, cursor: 'pointer', color: 'var(--dsw-text-secondary)', background: 'var(--dsw-surface-sunken)', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))' }}>{snapshot?.id === item.id ? t['recent.decisionHide'] : t['recent.decision']}</button>
-                <button type="button" aria-expanded={detailsOpen} onClick={() => setOpenDetails(current => current === item.id ? null : item.id)} style={{ fontSize: 11, padding: '2px 7px', borderRadius: 5, cursor: 'pointer', color: 'var(--dsw-text-secondary)', background: 'var(--dsw-surface-sunken)', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))' }}>{detailsOpen ? t['recent.detailsHide'] : t['recent.details']}</button>
+                <button type="button" aria-expanded={snapshot?.id === item.id} onClick={() => void toggleSnapshot(item.id)} style={{ fontSize: 11, padding: '2px 7px', borderRadius: 5, cursor: 'pointer', color: 'var(--dsw-alias-label-secondary)', background: 'var(--dsw-alias-interactive-bg-hover)', border: '1px solid var(--dsw-alias-border-l2)' }}>{snapshot?.id === item.id ? t['recent.decisionHide'] : t['recent.decision']}</button>
+                <button type="button" aria-expanded={detailsOpen} onClick={() => setOpenDetails(current => current === item.id ? null : item.id)} style={{ fontSize: 11, padding: '2px 7px', borderRadius: 5, cursor: 'pointer', color: 'var(--dsw-alias-label-secondary)', background: 'var(--dsw-alias-interactive-bg-hover)', border: '1px solid var(--dsw-alias-border-l2)' }}>{detailsOpen ? t['recent.detailsHide'] : t['recent.details']}</button>
               </div>
               {snapshot?.id === item.id && <div style={panelStyle}>
-                {snapshot.error !== undefined && <div style={{ fontSize: 11, color: '#e76565' }}>{snapshot.error}</div>}
+                {snapshot.error !== undefined && <div style={{ fontSize: 11, color: 'var(--dsw-alias-state-error-primary)' }}>{snapshot.error}</div>}
                 {snapshot.record === undefined && snapshot.error === undefined && <div style={{ ...muted, fontSize: 11 }}>{t['recent.decisionLoading']}</div>}
                 {snapshot.record !== undefined && snapshot.record.calls.length === 0 && <div style={{ ...muted, fontSize: 11 }}>{t['recent.decisionEmpty']}</div>}
                 {(snapshot.record?.calls ?? []).map((call, index) => <div key={index} style={{ marginBottom: index === snapshot.record!.calls.length - 1 ? 0 : 10 }}>
-                  <div style={{ fontSize: 11, color: 'var(--dsw-text-secondary)' }}>{call.label} · {call.channel}{call.score === undefined ? '' : ' · ' + formatPercentage(call.score)}</div>
+                  <div style={{ fontSize: 11, color: 'var(--dsw-alias-label-secondary)' }}>{call.label} · {call.channel}{call.score === undefined ? '' : ' · ' + formatPercentage(call.score)}</div>
                   <div style={{ fontSize: 11, marginTop: 4 }}>{t['recent.decisionPrompt']}</div>
-                  <pre style={{ margin: 0, maxHeight: 180, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: 'rgba(0,0,0,.2)', padding: '6px 8px', borderRadius: 6 }}>{call.prompt}</pre>
+                  <pre style={{ margin: 0, maxHeight: 180, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: 'var(--dsw-alias-markdown-code-block)', padding: '6px 8px', borderRadius: 6 }}>{call.prompt}</pre>
                   <div style={{ fontSize: 11, marginTop: 4 }}>{t['recent.decisionOutput']}</div>
-                  <pre style={{ margin: 0, maxHeight: 140, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: 'rgba(0,0,0,.2)', padding: '6px 8px', borderRadius: 6 }}>{call.output}</pre>
+                  <pre style={{ margin: 0, maxHeight: 140, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: 'var(--dsw-alias-markdown-code-block)', padding: '6px 8px', borderRadius: 6 }}>{call.output}</pre>
                 </div>)}
               </div>}
               {detailsOpen && <div style={panelStyle}>
                     {(item.verdict?.criteria?.length ?? 0) > 0 && <div style={{ display: 'grid', gridTemplateColumns: 'minmax(120px,1fr) auto auto', gap: '4px 14px', marginBottom: 8 }}>
-                      <strong style={{ color: 'var(--dsw-text-secondary)' }}>{t['recent.detail.criterion']}</strong>
-                      <strong style={{ color: 'var(--dsw-text-secondary)' }}>{t['recent.detail.score']}</strong>
-                      <strong style={{ color: 'var(--dsw-text-secondary)' }}>{t['recent.detail.threshold']}</strong>
+                      <strong style={{ color: 'var(--dsw-alias-label-secondary)' }}>{t['recent.detail.criterion']}</strong>
+                      <strong style={{ color: 'var(--dsw-alias-label-secondary)' }}>{t['recent.detail.score']}</strong>
+                      <strong style={{ color: 'var(--dsw-alias-label-secondary)' }}>{t['recent.detail.threshold']}</strong>
                       {item.verdict!.criteria!.map(criterion => {
                         const threshold = typeof item.verdict!.threshold === 'number' ? item.verdict!.threshold : undefined
                         const missed = threshold !== undefined && criterion.score < threshold
                         return <Fragment key={criterion.id}>
                           <span>{criterion.id}</span>
-                          <span style={{ color: missed ? '#e76565' : '#77d49b' }}>{formatPercentage(criterion.score)}</span>
-                          <span style={{ color: 'var(--dsw-text-secondary)' }}>{threshold === undefined ? '—' : formatPercentage(threshold)}</span>
+                          <span style={{ color: missed ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-success-primary)' }}>{formatPercentage(criterion.score)}</span>
+                          <span style={{ color: 'var(--dsw-alias-label-secondary)' }}>{threshold === undefined ? '—' : formatPercentage(threshold)}</span>
                         </Fragment>
                       })}
                     </div>}
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, color: 'var(--dsw-text-secondary)' }}>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, color: 'var(--dsw-alias-label-secondary)' }}>
                       <span>{tFormat(t['recent.detail.calls'], { calls: compact(item.stats.calls, lang) })}</span>
                       <span>{tFormat(t['recent.detail.tokens'], { input: compact(item.stats.inputTokens, lang), cached: compact(item.stats.cachedInputTokens, lang), output: compact(item.stats.outputTokens, lang) })}</span>
                       <span>{tFormat(t['recent.detail.scoreCache'], { hits: compact(item.stats.cacheHits, lang), misses: compact(item.stats.cacheMisses, lang) })}</span>
@@ -911,14 +928,14 @@ export function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: 
                   </div>}
             </div>
           })}{(data?.recent.length ?? 0) === 0 && <div style={{ padding: 24, textAlign: 'center', ...muted }}>{t['recent.empty']}</div>}</div></div>
-          <div style={{ ...dashboardCard, padding: '18px' }}><strong>{t['models.title']}</strong><div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>{(data?.models ?? []).map(model => <div key={model.provider + '\0' + model.model} style={{ padding: '11px 12px', borderRadius: 10, background: 'var(--dsw-surface-sunken)' }}><div style={{ fontWeight: 650, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis' }}>{model.model}</div><div style={{ ...muted, marginTop: 3 }}>{model.provider}</div><div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 9, fontSize: 12 }}><span>{tFormat(t['models.calls'], { calls: compact(model.calls, lang) })}</span><span>{tFormat(t['models.tokens'], { tokens: compact(model.tokens, lang) })}</span><strong>{money(model.estimatedCostUsd)}</strong></div></div>)}{(data?.models.length ?? 0) === 0 && <div style={muted}>{t['models.empty']}</div>}</div></div></section>
+          <div style={{ ...dashboardCard, padding: '18px' }}><strong>{t['models.title']}</strong><div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>{(data?.models ?? []).map(model => <div key={model.provider + '\0' + model.model} style={{ padding: '11px 12px', borderRadius: 10, background: 'var(--dsw-alias-interactive-bg-hover)' }}><div style={{ fontWeight: 650, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis' }}>{model.model}</div><div style={{ ...muted, marginTop: 3 }}>{model.provider}</div><div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 9, fontSize: 12 }}><span>{tFormat(t['models.calls'], { calls: compact(model.calls, lang) })}</span><span>{tFormat(t['models.tokens'], { tokens: compact(model.tokens, lang) })}</span><strong>{money(model.estimatedCostUsd)}</strong></div></div>)}{(data?.models.length ?? 0) === 0 && <div style={muted}>{t['models.empty']}</div>}</div></div></section>
       </>}
     </div>
   </main>
 }
 
 export function VerifierSidebarIcon({ size, active }: { size: number; active?: boolean }) {
-  return <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: size, height: size, color: active ? 'var(--dsw-alias-brand-primary, #4f8cff)' : 'currentColor' }}><IconDataOutline16 size={Math.min(18, size)} /></span>
+  return <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: size, height: size, color: active ? 'var(--dsw-alias-state-business-primary)' : 'currentColor' }}><IconDataOutline16 size={Math.min(18, size)} /></span>
 }
 
 export function GlobalVerifierDashboard({ rpc }: { rpc: any }) {
@@ -977,6 +994,43 @@ async function readVerifierActivity(rpc: any, sessionId: string, signal: AbortSi
 }
 
 /**
+ * Dock-card geometry, copied from the host's own composer-stack cards (Todo/Goal/Queue).
+ *
+ * Those cards share one width axis — the chat content column minus the composer clearances and the
+ * four dock insets — and the fallbacks below only matter on a host that does not publish the three
+ * custom properties. Without this clamp the status line stretches to the window edge and its text
+ * sits far left of the composer it belongs to, which is exactly the misplacement it is here to fix.
+ */
+const activityDock: React.CSSProperties = {
+  boxSizing: 'border-box',
+  width: 'calc(100% - var(--dsh-composer-side-clearance, 16px) - var(--dsh-composer-side-clearance, 16px) - var(--dsh-composer-dock-inset, 8px) - var(--dsh-composer-dock-inset, 8px) - var(--dsh-composer-dock-inset, 8px) - var(--dsh-composer-dock-inset, 8px))',
+  margin: '0 auto',
+}
+const activityBar: React.CSSProperties = {
+  boxSizing: 'border-box',
+  display: 'flex',
+  alignItems: 'center',
+  gap: 10,
+  width: '100%',
+  maxWidth: 'calc(var(--dsh-composer-card-max-width, 952px) - 4 * var(--dsh-composer-dock-inset, 8px))',
+  height: 36,
+  margin: '0 auto',
+  padding: '0 12px',
+  border: '0.5px solid var(--dsw-alias-border-l1)',
+  borderRadius: 12,
+  background: 'var(--dsw-specific-tip)',
+}
+const activityTextStyle: React.CSSProperties = {
+  minWidth: 0,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+  fontSize: 13,
+  lineHeight: '20px',
+  color: 'var(--dsw-alias-label-secondary)',
+}
+
+/**
  * The chat-visible half of the automatic stages: what the plugin is doing for this session right now.
  *
  * It answers the pauses the chat cannot explain: a P06 cycle buffers the reply, a routed review and
@@ -1010,11 +1064,13 @@ export function VerifierActivityChip({ session, rpc }: { session?: { sessionId?:
     return () => { cancelled = true; clearInterval(timer); controller.abort() }
   }, [sessionId, running, showing, rpc])
   if (rendered === null) return null
-  const accent = rendered.tone === 'busy' ? '#4f8cff' : rendered.tone === 'ok' ? '#77d492' : 'var(--dsw-danger, #e85858)'
+  const dotState: StateDotState = rendered.tone === 'busy' ? 'ongoing' : rendered.tone === 'ok' ? 'done' : 'error'
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 4px 6px', ...muted }}>
-      <span aria-hidden style={{ flex: '0 0 auto', width: 7, height: 7, borderRadius: '50%', background: accent, opacity: rendered.tone === 'busy' ? 0.65 : 1 }} />
-      <span>{rendered.text}</span>
+    <div style={activityDock}>
+      <div style={activityBar} role="status" aria-live="polite">
+        <StateDot state={dotState} size={8} />
+        <span style={activityTextStyle}>{rendered.text}</span>
+      </div>
     </div>
   )
 }

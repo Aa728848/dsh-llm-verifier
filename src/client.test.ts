@@ -1,3 +1,6 @@
+import { readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { zh, en, toolLabels, tFormat, detectLanguage, compact, dateTime, verifierActivityText } from './client-i18n.ts'
 import {
@@ -739,5 +742,68 @@ describe('verdict dashboard helpers', () => {
     })
   })
 })
+
+/**
+ * Real DSH design tokens this client is allowed to reference.
+ *
+ * The names come from the host token sheet
+ * (`packages/client/ui-theme/src/styles/design-platform.css`); an unknown custom property is
+ * silently dropped by CSS, so a typo or an invented name is invisible at build time and simply
+ * resolves to nothing. That is how the statistics page ended up with `--dsw-text-primary`,
+ * `--dsw-surface-sunken` and `--dsw-alias-bg-module` references whose hard-coded dark fallbacks
+ * painted dark cards on a light page. Keep this list exact: it is also the record of which rungs
+ * this UI is allowed to paint on.
+ */
+const DESIGN_TOKENS: ReadonlySet<string> = new Set([
+  '--dsw-alias-bg-mask-2',
+  '--dsw-alias-bg-module-platform',
+  '--dsw-alias-bg-multi-select',
+  '--dsw-alias-border-l1',
+  '--dsw-alias-border-l2',
+  '--dsw-alias-border-l3',
+  '--dsw-alias-interactive-bg-hover',
+  '--dsw-alias-label-primary',
+  '--dsw-alias-label-secondary',
+  '--dsw-alias-label-tertiary',
+  '--dsw-alias-link',
+  '--dsw-alias-markdown-code-block',
+  '--dsw-alias-state-business-primary',
+  '--dsw-alias-state-error-primary',
+  '--dsw-alias-state-success-primary',
+  '--dsw-alias-state-warn-label',
+  '--dsw-alias-state-warn-primary',
+  '--dsw-alias-state-warn-tertiary',
+  '--dsw-specific-input-major',
+  '--dsw-specific-tip',
+  '--dsw-static-neutral-00',
+])
+
+/** Every source file that can reference a token, read from disk (a new client module must be covered). */
+function clientTokenReferences(): { file: string; token: string }[] {
+  const dir = fileURLToPath(new URL('.', import.meta.url))
+  const references: { file: string; token: string }[] = []
+  for (const relative of readdirSync(dir, { recursive: true })) {
+    if (!/[.]tsx?$/.test(relative)) continue
+    const source = readFileSync(join(dir, relative), 'utf8')
+    for (const match of source.matchAll(/var\((--dsw-[a-z0-9-]+)/g)) references.push({ file: relative, token: match[1] })
+  }
+  return references
+}
+
+describe('client design tokens', () => {
+  it('references only tokens the DSH token sheet defines', () => {
+    const references = clientTokenReferences()
+    expect(references.length).toBeGreaterThan(20)
+    for (const { file, token } of references) {
+      expect(DESIGN_TOKENS.has(token), file + ' references ' + token).toBe(true)
+    }
+  })
+
+  it('keeps the allow-list exact, so a removed reference cannot leave a stale entry behind', () => {
+    const referenced = new Set(clientTokenReferences().map(reference => reference.token))
+    expect([...DESIGN_TOKENS].filter(token => !referenced.has(token))).toEqual([])
+  })
+})
+
 
 
