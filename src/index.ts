@@ -330,11 +330,15 @@ export function apply(ctx: Context, config: Config = {}): void {
       const completed = await operation(trace)
       selected = completed.selected
       const value = { ...completed.result as T & object, ...route(selected) } as T & { provider: string; model: string }
-      await statistics.record({ toolName, sessionId: String(agent.id), startedAt, success: true, provider: selected.provider, model: selected.model, stats: statsFrom(value), verdict: verdictFrom(toolName, value, phase), ...(observation ? { route: observation } : {}) }).catch(() => {})
+      // The statistics row and its decision snapshot share ONE id: the dashboard lists statistics
+      // rows and asks for "the snapshot of this row" by the id it was listed under. Two
+      // independently generated uuids made every lookup miss, and the panel then reported the
+      // snapshot as pruned / never captured even though it was sitting in the topic's sidecar.
+      const invocation = await statistics.record({ toolName, sessionId: String(agent.id), startedAt, success: true, provider: selected.provider, model: selected.model, stats: statsFrom(value), verdict: verdictFrom(toolName, value, phase), ...(observation ? { route: observation } : {}) }).catch(() => undefined)
       // Order by label before storing: the engine reports calls as they complete, so a concurrent
       // fan-out reports them in network order. Sorting makes "which calls are in the snapshot"
       // reproducible even when the record has to bound its text.
-      if (calls.length > 0) await topicEntry.decisions.record({ toolName, phase, startedAt, provider: selected.provider, model: selected.model, calls: boundDecisionCalls([...calls].sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))) }).catch(() => {})
+      if (calls.length > 0) await topicEntry.decisions.record({ ...(invocation === undefined ? {} : { id: invocation.id }), toolName, phase, startedAt, provider: selected.provider, model: selected.model, calls: boundDecisionCalls([...calls].sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))) }).catch(() => {})
       return value
     } catch (error) {
       const details = errorDetails(error)
@@ -790,17 +794,18 @@ export function apply(ctx: Context, config: Config = {}): void {
       }, request.signal)
       // The decision snapshot is written here, but the STATISTICS row is written once for the whole
       // cycle (see record below): a second row would count the same judge calls twice.
-      if (calls.length > 0) {
-        await topic(agent.session.header).decisions.record({
-          toolName: 'verifier_compare',
-          phase: 'process',
-          startedAt,
-          provider: selected.provider,
-          model: selected.model,
-          calls: boundDecisionCalls([...calls].sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))),
-        }).catch(() => {})
-      }
-      return result
+      const snapshot = calls.length === 0 ? undefined : await topic(agent.session.header).decisions.record({
+        toolName: 'verifier_compare',
+        phase: 'process',
+        startedAt,
+        provider: selected.provider,
+        model: selected.model,
+        calls: boundDecisionCalls([...calls].sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))),
+      }).catch(() => undefined)
+      // This cycle's statistics row is written later (once the winner is known), so the snapshot
+      // hands its id forward and that row is stored under it: the dashboard asks for a row's
+      // snapshot BY the id it listed the row with.
+      return snapshot === undefined ? result : { ...result, decisionId: snapshot.id }
     },
     // The tournament seam. Optional by construction: it is only reached when autoProcessCandidates
     // asks for more than two candidates, and a cycle without it compares one pair instead.
@@ -820,17 +825,16 @@ export function apply(ctx: Context, config: Config = {}): void {
         ...(trace ? { trace } : {}),
       }, request.signal)
       // One decision snapshot, one statistics row for the whole cycle — exactly like the pair path.
-      if (calls.length > 0) {
-        await topic(agent.session.header).decisions.record({
-          toolName: 'verifier_select',
-          phase: 'process',
-          startedAt,
-          provider: selected.provider,
-          model: selected.model,
-          calls: boundDecisionCalls([...calls].sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))),
-        }).catch(() => {})
-      }
-      return result
+      const snapshot = calls.length === 0 ? undefined : await topic(agent.session.header).decisions.record({
+        toolName: 'verifier_select',
+        phase: 'process',
+        startedAt,
+        provider: selected.provider,
+        model: selected.model,
+        calls: boundDecisionCalls([...calls].sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))),
+      }).catch(() => undefined)
+      // Same id hand-off as the pairwise path: one statistics row, one snapshot, one shared id.
+      return snapshot === undefined ? result : { ...result, decisionId: snapshot.id }
     },
     record: async (report: ProcessCycleReport) => {
       const agent = report.agent as Agent
@@ -854,6 +858,9 @@ export function apply(ctx: Context, config: Config = {}): void {
           : { phase: 'process', outcome: report.outcome }
       const failedCall = report.outcome === 'generation-failed' || report.outcome === 'comparison-failed'
       await topic(agent.session.header).statistics.record({
+        // The snapshot of this cycle was already written while the comparison ran; the row adopts
+        // its id so the dashboard can fetch that snapshot from the row it lists.
+        ...(report.decisionId === undefined ? {} : { id: report.decisionId }),
         toolName: report.select === undefined ? 'verifier_compare' : 'verifier_select',
         sessionId: String(agent.id),
         startedAt: report.startedAt,

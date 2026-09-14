@@ -457,6 +457,19 @@ describe('process cycle execution', () => {
     expect(report?.observation.replayed).toBe('candidate')
   })
 
+  it('carries the snapshot id the judging seam reported, so the statistics row can link to it', async () => {
+    // The seam files the decision snapshot while it judges, but the statistics row only exists once
+    // the winner is known: the id travels with the report so that row can adopt it (the dashboard
+    // asks for "the snapshot of this row" by the id it listed the row under).
+    const linked = harness({ compare: async () => compareResult('B', { decisionId: 'snapshot-1' }) })
+    const { report } = await run(linked, { original: textChunks('ORIGINAL') })
+    expect(report?.decisionId).toBe('snapshot-1')
+
+    // Nothing captured (every judge call was a cache hit): the row keeps its own generated id.
+    const plain = harness({ compare: async () => compareResult('B') })
+    expect((await run(plain, { original: textChunks('ORIGINAL') })).report?.decisionId).toBeUndefined()
+  })
+
   it('replays the original verbatim on a tie, on an A win, and records which', async () => {
     for (const winner of ['A', 'tie'] as const) {
       const original = textChunks('ORIGINAL')

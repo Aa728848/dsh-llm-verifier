@@ -203,6 +203,7 @@ export declare const zh: {
     'recent.decisionPrompt': string;
     'recent.decisionOutput': string;
     'recent.details': string;
+    'recent.detailsHide': string;
     'recent.detail.criterion': string;
     'recent.detail.score': string;
     'recent.detail.threshold': string;
@@ -514,6 +515,7 @@ export declare const dictionaries: {
         'recent.decisionPrompt': string;
         'recent.decisionOutput': string;
         'recent.details': string;
+        'recent.detailsHide': string;
         'recent.detail.criterion': string;
         'recent.detail.score': string;
         'recent.detail.threshold': string;
@@ -822,6 +824,7 @@ export declare const dictionaries: {
         'recent.decisionPrompt': string;
         'recent.decisionOutput': string;
         'recent.details': string;
+        'recent.detailsHide': string;
         'recent.detail.criterion': string;
         'recent.detail.score': string;
         'recent.detail.threshold': string;

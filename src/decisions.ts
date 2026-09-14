@@ -148,6 +148,14 @@ export interface DecisionInput {
   provider: string
   model: string
   calls: readonly DecisionCall[]
+  /**
+   * Invocation id to file the snapshot under; a fresh uuid when omitted.
+   *
+   * The dashboard lists STATISTICS rows and asks for the snapshot of one row by ITS id, so the
+   * caller passes the id the statistics row was stored with. Two independent uuids made every
+   * lookup miss and the panel claim the snapshot was pruned or never captured.
+   */
+  id?: string
 }
 
 /**
@@ -171,7 +179,7 @@ export class DecisionStore {
     const calls = boundDecisionCalls(input.calls)
     if (calls.length === 0) return undefined
     const record: DecisionRecord = {
-      id: randomUUID(),
+      id: idOf(input.id),
       toolName: input.toolName,
       phase: input.phase,
       startedAt: input.startedAt,
@@ -226,6 +234,19 @@ export class DecisionStore {
     await writeFile(temporary, JSON.stringify(snapshot), 'utf8')
     try { await rename(temporary, this.file) } catch (error) { await unlink(temporary).catch(() => {}); throw error }
   }
+}
+
+/**
+ * The id a snapshot is filed under.
+ *
+ * A caller-supplied id is the statistics row's own id ({@link DecisionInput.id}), which is what
+ * makes the dashboard's "one snapshot per row" lookup resolve; anything unusable falls back to a
+ * fresh uuid so a malformed argument can never merge two invocations into one record.
+ * @param candidate - id supplied by the caller, if any.
+ * @returns The id to store the record under.
+ */
+function idOf(candidate: string | undefined): string {
+  return typeof candidate === 'string' && candidate.length > 0 ? candidate : randomUUID()
 }
 
 /**

@@ -207,6 +207,14 @@ export interface StatisticsQuery {
 }
 export interface InvocationInput {
     toolName: VerifierToolName;
+    /**
+     * Invocation id; a fresh uuid when omitted.
+     *
+     * Shared with the decision snapshot of the same invocation: the dashboard lists these rows and
+     * asks for "the snapshot of THIS row" by the id it was listed under, so the caller passes the
+     * id the snapshot was filed with (see `decisions.ts`).
+     */
+    id?: string;
     sessionId?: string;
     startedAt: number;
     finishedAt?: number;

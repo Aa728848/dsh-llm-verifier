@@ -148,6 +148,14 @@ interface VerifierSettingsProps {
 interface StatisticsPageProps {
     sessionId?: string;
     isGlobal?: boolean;
+    /**
+     * Mount-scoped takeover of the Conversation composer, handed to the Conversation View instance only.
+     *
+     * The sidebar pane and the global dashboard share this page but stay mounted while the user
+     * chats, so only the registration behind the Conversation View gets the handle: it returns a
+     * disposer that restores the real composer.
+     */
+    blankComposerSeat?: () => () => void;
     rpc: {
         call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<{
             ok: boolean;
@@ -159,7 +167,7 @@ interface StatisticsPageProps {
     };
 }
 export declare function VerifierSettings({ remote }: VerifierSettingsProps): import("react").JSX.Element;
-export declare function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps): import("react").JSX.Element;
+export declare function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: StatisticsPageProps): import("react").JSX.Element;
 export declare function VerifierSidebarIcon({ size, active }: {
     size: number;
     active?: boolean;

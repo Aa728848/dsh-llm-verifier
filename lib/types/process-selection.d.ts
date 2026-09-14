@@ -131,6 +131,14 @@ export interface ProcessCycleReport {
     compare?: CompareResult;
     /** Present when the cycle ran the tournament (N>2). */
     select?: SelectResult;
+    /**
+     * Id of the decision snapshot the judging seam filed, when it filed one.
+     *
+     * The seam writes the snapshot while it judges, but the statistics row only exists once the
+     * winner is known. Reporting the id lets that row adopt it, so the dashboard can fetch a row's
+     * snapshot by the id it listed the row under.
+     */
+    decisionId?: string;
     error?: string;
 }
 export interface ProcessSelectRequest {
@@ -203,14 +211,18 @@ export interface ProcessSelectorDeps {
     current(intent: ProcessIntent): boolean;
     /** Independent dispatch for the alternative reply (a fresh request object). */
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
-    compare(request: ProcessCompareRequest): Promise<CompareResult>;
+    compare(request: ProcessCompareRequest): Promise<CompareResult & {
+        decisionId?: string;
+    }>;
     /**
      * Tournament over 3+ candidates; required only when `settings.candidates` is above 2.
      *
      * Optional on purpose: an embedder that never raises the count needs no tournament seam, and a
      * cycle that asks for one without it falls back to the pairwise path with a warning.
      */
-    select?(request: ProcessSelectRequest): Promise<SelectResult>;
+    select?(request: ProcessSelectRequest): Promise<SelectResult & {
+        decisionId?: string;
+    }>;
     record(report: ProcessCycleReport): Promise<void>;
     /**
      * Rewrite the STATISTICS row of one already-recorded cycle because its delivery changed.

@@ -336,6 +336,14 @@ export interface StatisticsQuery {
 
 export interface InvocationInput {
   toolName: VerifierToolName
+  /**
+   * Invocation id; a fresh uuid when omitted.
+   *
+   * Shared with the decision snapshot of the same invocation: the dashboard lists these rows and
+   * asks for "the snapshot of THIS row" by the id it was listed under, so the caller passes the
+   * id the snapshot was filed with (see `decisions.ts`).
+   */
+  id?: string
   sessionId?: string
   startedAt: number
   finishedAt?: number
@@ -581,7 +589,7 @@ export class StatisticsStore {
     const verdict = cleanVerdict(input.verdict)
     const route = cleanRoute(input.route)
     const record: InvocationRecord = {
-      id: randomUUID(),
+      id: typeof input.id === 'string' && input.id.length > 0 ? input.id : randomUUID(),
       toolName: input.toolName,
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
       startedAt: input.startedAt,

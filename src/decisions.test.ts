@@ -113,6 +113,22 @@ describe('DecisionStore', () => {
     expect(document.records).toHaveLength(1)
   })
 
+  it('files a snapshot under the caller\'s invocation id, so the statistics row can resolve it', async () => {
+    // Regression: the dashboard lists statistics rows and asks for a row's snapshot BY the id it
+    // listed the row under. Two independently generated uuids made every lookup miss, and the panel
+    // then blamed pruning or a deleted topic while the snapshot sat in this very file.
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-decisions-'))
+    const file = join(root, 'decisions.json')
+    const store = new DecisionStore(file)
+    const record = await store.record({ id: 'invocation-7', toolName: 'verifier_current_session', phase: 'final', startedAt: 1, provider: 'p', model: 'm', calls: [call()] })
+    expect(record?.id).toBe('invocation-7')
+    expect(await store.find('invocation-7')).toMatchObject({ toolName: 'verifier_current_session' })
+    // An unusable id falls back to a fresh uuid instead of merging two invocations.
+    const fallback = await store.record({ id: '', toolName: 'verifier_track', phase: 'track', startedAt: 2, provider: 'p', model: 'm', calls: [call()] })
+    expect(fallback?.id).toBeTruthy()
+    expect(fallback?.id).not.toBe('')
+  })
+
   it('writes nothing when no call was captured', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-decisions-'))
     const file = join(root, 'decisions.json')

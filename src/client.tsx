@@ -124,6 +124,14 @@ interface VerifierSettingsProps { remote: VerifierRemote }
 interface StatisticsPageProps {
   sessionId?: string
   isGlobal?: boolean
+  /**
+   * Mount-scoped takeover of the Conversation composer, handed to the Conversation View instance only.
+   *
+   * The sidebar pane and the global dashboard share this page but stay mounted while the user
+   * chats, so only the registration behind the Conversation View gets the handle: it returns a
+   * disposer that restores the real composer.
+   */
+  blankComposerSeat?: () => () => void
   rpc: {
     call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<{ ok: boolean; value?: unknown; error?: { message: string } }>
   }
@@ -584,7 +592,7 @@ function TrendChart({ daily, days, lang }:{daily:DailyStatistics[];days:number;l
   </svg><div style={{display:'flex',justifyContent:'center',gap:18,...muted}}><span><i style={{display:'inline-block',width:8,height:8,borderRadius:2,background:'#4f8cff',marginRight:6}}/>{t['chart.legendToolCalls']}</span><span><i style={{display:'inline-block',width:14,height:2,background:'#5ed7e8',marginRight:6,verticalAlign:'middle'}}/>{t['chart.legendModelCalls']}</span></div></div>
 }
 
-export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps) {
+export function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: StatisticsPageProps) {
   const lang = useLanguage()
   const t = dictionaries[lang]
   const labels = toolLabels[lang]
@@ -598,6 +606,23 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
   // that loaded all of them would ship megabytes of text for rows nobody opened.
   const [snapshot, setSnapshot] = useState<{ id: string; record?: DecisionRecordView; error?: string } | null>(null)
   const snapshotRequest = useRef(0)
+  // Details are a controlled disclosure rather than a per-row <details>: both entry points then sit
+  // on the SAME line and each panel opens directly beneath it, instead of the snapshot landing
+  // under a details block that happens to be expanded.
+  const [openDetails, setOpenDetails] = useState<string | null>(null)
+  // A read-only dashboard has nothing to type into, yet the Conversation shell renders its
+  // composer for every View. The handle is only present on the Conversation View instance, and
+  // disposing it on unmount brings the real card back with its draft intact. Mount-only: the
+  // takeover belongs to this View's lifetime, and a host that rebuilds the injected props object
+  // must not make the seat flap between registrations.
+  const seatHandle = useRef(blankComposerSeat)
+  seatHandle.current = blankComposerSeat
+  useEffect(() => {
+    const take = seatHandle.current
+    if (typeof take !== 'function') return undefined
+    const dispose = take()
+    return () => { dispose() }
+  }, [])
   const toggleSnapshot = async (id: string) => {
     if (snapshot?.id === id) { setSnapshot(null); return }
     const request = ++snapshotRequest.current
@@ -609,6 +634,12 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
         try {
           const result = await rpc.call('/api', 'llm-verifier/statistics', payload)
           if (result && result.ok === true) record = (result.value as { decision?: DecisionRecordView }).decision
+          else if (result && result.ok === false) {
+            // A rejection is the host's real answer — "no snapshot for this row" is one of them —
+            // so it is shown as-is instead of being retried over the raw fetch endpoint.
+            if (snapshotRequest.current === request) setSnapshot({ id, error: result.error?.message ?? t['recent.decisionMissing'] })
+            return
+          }
         } catch (rpcError) { console.warn('[llm-verifier] decision rpc.call failed, trying fetch fallback:', rpcError) }
       }
       if (record === undefined) {
@@ -801,7 +832,13 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
         <section style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(290px,.45fr)', gap: 16, alignItems: 'start' }}><div style={{ ...dashboardCard, padding: '18px 18px 8px', overflow: 'hidden' }}><div style={{ display: 'flex', justifyContent: 'space-between', margin: '0 2px 12px' }}><strong>{t['recent.title']}</strong><span style={muted}>{t['recent.maxCount']}</span></div><div style={{ maxHeight: 360, overflow: 'auto' }}>{(data?.recent ?? []).map(item => {
             const verdictInfo = item.verdict ? formatVerdictDetails(item.verdict, t) : undefined
             const failed = !item.success || (verdictInfo ? verdictInfo.isFailed : false)
-            return <div key={item.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(170px,1fr) auto', gap: 12, padding: '11px 8px', borderTop: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.1))' }}>
+            const detailsOpen = openDetails === item.id
+            const panelStyle: React.CSSProperties = { margin: '8px 0 0 15px', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))', borderRadius: 8, padding: '8px 10px', background: 'var(--dsw-surface-sunken)', fontSize: 11 }
+            // The row is a column: identity plus timing on the first line, then the two controls on
+            // one line, then whichever panel they opened. Panels therefore span the whole row
+            // instead of being squeezed into the identity column.
+            return <div key={item.id} style={{ padding: '11px 8px', borderTop: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.1))' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(170px,1fr) auto', gap: 12 }}>
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <span style={{ width: 7, height: 7, borderRadius: '50%', background: failed ? '#e76565' : '#59c985' }} />
@@ -819,12 +856,29 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
                   {item.route && <span style={{ padding: '1px 5px', borderRadius: 4, fontSize: 11, background: 'rgba(120,140,220,.14)', color: 'var(--dsw-text-secondary)', border: '1px solid rgba(120,140,220,.3)' }}>{tFormat(t['recent.route.badge'], { stage: item.route.stage, destination: item.route.destination })}</span>}
                   {item.stats.usageIncomplete === true && <span style={{ padding: '1px 5px', borderRadius: 4, fontSize: 11, background: 'rgba(227,189,99,.16)', color: '#e3bd63', border: '1px solid rgba(227,189,99,.3)' }}>{t['recent.detail.usageIncomplete']}</span>}
                 </div>}
-                <div style={{ margin: '6px 0 0 15px' }}>
-                  <button type="button" onClick={() => void toggleSnapshot(item.id)} style={{ fontSize: 11, padding: '2px 7px', borderRadius: 5, cursor: 'pointer', color: 'var(--dsw-text-secondary)', background: 'var(--dsw-surface-sunken)', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))' }}>{snapshot?.id === item.id ? t['recent.decisionHide'] : t['recent.decision']}</button>
-                </div>
-                <details style={{ margin: '6px 0 0 15px' }}>
-                  <summary style={{ cursor: 'pointer', fontSize: 11, color: 'var(--dsw-text-secondary)' }}>{t['recent.details']}</summary>
-                  <div style={{ marginTop: 8, border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))', borderRadius: 8, padding: '8px 10px', background: 'var(--dsw-surface-sunken)', fontSize: 11 }}>
+              </div>
+              <div style={{ textAlign: 'right' }}><div style={{ fontSize: 12 }}>{duration(item.durationMs)}</div><div style={{ ...muted, marginTop: 3 }}>{dateTime(item.startedAt, lang)}</div></div>
+              </div>
+              {/* Both entry points sit on ONE line, and each panel opens directly beneath the button
+                  that opened it: the snapshot used to render after a details block that merely
+                  happened to be expanded, which read as if it belonged to that block. */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0 0 15px' }}>
+                <button type="button" aria-expanded={snapshot?.id === item.id} onClick={() => void toggleSnapshot(item.id)} style={{ fontSize: 11, padding: '2px 7px', borderRadius: 5, cursor: 'pointer', color: 'var(--dsw-text-secondary)', background: 'var(--dsw-surface-sunken)', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))' }}>{snapshot?.id === item.id ? t['recent.decisionHide'] : t['recent.decision']}</button>
+                <button type="button" aria-expanded={detailsOpen} onClick={() => setOpenDetails(current => current === item.id ? null : item.id)} style={{ fontSize: 11, padding: '2px 7px', borderRadius: 5, cursor: 'pointer', color: 'var(--dsw-text-secondary)', background: 'var(--dsw-surface-sunken)', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))' }}>{detailsOpen ? t['recent.detailsHide'] : t['recent.details']}</button>
+              </div>
+              {snapshot?.id === item.id && <div style={panelStyle}>
+                {snapshot.error !== undefined && <div style={{ fontSize: 11, color: '#e76565' }}>{snapshot.error}</div>}
+                {snapshot.record === undefined && snapshot.error === undefined && <div style={{ ...muted, fontSize: 11 }}>{t['recent.decisionLoading']}</div>}
+                {snapshot.record !== undefined && snapshot.record.calls.length === 0 && <div style={{ ...muted, fontSize: 11 }}>{t['recent.decisionEmpty']}</div>}
+                {(snapshot.record?.calls ?? []).map((call, index) => <div key={index} style={{ marginBottom: index === snapshot.record!.calls.length - 1 ? 0 : 10 }}>
+                  <div style={{ fontSize: 11, color: 'var(--dsw-text-secondary)' }}>{call.label} · {call.channel}{call.score === undefined ? '' : ' · ' + formatPercentage(call.score)}</div>
+                  <div style={{ fontSize: 11, marginTop: 4 }}>{t['recent.decisionPrompt']}</div>
+                  <pre style={{ margin: 0, maxHeight: 180, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: 'rgba(0,0,0,.2)', padding: '6px 8px', borderRadius: 6 }}>{call.prompt}</pre>
+                  <div style={{ fontSize: 11, marginTop: 4 }}>{t['recent.decisionOutput']}</div>
+                  <pre style={{ margin: 0, maxHeight: 140, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: 'rgba(0,0,0,.2)', padding: '6px 8px', borderRadius: 6 }}>{call.output}</pre>
+                </div>)}
+              </div>}
+              {detailsOpen && <div style={panelStyle}>
                     {(item.verdict?.criteria?.length ?? 0) > 0 && <div style={{ display: 'grid', gridTemplateColumns: 'minmax(120px,1fr) auto auto', gap: '4px 14px', marginBottom: 8 }}>
                       <strong style={{ color: 'var(--dsw-text-secondary)' }}>{t['recent.detail.criterion']}</strong>
                       <strong style={{ color: 'var(--dsw-text-secondary)' }}>{t['recent.detail.score']}</strong>
@@ -854,22 +908,7 @@ export function StatisticsPage({ sessionId, rpc, isGlobal }: StatisticsPageProps
                       {item.route?.alternativeModel !== undefined && <span>{tFormat(t['recent.detail.routeAlternativeModel'], { model: item.route.alternativeModel })}</span>}
                       {(item.stats.channelFallbacks ?? 0) > 0 && <span>{tFormat(t['recent.detail.channelFallback'], { count: compact(item.stats.channelFallbacks ?? 0, lang) })}</span>}
                     </div>
-                  </div>
-                </details>
-                {snapshot?.id === item.id && <div style={{ margin: '8px 0 2px 15px', border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.14))', borderRadius: 8, padding: '8px 10px', background: 'var(--dsw-surface-sunken)' }}>
-                  {snapshot.error !== undefined && <div style={{ fontSize: 11, color: '#e76565' }}>{snapshot.error}</div>}
-                  {snapshot.record === undefined && snapshot.error === undefined && <div style={{ ...muted, fontSize: 11 }}>{t['recent.decisionLoading']}</div>}
-                  {snapshot.record !== undefined && snapshot.record.calls.length === 0 && <div style={{ ...muted, fontSize: 11 }}>{t['recent.decisionEmpty']}</div>}
-                  {(snapshot.record?.calls ?? []).map((call, index) => <div key={index} style={{ marginBottom: index === snapshot.record!.calls.length - 1 ? 0 : 10 }}>
-                    <div style={{ fontSize: 11, color: 'var(--dsw-text-secondary)' }}>{call.label} · {call.channel}{call.score === undefined ? '' : ' · ' + formatPercentage(call.score)}</div>
-                    <div style={{ fontSize: 11, marginTop: 4 }}>{t['recent.decisionPrompt']}</div>
-                    <pre style={{ margin: 0, maxHeight: 180, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: 'rgba(0,0,0,.2)', padding: '6px 8px', borderRadius: 6 }}>{call.prompt}</pre>
-                    <div style={{ fontSize: 11, marginTop: 4 }}>{t['recent.decisionOutput']}</div>
-                    <pre style={{ margin: 0, maxHeight: 140, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: 'rgba(0,0,0,.2)', padding: '6px 8px', borderRadius: 6 }}>{call.output}</pre>
-                  </div>)}
-                </div>}
-              </div>
-              <div style={{ textAlign: 'right' }}><div style={{ fontSize: 12 }}>{duration(item.durationMs)}</div><div style={{ ...muted, marginTop: 3 }}>{dateTime(item.startedAt, lang)}</div></div>
+                  </div>}
             </div>
           })}{(data?.recent.length ?? 0) === 0 && <div style={{ padding: 24, textAlign: 'center', ...muted }}>{t['recent.empty']}</div>}</div></div>
           <div style={{ ...dashboardCard, padding: '18px' }}><strong>{t['models.title']}</strong><div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>{(data?.models ?? []).map(model => <div key={model.provider + '\0' + model.model} style={{ padding: '11px 12px', borderRadius: 10, background: 'var(--dsw-surface-sunken)' }}><div style={{ fontWeight: 650, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis' }}>{model.model}</div><div style={{ ...muted, marginTop: 3 }}>{model.provider}</div><div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 9, fontSize: 12 }}><span>{tFormat(t['models.calls'], { calls: compact(model.calls, lang) })}</span><span>{tFormat(t['models.tokens'], { tokens: compact(model.tokens, lang) })}</span><strong>{money(model.estimatedCostUsd)}</strong></div></div>)}{(data?.models.length ?? 0) === 0 && <div style={muted}>{t['models.empty']}</div>}</div></div></section>
@@ -980,9 +1019,44 @@ export function VerifierActivityChip({ session, rpc }: { session?: { sessionId?:
   )
 }
 
+/**
+ * Marker the blank-composer takeover elects with; the value itself is never read.
+ *
+ * Any non-null selector result elects the entry, so a shared frozen object keeps the selector pure
+ * and allocation-free.
+ */
+const BLANK_COMPOSER = Object.freeze({ blank: true })
+
 export function apply(ctx: ClientContext): void {
   const connection = ctx.get('connection') as any
   const remote = ctx.remote
+  /**
+   * Collapse the resident composer while the statistics View is the active one.
+   *
+   * The Conversation shell renders its composer for EVERY View — a View can only opt into the
+   * overlay geometry (`data-conversation-composer-overlay`), never into its absence — so the input
+   * card covers the very table the dashboard exists to show. The selector-routed composer chain is
+   * the host's own replacement point: while this View is mounted one entry elects an empty
+   * composer, and disposing that entry on unmount restores the real card with its draft intact.
+   * Tried LAST (`priority` is ascending) so a pending approval, question or subagent takeover still
+   * wins the seat. A host that does not know the key leaves the composer in place instead of
+   * failing the page.
+   * @returns Disposer that hands the seat back to the resident composer.
+   */
+  const blankComposerSeat = (): (() => void) => {
+    try {
+      const dispose = ctx.slots.register({
+        name: 'conversation.composer' as never,
+        id: 'llm-verifier-blank',
+        priority: 1000,
+        select: () => BLANK_COMPOSER,
+      } as never, (() => null) as never)
+      return typeof dispose === 'function' ? dispose : () => {}
+    } catch (error) {
+      console.warn('[llm-verifier] composer takeover registration failed:', error)
+      return () => {}
+    }
+  }
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'llm-verifier',
@@ -995,7 +1069,7 @@ export function apply(ctx: ClientContext): void {
     id: 'llm-verifier-statistics',
     order: 30,
     label: () => (detectLanguage() === 'zh' ? zh['slot.statistics'] : en['slot.statistics']),
-    inject: () => ({ rpc: connection.rpc }),
+    inject: () => ({ rpc: connection.rpc, blankComposerSeat }),
   }, StatisticsPage as never))
   // P06 buffers the main reply (the chat looks frozen) and the routed/final stages hold the turn
   // open with nothing to show. The dock sits directly above the composer — where the user is already

@@ -724,6 +724,38 @@ describe('usage diagnostics in tool outputs', () => {
 })
 
 /**
+ * The dashboard's "why did the judge decide that" path.
+ *
+ * The statistics row and its decision snapshot must share ONE id: the row is listed under it, the
+ * snapshot is filed under it, and the decision endpoint resolves "the snapshot of this row" by
+ * exactly that value. Two independently generated uuids made every click answer "pruned, never
+ * captured, or belongs to a deleted topic" while the snapshot sat in the topic sidecar.
+ */
+describe('decision snapshots behind a dashboard row', () => {
+  it('resolves the snapshot from the invocation id the row was listed under', async () => {
+    const { tools, rpc } = assemble(JUDGE, {
+      stream: () => textStream('reasoning\n<score_A> A </score_A>\n<score_B> T </score_B>'),
+      sessions: [{ id: 'session-1', createdAt: 1 }],
+    })
+    await tools.get('verifier_compare')!.execute({ problem: 'pick the better plan', candidate_a: 'AAA', candidate_b: 'BBB', repeats: 1 }, exec)
+    const handler = rpc.get('/llm-verifier')!
+    const overview = await handler('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ id: string; toolName: string; success: boolean }> } }
+    const row = overview.value.recent.find(entry => entry.success)
+    expect(row).toBeDefined()
+
+    const found = await handler('decision', { id: row!.id }) as { ok: boolean; value?: { decision: { id: string; toolName: string; calls: Array<{ prompt: string; output: string }> } } }
+    expect(found.ok).toBe(true)
+    expect(found.value?.decision.id).toBe(row!.id)
+    expect(found.value?.decision.toolName).toBe('verifier_compare')
+    expect(found.value?.decision.calls.length).toBeGreaterThan(0)
+    expect(found.value?.decision.calls[0]?.prompt).toContain('pick the better plan')
+
+    // A genuinely unknown id still fails closed instead of inventing a snapshot.
+    expect(await handler('decision', { id: 'never-recorded' })).toMatchObject({ ok: false })
+  })
+})
+
+/**
  * The turn-stopping gate is the one place a manual pass would previously be honoured even
  * when it reviewed only an older slice of the task. These drive the REAL registered hook
  * through the assembly seam instead of asserting the pure rule twice.

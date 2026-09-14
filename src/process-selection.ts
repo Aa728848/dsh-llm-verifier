@@ -147,6 +147,14 @@ export interface ProcessCycleReport {
   compare?: CompareResult
   /** Present when the cycle ran the tournament (N>2). */
   select?: SelectResult
+  /**
+   * Id of the decision snapshot the judging seam filed, when it filed one.
+   *
+   * The seam writes the snapshot while it judges, but the statistics row only exists once the
+   * winner is known. Reporting the id lets that row adopt it, so the dashboard can fetch a row's
+   * snapshot by the id it listed the row under.
+   */
+  decisionId?: string
   error?: string
 }
 
@@ -224,14 +232,14 @@ export interface ProcessSelectorDeps {
   current(intent: ProcessIntent): boolean
   /** Independent dispatch for the alternative reply (a fresh request object). */
   stream(options: GenerateOptions): AsyncIterable<StreamChunk>
-  compare(request: ProcessCompareRequest): Promise<CompareResult>
+  compare(request: ProcessCompareRequest): Promise<CompareResult & { decisionId?: string }>
   /**
    * Tournament over 3+ candidates; required only when `settings.candidates` is above 2.
    *
    * Optional on purpose: an embedder that never raises the count needs no tournament seam, and a
    * cycle that asks for one without it falls back to the pairwise path with a warning.
    */
-  select?(request: ProcessSelectRequest): Promise<SelectResult>
+  select?(request: ProcessSelectRequest): Promise<SelectResult & { decisionId?: string }>
   record(report: ProcessCycleReport): Promise<void>
   /**
    * Rewrite the STATISTICS row of one already-recorded cycle because its delivery changed.
@@ -1244,7 +1252,7 @@ export class ProcessSelector {
       // The generation and the buffering are behind us; everything this cycle still owes the user
       // is judge latency.
       this.activities.update(intent.sessionId, reservation.id, { phase: 'comparing' })
-      let judged: { judgeCalls: number; winner: BufferedCandidate | undefined; tie: boolean; stats: RunStats; compare?: CompareResult; select?: SelectResult }
+      let judged: { judgeCalls: number; winner: BufferedCandidate | undefined; tie: boolean; stats: RunStats; compare?: CompareResult; select?: SelectResult; decisionId?: string }
       try {
         if ('candidateA' in view) {
           const compared = await this.deps.compare({
@@ -1257,7 +1265,7 @@ export class ProcessSelector {
             repeats: PROCESS_REPEATS,
             signal: phase.signal,
           })
-          judged = { judgeCalls: compared.calls, winner: compared.winner === 'B' ? alternatives[0] : undefined, tie: compared.winner === 'tie', stats: compared.stats, compare: compared }
+          judged = { judgeCalls: compared.calls, winner: compared.winner === 'B' ? alternatives[0] : undefined, tie: compared.winner === 'tie', stats: compared.stats, compare: compared, ...(compared.decisionId === undefined ? {} : { decisionId: compared.decisionId }) }
         } else {
           const selected = await this.deps.select!({
             agent: intent.agent,
@@ -1268,7 +1276,7 @@ export class ProcessSelector {
             repeats: PROCESS_REPEATS,
             signal: phase.signal,
           })
-          judged = { judgeCalls: selected.calls, winner: selected.index > 0 ? alternatives[selected.index - 1] : undefined, tie: false, stats: selected.stats, select: selected }
+          judged = { judgeCalls: selected.calls, winner: selected.index > 0 ? alternatives[selected.index - 1] : undefined, tie: false, stats: selected.stats, select: selected, ...(selected.decisionId === undefined ? {} : { decisionId: selected.decisionId }) }
         }
       } catch (error) {
         // The judge run really happened before it failed: fold in every call the engine attached to
@@ -1379,16 +1387,20 @@ export class ProcessSelector {
   }
 
   /** Record a purchased cycle and stamp its durable outcome. */
-  private async report(input: { intent: ProcessIntent; reservation: Reservation; observation: RouteObservation; startedAt: number; outcome: string; replayed: 'original' | 'candidate'; generatedCalls: number; judgeCalls: number; sameCandidate: boolean; usage: RunStats; compare?: CompareResult; select?: SelectResult; error?: string }): Promise<void> {
+  private async report(input: { intent: ProcessIntent; reservation: Reservation; observation: RouteObservation; startedAt: number; outcome: string; replayed: 'original' | 'candidate'; generatedCalls: number; judgeCalls: number; sameCandidate: boolean; usage: RunStats; compare?: CompareResult & { decisionId?: string }; select?: SelectResult & { decisionId?: string }; error?: string }): Promise<void> {
     // The chip is told first: it is live UI state, and it must not depend on the cycle log or the
     // statistics row being writable (a read-only topic still gets an honest indicator).
     this.activities.finish(input.intent.sessionId, input.reservation.id, classifyProcessOutcome(input.outcome, input.replayed), this.deps.now())
     await this.deps.store(input.intent.agent).finish(input.reservation.id, input.outcome, input.replayed)
+    // The judging seam filed the snapshot under an id of its own; the statistics row adopts it, so
+    // "the snapshot of this row" resolves from the dashboard. Absent when nothing was captured.
+    const decisionId = input.compare?.decisionId ?? input.select?.decisionId
     await this.deps.record({
       agent: input.intent.agent,
       cycleId: input.reservation.id,
       purchased: true,
       startedAt: input.startedAt,
+      ...(decisionId === undefined ? {} : { decisionId }),
       outcome: input.outcome,
       replayed: input.replayed,
       generatedCalls: input.generatedCalls,

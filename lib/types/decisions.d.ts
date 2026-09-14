@@ -59,6 +59,14 @@ export interface DecisionInput {
     provider: string;
     model: string;
     calls: readonly DecisionCall[];
+    /**
+     * Invocation id to file the snapshot under; a fresh uuid when omitted.
+     *
+     * The dashboard lists STATISTICS rows and asks for the snapshot of one row by ITS id, so the
+     * caller passes the id the statistics row was stored with. Two independent uuids made every
+     * lookup miss and the panel claim the snapshot was pruned or never captured.
+     */
+    id?: string;
 }
 /**
  * Per-topic ring buffer of decision snapshots.

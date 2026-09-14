@@ -31,6 +31,22 @@ function stats(overrides: Partial<ReturnType<typeof emptyRunStats>> = {}) {
 }
 
 describe('StatisticsStore', () => {
+  it('stores a caller-supplied invocation id so the dashboard row can find its decision snapshot', async () => {
+    // The row and its snapshot must share ONE id: the "recall" button sends the id the row was
+    // listed under, and an independently generated uuid made that lookup miss every time.
+    const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
+    const file = join(root, 'statistics.json')
+    const store = new StatisticsStore(file, 100)
+    const stored = await store.record({ id: 'invocation-9', toolName: 'verifier_current_session', startedAt: 1, success: true, provider: 'p', model: 'm', stats: stats() })
+    expect(stored.id).toBe('invocation-9')
+    const reopened = new StatisticsStore(file, 100)
+    const overview = await reopened.overview({ fromMs: 0, toMs: 10 })
+    expect(overview.recent[0]?.id).toBe('invocation-9')
+    // An unusable id falls back to a generated one instead of producing a nameless row.
+    const fallback = await store.record({ id: '', toolName: 'verifier_track', startedAt: 2, success: true, provider: 'p', model: 'm', stats: stats() })
+    expect(fallback.id).not.toBe('')
+  })
+
   it('records and aggregates invocations by day, tool, model, and session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-statistics-'))
     const file = join(root, 'statistics.json')
