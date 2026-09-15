@@ -119,6 +119,48 @@ function repairStalePin(dir, declared) {
   console.log('sync-installed-profiles: repaired the stale ' + basename(stale.lockfile) + ' pin in ' + dir + ' (' + stale.pinned + ' -> ' + stale.replacement + ')')
 }
 
+/**
+ * The specifier this profile should declare instead, when its `file:` dependency points at a
+ * repository that is no longer there.
+ *
+ * The declared path is absolute because pnpm materializes a directory dependency that way; nothing
+ * in package.json can express "this package, wherever it happens to live". The rewrite is therefore
+ * done here, by the build of the package that is being moved, which is the only party that knows
+ * both locations at once.
+ */
+function repointableSpecifier(profile) {
+  if (typeof profile.dependency !== 'string') return undefined
+  const match = /^\s*(file|link):/i.exec(profile.dependency)
+  if (match === null) return undefined
+  const declared = localDependencyTarget(profile.dir, profile.dependency)
+  if (declared === undefined || existsSync(declared)) return undefined
+  return { protocol: match[1].toLowerCase(), specifier: match[1].toLowerCase() + ':' + repo.split(sep).join('/'), declared }
+}
+
+/**
+ * Point a profile whose dependency still names an earlier checkout at this repository.
+ *
+ * Both places that carry the path are rewritten: package.json, and the lockfile line that mirrors
+ * its specifier verbatim (pnpm keeps resolving a `file:` directory from the lockfile, so fixing
+ * only the manifest would leave the install failing exactly as before).
+ */
+function repointProfile(profile, target) {
+  const manifest = join(profile.dir, 'package.json')
+  const text = readFileSync(manifest, 'utf8')
+  const repointed = text.split(profile.dependency).join(target.specifier)
+  if (repointed === text) return undefined
+  writeFileSync(manifest, repointed)
+  const lockfile = join(profile.dir, 'pnpm-lock.yaml')
+  if (existsSync(lockfile)) {
+    const before = readFileSync(lockfile, 'utf8')
+    const after = before.split(profile.dependency.slice(profile.dependency.indexOf(':') + 1))
+      .join(target.specifier.slice(target.specifier.indexOf(':') + 1))
+    if (after !== before) writeFileSync(lockfile, after)
+  }
+  console.log('sync-installed-profiles: repointed ' + manifest + ' at ' + target.specifier)
+  return target.specifier
+}
+
 /** Last lines of pnpm's own log, so a failed install reports a cause instead of "Command failed". */
 function installLogTail(log) {
   try {
@@ -230,7 +272,19 @@ for (const profile of profiles) {
     continue
   }
   installedProfiles += 1
-  const declared = localDependencyTarget(profile.dir, profile.dependency)
+  // A profile that still names an earlier checkout is repointed before anything is removed, so a
+  // moved repository refreshes instead of leaving the profile on a stale copy forever.
+  let declared = localDependencyTarget(profile.dir, profile.dependency)
+  const repoint = repointableSpecifier(profile)
+  if (repoint !== undefined) {
+    const applied = check ? repoint.specifier : repointProfile(profile, repoint)
+    if (applied === undefined) {
+      console.log('! sync-installed-profiles: ' + profile.dir + ' depends on ' + repoint.declared + ', which does not exist and could not be rewritten; kept the installed copy untouched')
+      continue
+    }
+    if (check) console.log('sync-installed-profiles: would repoint ' + join(profile.dir, 'package.json') + ' at ' + applied)
+    declared = repo
+  }
   if (declared !== undefined && !existsSync(declared)) {
     console.log('! sync-installed-profiles: ' + profile.dir + ' depends on ' + declared + ', which does not exist; kept the installed copy untouched')
     continue
