@@ -187,6 +187,8 @@ describe('settings validation', () => {
     expect(codesFor({ ...base, cacheDir: 'nested/verifier' }, 'cacheDir')).toEqual([])
     expect(codesFor({ ...base, provider: '' }, 'provider')).toEqual(['required'])
     expect(codesFor({ ...base, model: '  ' }, 'model')).toEqual(['required'])
+    expect(codesFor({ ...base, priceProviderOverride: '' }, 'priceProviderOverride')).toEqual([])
+    expect(codesFor({ ...base, priceProviderOverride: 'deepseek-official' }, 'priceProviderOverride')).toEqual([])
   })
 
   it('never blocks a missing custom rubric file: the resolver falls back and reports why', () => {

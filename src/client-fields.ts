@@ -433,10 +433,17 @@ export function validateValues(values: Values): FieldIssue[] {
       }
       continue
     }
-    // Empty is a legal value for the two identity-ish text fields: the custom criteria file falls
-    // back to `coding`, and the alternative model falls back to the request's own route. Requiring
-    // text here would reject a save the host accepts.
-    if (field.kind === 'text' && field.key !== 'criteriaFile' && field.key !== 'label' && field.key !== 'autoProcessAlternativeModel') {
+    // Empty is a legal value for the optional text fields: the custom criteria file falls
+    // back to `coding`, the alternative model falls back to the request's own route, label falls
+    // back to provider/model, and priceProviderOverride defaults to empty (no cross-provider guessing).
+    // Requiring text here would reject a save the host accepts.
+    if (
+      field.kind === 'text' &&
+      field.key !== 'criteriaFile' &&
+      field.key !== 'label' &&
+      field.key !== 'autoProcessAlternativeModel' &&
+      field.key !== 'priceProviderOverride'
+    ) {
       const value = typeof raw === 'string' ? raw.trim() : ''
       if (!value) {
         issues.push({ key: field.key, code: 'required' })
