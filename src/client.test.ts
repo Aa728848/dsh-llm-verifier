@@ -805,5 +805,64 @@ describe('client design tokens', () => {
   })
 })
 
+/** Body of one exported function declaration, up to its column-zero closing brace. */
+function declarationBody(source: string, name: string): string {
+  const start = source.indexOf('export function ' + name + '(')
+  expect(start, name).toBeGreaterThanOrEqual(0)
+  const end = source.indexOf('\n}\n', start)
+  return source.slice(start, end === -1 ? undefined : end)
+}
+
+/** One `const NAME: React.CSSProperties = { ... }` object literal, up to its column-zero brace. */
+function styleObject(source: string, name: string): string {
+  const start = source.indexOf('const ' + name + ': React.CSSProperties = {')
+  expect(start, name).toBeGreaterThanOrEqual(0)
+  const end = source.indexOf('\n}', start)
+  expect(end, name).toBeGreaterThan(start)
+  return source.slice(start, end)
+}
+
+/**
+ * The activity card is ONE element that owns both the dock-column width and the card surface.
+ *
+ * The composer stack is a host region a host or skin stylesheet may paint (the dock row, for
+ * instance with the tip surface). A wrapper holding the dock-column width but no background of its
+ * own then shows that paint as a "mask" reaching well past the card on both sides — the reported
+ * "背景遮罩超出了位置" — because a background is only ever clipped to the border box it is declared
+ * on. The host's own TodoPanel does the same single-element thing for the same reason, so this also
+ * keeps the chip a member of that family. Splitting the card back into a wrapper plus an inner bar
+ * reintroduces the bug whatever the inner element looks like, hence the regression.
+ */
+describe('client activity card structure', () => {
+  const read = (): string => readFileSync(fileURLToPath(new URL('./client.tsx', import.meta.url)), 'utf8')
+
+  it('renders the chip as a single box', () => {
+    const body = declarationBody(read(), 'VerifierActivityChip')
+    expect(body.match(/<div/g)?.length).toBe(1)
+    expect(body).toContain('style={activityCard}')
+  })
+
+  it('declares the dock-column width and the card surface on that one element', () => {
+    const card = styleObject(read(), 'activityCard')
+    // The width axis (chat content column minus the composer clearances and the four dock insets).
+    expect(card).toContain('--dsh-composer-side-clearance')
+    expect(card).toContain('maxWidth')
+    expect(card).toContain('--dsh-composer-card-max-width')
+    // The surface, its stroke and the card's fixed height, on the very same element.
+    expect(card).toContain('borderRadius: 12')
+    expect(card).toContain('border:')
+    expect(card).toContain('--dsw-alias-border-l1')
+    expect(card).toContain('background:')
+    expect(card).toContain('--dsw-specific-tip')
+    expect(card).toContain('height: 36')
+  })
+
+  it('leaves no second element on that width axis for a host-painted row surface to show through', () => {
+    const source = read()
+    const dockWidths = source.match(/width: 'calc\(100% - var\(--dsh-composer-side-clearance/g) ?? []
+    expect(dockWidths.length).toBe(1)
+  })
+})
+
 
 

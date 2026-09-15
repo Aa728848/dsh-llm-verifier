@@ -1000,18 +1000,19 @@ async function readVerifierActivity(rpc: any, sessionId: string, signal: AbortSi
  * four dock insets — and the fallbacks below only matter on a host that does not publish the three
  * custom properties. Without this clamp the status line stretches to the window edge and its text
  * sits far left of the composer it belongs to, which is exactly the misplacement it is here to fix.
+ *
+ * ONE element owns BOTH the dock-column width and the card surface. The composer stack is a host
+ * region a host or skin stylesheet may paint (the dock row, for instance with the tip surface), and
+ * a wider wrapper that paints no background of its own would show that paint as a mask reaching
+ * well past the card on both sides. The surface here is declared inline, so it is itself the card:
+ * a background can never be painted outside the border box it is declared on.
  */
-const activityDock: React.CSSProperties = {
-  boxSizing: 'border-box',
-  width: 'calc(100% - var(--dsh-composer-side-clearance, 16px) - var(--dsh-composer-side-clearance, 16px) - var(--dsh-composer-dock-inset, 8px) - var(--dsh-composer-dock-inset, 8px) - var(--dsh-composer-dock-inset, 8px) - var(--dsh-composer-dock-inset, 8px))',
-  margin: '0 auto',
-}
-const activityBar: React.CSSProperties = {
+const activityCard: React.CSSProperties = {
   boxSizing: 'border-box',
   display: 'flex',
   alignItems: 'center',
   gap: 10,
-  width: '100%',
+  width: 'calc(100% - var(--dsh-composer-side-clearance, 16px) - var(--dsh-composer-side-clearance, 16px) - var(--dsh-composer-dock-inset, 8px) - var(--dsh-composer-dock-inset, 8px) - var(--dsh-composer-dock-inset, 8px) - var(--dsh-composer-dock-inset, 8px))',
   maxWidth: 'calc(var(--dsh-composer-card-max-width, 952px) - 4 * var(--dsh-composer-dock-inset, 8px))',
   height: 36,
   margin: '0 auto',
@@ -1066,11 +1067,9 @@ export function VerifierActivityChip({ session, rpc }: { session?: { sessionId?:
   if (rendered === null) return null
   const dotState: StateDotState = rendered.tone === 'busy' ? 'ongoing' : rendered.tone === 'ok' ? 'done' : 'error'
   return (
-    <div style={activityDock}>
-      <div style={activityBar} role="status" aria-live="polite">
-        <StateDot state={dotState} size={8} />
-        <span style={activityTextStyle}>{rendered.text}</span>
-      </div>
+    <div style={activityCard} role="status" aria-live="polite">
+      <StateDot state={dotState} size={8} />
+      <span style={activityTextStyle}>{rendered.text}</span>
     </div>
   )
 }
