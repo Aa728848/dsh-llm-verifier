@@ -129,6 +129,14 @@ export interface Config {
   cacheMaxEntries?: number
   estimatedInputUsdPerMillion?: number
   estimatedOutputUsdPerMillion?: number
+  /** USD per million prompt tokens served from cache; 0 falls back to the input rate. */
+  estimatedCachedInputUsdPerMillion?: number
+  /** Price a judge route from the installed pi-ai catalog when the operator typed no rate. */
+  autoPriceFromCatalog?: boolean
+  /** Consult the models.dev snapshot when the installed catalog has no price for the route. */
+  autoPriceOnline?: boolean
+  /** Provider id whose list price to follow for a route neither price table knows. */
+  priceProviderOverride?: string
   extraJudges?: JudgeConfig[]
 }
 
@@ -176,6 +184,10 @@ export interface ResolvedConfig {
   cacheMaxEntries: number
   estimatedInputUsdPerMillion: number
   estimatedOutputUsdPerMillion: number
+  estimatedCachedInputUsdPerMillion: number
+  autoPriceFromCatalog: boolean
+  autoPriceOnline: boolean
+  priceProviderOverride: string
   judges: ResolvedJudge[]
 }
 
@@ -232,6 +244,10 @@ export const Config: z<Config> = z.object({
   cacheMaxEntries: z.number().step(1).min(1).default(10000),
   estimatedInputUsdPerMillion: z.number().min(0).default(0),
   estimatedOutputUsdPerMillion: z.number().min(0).default(0),
+  estimatedCachedInputUsdPerMillion: z.number().min(0).default(0),
+  autoPriceFromCatalog: z.boolean().default(true),
+  autoPriceOnline: z.boolean().default(true),
+  priceProviderOverride: z.string().default(''),
   extraJudges: z.array(z.object({
     provider: z.string(),
     model: z.string(),
@@ -326,7 +342,11 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   if (cacheDir.split(/[\\/]+/u).includes('..')) throw new Error('llm-verifier: cacheDir must stay inside the topic directory')
   const estimatedInputUsdPerMillion = config.estimatedInputUsdPerMillion ?? 0
   const estimatedOutputUsdPerMillion = config.estimatedOutputUsdPerMillion ?? 0
-  if (![estimatedInputUsdPerMillion, estimatedOutputUsdPerMillion].every(value => Number.isFinite(value) && value >= 0)) throw new Error('llm-verifier: estimated token prices must be finite non-negative numbers')
+  const estimatedCachedInputUsdPerMillion = config.estimatedCachedInputUsdPerMillion ?? 0
+  if (![estimatedInputUsdPerMillion, estimatedOutputUsdPerMillion, estimatedCachedInputUsdPerMillion].every(value => Number.isFinite(value) && value >= 0)) throw new Error('llm-verifier: estimated token prices must be finite non-negative numbers')
+  // A reseller route has no price in either table; the override names the provider whose list
+  // price the operator chose to follow. Empty (the default) means "never guess across providers".
+  const priceProviderOverride = (config.priceProviderOverride ?? '').trim()
   const criteriaPreset = config.criteriaPreset ?? 'coding'
   if (criteriaPreset !== 'custom' && !CRITERIA_PRESET_IDS.includes(criteriaPreset as CriteriaPresetId)) throw new Error('llm-verifier: criteriaPreset must be one of ' + [...CRITERIA_PRESET_IDS, 'custom'].join(', '))
   // A half-configured custom rubric is NOT a config error: CriteriaResolver falls back to the
@@ -420,6 +440,10 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     cacheDir,
     estimatedInputUsdPerMillion,
     estimatedOutputUsdPerMillion,
+    estimatedCachedInputUsdPerMillion,
+    autoPriceFromCatalog: config.autoPriceFromCatalog ?? true,
+    autoPriceOnline: config.autoPriceOnline ?? true,
+    priceProviderOverride,
     ...values,
     temperature,
     judges,

@@ -164,10 +164,13 @@ export declare class VerifierEngine {
     readonly cache: ScoreCache | undefined;
     readonly inputPrice: number;
     readonly outputPrice: number;
+    /** Cache-read rate; an omitted one falls back to the input rate. */
+    readonly cachedInputPrice: number;
     private readonly flights;
     constructor(client: VerifierClientConfig | readonly VerifierClientConfig[], maxConcurrency?: number, cache?: ScoreCache, prices?: {
         input: number;
         output: number;
+        cachedInput?: number;
     }, flights?: SingleFlight<{
         value: CachedPairScore;
         hit: boolean;

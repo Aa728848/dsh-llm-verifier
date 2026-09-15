@@ -55,6 +55,10 @@ export interface Values {
     cacheMaxEntries: number;
     estimatedInputUsdPerMillion: number;
     estimatedOutputUsdPerMillion: number;
+    estimatedCachedInputUsdPerMillion: number;
+    autoPriceFromCatalog: boolean;
+    autoPriceOnline: boolean;
+    priceProviderOverride: string;
     autoVerifySubagents: boolean;
     extraJudges: ExtraJudgeDraft[];
 }

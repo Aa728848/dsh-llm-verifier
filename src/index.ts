@@ -23,6 +23,7 @@ import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from './team-gate.t
 import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, parseStatisticsQuery, resolveStatisticsFile, summarizeVerdict, type RouteObservation, type StatisticsOverview, type VerdictSummary, type VerifierToolName } from './statistics.ts'
 import { resolveTopicDataDir, type SessionArtifactLocator } from './topic-storage.ts'
 import { DecisionStore, boundDecisionCalls, resolveDecisionsFile, type DecisionCall, type DecisionRecord, type DecisionTrace } from './decisions.ts'
+import { PriceResolver, costUsd } from './pricing.ts'
 
 export const name = 'llm-verifier'
 export const inject = ['tools', 'agents', 'attachments', 'llm', 'connection', 'sessionPersistence']
@@ -35,6 +36,7 @@ export * from './topic-storage.ts'
 export * from './decisions.ts'
 export * from './auto.ts'
 export * from './router.ts'
+export * from './pricing.ts'
 export * from './plan-gate.ts'
 export * from './team-gate.ts'
 export { callVerifier, RequestLimiter, type VerifierClientConfig, type VerifierImage, type UsageStats, type VerifierCompletion } from './caller.ts'
@@ -203,6 +205,32 @@ export function apply(ctx: Context, config: Config = {}): void {
   // verdict, never the model history (see `verifier-activity.ts` for why it is not a session event).
   const activities = new VerifierActivities()
   const autoRouter = new AutoVerifierRouter(createActivityObserver(activities))
+  // Automatic judge pricing: typed rates win, otherwise the installed pi-ai catalog and (when
+  // enabled) the models.dev snapshot. One resolver per plugin instance keeps both tables cached.
+  const priceResolver = new PriceResolver()
+  /**
+   * Rates in effect for one route.
+   *
+   * The operator's typed rates always win. Otherwise the installed catalog prices the route
+   * offline, and models.dev is consulted only when that misses. Nothing is ever inferred from a
+   * model id alone: the same id sells for 0.10/0.40 at one reseller and 0.65/1.45 at another, so
+   * a cross-provider guess would be a fabricated number in a cost column. `priceProviderOverride`
+   * is how an operator points a reseller route at the list price they chose to follow.
+   * @param provider - route's provider id.
+   * @param model - route's model id.
+   * @param selected - configuration in effect.
+   * @returns The rates plus the source that answered, never throwing.
+   */
+  const pricesFor = (provider: string, model: string, selected: ReturnType<typeof current>) => priceResolver.resolve(provider, model, {
+    manual: {
+      input: selected.estimatedInputUsdPerMillion,
+      output: selected.estimatedOutputUsdPerMillion,
+      cachedInput: selected.estimatedCachedInputUsdPerMillion,
+    },
+    fromCatalog: selected.autoPriceFromCatalog,
+    online: selected.autoPriceOnline,
+    ...(selected.priceProviderOverride ? { overrideProvider: selected.priceProviderOverride } : {}),
+  })
   const topics = new Map<string, { dataDir: string; cache: ScoreCache; capabilities: TopLogprobCapabilityCache; flights: SingleFlight<{ value: CachedPairScore; hit: boolean }>; statistics: StatisticsStore; decisions: DecisionStore; process: ProcessCycleStore }>()
   const topic = (header: SessionHeader) => {
     const selected = current()
@@ -302,7 +330,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       await ctx.llm.resolveCallConfig({ provider: judge.provider, model: judge.model, ...(judge.reasoningEffort ? { reasoningEffort: judge.reasoningEffort as never } : {}), maxTokens: judge.maxTokens })
       clients.push({ ctx, llm: ctx.llm, attachments: services.attachments, topLogprobCapabilities: topicEntry.capabilities, provider: judge.provider, model: judge.model, temperature: selected.temperature, label: judge.label, ...(judge.reasoningEffort ? { reasoningEffort: judge.reasoningEffort } : {}), maxTokens: judge.maxTokens, timeoutMs: selected.timeoutMs, maxRetries: selected.maxRetries, retryBaseDelayMs: selected.retryBaseDelayMs, limiter })
     }
-    return { verifier: new VerifierEngine(clients, selected.maxConcurrency, topicEntry.cache, { input: selected.estimatedInputUsdPerMillion, output: selected.estimatedOutputUsdPerMillion }, topicEntry.flights), selected }
+    // One rate table for the whole invocation, taken from the primary judge: the engine reports
+    // one cost line per call, exactly as it did with the operator's single manual table.
+    const prices = await pricesFor(selected.provider, selected.model, selected)
+    return { verifier: new VerifierEngine(clients, selected.maxConcurrency, topicEntry.cache, { input: prices.input, output: prices.output, cachedInput: prices.cachedInput }, topicEntry.flights), selected, prices }
   }
   const engine = async (agent: Agent) => engineForHeader(agent.session.header)
   const images = (values: readonly string[] | undefined, signal: AbortSignal) => loadVerifierImages(values, signal)
@@ -474,6 +505,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     const call = agent.session.requestHeader()?.config
     if (call === undefined) throw new Error('llm-verifier: this session has no logged request header yet, so best-of-n cannot tell which model should write the drafts — generate candidates with parallel subagents and rank them with verifier_select instead')
     const target = { provider: call.provider, model: call.model, ...(call.reasoningEffort === undefined ? {} : { reasoningEffort: String(call.reasoningEffort) }) }
+    // The drafts come from the session model, so they are priced with THAT route's rates rather
+    // than with the judge's, which is what the single manual table could only approximate.
+    const generationPrices = await pricesFor(target.provider, target.model, selected)
     // The task and the optional reference context share ONE explicit budget, each with its own item
     // cap, so a huge context cannot push the combined request past the documented ceiling.
     const contextRaw = typeof contextInput === 'string' ? contextInput : undefined
@@ -495,7 +529,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const generation = emptyRunStats()
     let unknownDrafts = 0
     const finishGeneration = (): RunStats => {
-      generation.estimatedCostUsd = ((generation.inputTokens + generation.cachedInputTokens) * selected.estimatedInputUsdPerMillion + generation.outputTokens * selected.estimatedOutputUsdPerMillion) / 1_000_000
+      generation.estimatedCostUsd = costUsd(generation, generationPrices)
       return generation
     }
     const failWithUsage = (error: Error): never => {
@@ -623,10 +657,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     return { result, selected }
   })
   const classifyRoute = async (agent: Agent, prompt: string, signal: AbortSignal, phase: string, observation?: RouteObservation) => record('verifier_route_classify', agent, async (trace) => {
-    const { verifier, selected } = await engine(agent)
+    const { verifier, selected, prices } = await engine(agent)
     const completion = await callVerifierText(verifier.client, prompt, signal)
     trace?.({ label: 'route classify', channel: completion.scoringMode, prompt, output: completion.text })
-    const stats: RunStats = { ...completion.usage, cacheHits: 0, cacheMisses: 0, estimatedCostUsd: ((completion.usage.inputTokens + completion.usage.cachedInputTokens) * selected.estimatedInputUsdPerMillion + completion.usage.outputTokens * selected.estimatedOutputUsdPerMillion) / 1_000_000, topLogprobScores: 0, explicitTagScores: 1 }
+    const stats: RunStats = { ...completion.usage, cacheHits: 0, cacheMisses: 0, estimatedCostUsd: costUsd(completion.usage, prices), topLogprobScores: 0, explicitTagScores: 1 }
     return { result: { text: completion.text, stats }, selected }
   }, phase, observation)
   const extractTask = async (agent: Agent, fromSeq: number, toSeq: number, maxChars: number, signal: AbortSignal) => extractSession(agent, async (ref: ImageAttachmentRef) => { const stored = await services.attachments.readImage(ref, signal); return { data: stored.data, mediaType: stored.ref.mediaType } }, { fromSeq, toSeq, includeAssistantText: true, maxChars })
@@ -843,7 +877,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       // the verifier table (the same estimate best-of-n documents). Tokens are reported too.
       const stats: RunStats = {
         ...report.usage,
-        estimatedCostUsd: ((report.usage.inputTokens + report.usage.cachedInputTokens) * selected.estimatedInputUsdPerMillion + report.usage.outputTokens * selected.estimatedOutputUsdPerMillion) / 1_000_000,
+        estimatedCostUsd: costUsd(report.usage, await pricesFor(selected.provider, selected.model, selected)),
       }
       // The row is the SAME shape for both cycle sizes; only the tool name and the summarizer differ,
       // so a tournament row still reports the process phase, the route observation and its usage.
@@ -1013,6 +1047,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       for (const client of verifier.clients) {
         const label = client.label ?? client.provider + '/' + client.model
         const startedAt = Date.now()
+        // The diagnostic answers "which rate is my judge being priced at, and why", which is the
+        // only place a silently auto-derived (or still unpriced) route is visible.
+        const prices = await pricesFor(client.provider, client.model, current())
+        const priceView = { input: prices.input, output: prices.output, cachedInput: prices.cachedInput, source: prices.source }
         // Forget the cached channel verdict for this judge before probing. A mark written up to 24h
         // ago — possibly before the provider was (re)configured, and certainly before a host
         // restart — would make the probe replay a stale answer instead of checking, which is the one
@@ -1028,13 +1066,14 @@ export function apply(ctx: Context, config: Config = {}): void {
             ok: true,
             channelProbed: true,
             channel: completion.scoringMode,
+            prices: priceView,
             scoreA: extractScore(completion, '<score_A>'),
             scoreB: extractScore(completion, '<score_B>'),
             latencyMs: Date.now() - startedAt,
             ...completion.usage,
           })
         } catch (error) {
-          judges.push({ label, provider: client.provider, model: client.model, ok: false, latencyMs: Date.now() - startedAt, error: error instanceof Error ? error.message : String(error) })
+          judges.push({ label, provider: client.provider, model: client.model, ok: false, prices: priceView, latencyMs: Date.now() - startedAt, error: error instanceof Error ? error.message : String(error) })
         }
       }
       return rpcSuccess({

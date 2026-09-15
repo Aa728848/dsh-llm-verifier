@@ -11,6 +11,7 @@ export * from './topic-storage.ts';
 export * from './decisions.ts';
 export * from './auto.ts';
 export * from './router.ts';
+export * from './pricing.ts';
 export * from './plan-gate.ts';
 export * from './team-gate.ts';
 export { callVerifier, RequestLimiter, type VerifierClientConfig, type VerifierImage, type UsageStats, type VerifierCompletion } from './caller.ts';

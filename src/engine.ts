@@ -1,6 +1,7 @@
 import { addUsage, attachUsage, callVerifier, emptyUsage, partialUsage, predictScoringChannel, requestAttempts, type ScoringMode, type UsageStats, type VerifierClientConfig, type VerifierImage } from './caller.ts'
 import { ScoreCache, SingleFlight, stableHash, type CachedPairScore } from './cache.ts'
 import type { DecisionTrace } from './decisions.ts'
+import { costUsd } from './pricing.ts'
 import {
   DEFAULT_CRITERIA, DEFAULT_GROUND_TRUTH_NOTE, PROPOSAL_CRITERIA, accumulatePairs, buildPairwisePrompt, buildProgressPrompt,
   dedupeCriterionId, diagnosticKey, extractProgressScore, extractScore, parseDiagnostics, pivotRoundPairs, rankScores,
@@ -314,13 +315,15 @@ export class VerifierEngine {
   readonly cache: ScoreCache | undefined
   readonly inputPrice: number
   readonly outputPrice: number
+  /** Cache-read rate; an omitted one falls back to the input rate. */
+  readonly cachedInputPrice: number
   private readonly flights: SingleFlight<{ value: CachedPairScore; hit: boolean }>
 
   constructor(
     client: VerifierClientConfig | readonly VerifierClientConfig[],
     maxConcurrency = 8,
     cache?: ScoreCache,
-    prices: { input: number; output: number } = { input: 0, output: 0 },
+    prices: { input: number; output: number; cachedInput?: number } = { input: 0, output: 0 },
     flights: SingleFlight<{ value: CachedPairScore; hit: boolean }> = new SingleFlight(),
   ) {
     const list = Array.isArray(client) ? client : [client]
@@ -331,11 +334,14 @@ export class VerifierEngine {
     this.cache = cache
     this.inputPrice = prices.input
     this.outputPrice = prices.output
+    // Backward compatible default: a caller that only knows two rates keeps the old estimate
+    // (cache reads at the input rate) instead of suddenly pricing them at zero.
+    this.cachedInputPrice = prices.cachedInput ?? prices.input
     this.flights = flights
   }
 
   private finishStats(stats: RunStats): RunStats {
-    stats.estimatedCostUsd = ((stats.inputTokens + stats.cachedInputTokens) * this.inputPrice + stats.outputTokens * this.outputPrice) / 1_000_000
+    stats.estimatedCostUsd = costUsd(stats, { input: this.inputPrice, output: this.outputPrice, cachedInput: this.cachedInputPrice })
     return stats
   }
 

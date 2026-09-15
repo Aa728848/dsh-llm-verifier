@@ -122,6 +122,14 @@ export interface Config {
     cacheMaxEntries?: number;
     estimatedInputUsdPerMillion?: number;
     estimatedOutputUsdPerMillion?: number;
+    /** USD per million prompt tokens served from cache; 0 falls back to the input rate. */
+    estimatedCachedInputUsdPerMillion?: number;
+    /** Price a judge route from the installed pi-ai catalog when the operator typed no rate. */
+    autoPriceFromCatalog?: boolean;
+    /** Consult the models.dev snapshot when the installed catalog has no price for the route. */
+    autoPriceOnline?: boolean;
+    /** Provider id whose list price to follow for a route neither price table knows. */
+    priceProviderOverride?: string;
     extraJudges?: JudgeConfig[];
 }
 export interface ResolvedConfig {
@@ -168,6 +176,10 @@ export interface ResolvedConfig {
     cacheMaxEntries: number;
     estimatedInputUsdPerMillion: number;
     estimatedOutputUsdPerMillion: number;
+    estimatedCachedInputUsdPerMillion: number;
+    autoPriceFromCatalog: boolean;
+    autoPriceOnline: boolean;
+    priceProviderOverride: string;
     judges: ResolvedJudge[];
 }
 export declare const JudgeConfig: z<JudgeConfig>;

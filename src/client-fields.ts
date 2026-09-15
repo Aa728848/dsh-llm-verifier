@@ -58,6 +58,10 @@ export interface Values {
   cacheMaxEntries: number
   estimatedInputUsdPerMillion: number
   estimatedOutputUsdPerMillion: number
+  estimatedCachedInputUsdPerMillion: number
+  autoPriceFromCatalog: boolean
+  autoPriceOnline: boolean
+  priceProviderOverride: string
   autoVerifySubagents: boolean
   extraJudges: ExtraJudgeDraft[]
 }
@@ -112,6 +116,10 @@ export const CONFIG_DEFAULTS: Values = {
   cacheMaxEntries: 10000,
   estimatedInputUsdPerMillion: 0,
   estimatedOutputUsdPerMillion: 0,
+  estimatedCachedInputUsdPerMillion: 0,
+  autoPriceFromCatalog: true,
+  autoPriceOnline: true,
+  priceProviderOverride: '',
   autoVerifySubagents: false,
   extraJudges: [],
 }
@@ -244,8 +252,12 @@ export const FIELDS: readonly FieldSpec[] = [
   number('retryBaseDelayMs', 'execution', { min: 1, integer: true, unitKey: 'settings.unit.ms' }),
   number('timeoutMs', 'execution', { min: 1, integer: true, unitKey: 'settings.unit.ms' }),
 
+  toggle('autoPriceFromCatalog', 'cost'),
+  toggle('autoPriceOnline', 'cost'),
+  text('priceProviderOverride', 'cost', true),
   number('estimatedInputUsdPerMillion', 'cost', { min: 0 }),
   number('estimatedOutputUsdPerMillion', 'cost', { min: 0 }),
+  number('estimatedCachedInputUsdPerMillion', 'cost', { min: 0 }),
 ]
 
 export function fieldsOfSection(section: SectionId): FieldSpec[] {
@@ -336,6 +348,10 @@ export function valuesFromView(view: Record<string, unknown> | undefined): Value
     cacheMaxEntries: numberOr('cacheMaxEntries'),
     estimatedInputUsdPerMillion: numberOr('estimatedInputUsdPerMillion'),
     estimatedOutputUsdPerMillion: numberOr('estimatedOutputUsdPerMillion'),
+    estimatedCachedInputUsdPerMillion: numberOr('estimatedCachedInputUsdPerMillion'),
+    autoPriceFromCatalog: v.autoPriceFromCatalog !== false,
+    autoPriceOnline: v.autoPriceOnline !== false,
+    priceProviderOverride: typeof v.priceProviderOverride === 'string' ? v.priceProviderOverride.trim() : '',
     autoVerifySubagents: v.autoVerifySubagents === true,
     extraJudges: normalizeExtraJudges(v.extraJudges),
   }

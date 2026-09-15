@@ -127,6 +127,14 @@ export const zh = {
   'field.estimatedInputUsdPerMillion.help': '每百万输入 Token 的美元价格，仅用于统计估算。',
   'field.estimatedOutputUsdPerMillion.title': '输出价格',
   'field.estimatedOutputUsdPerMillion.help': '每百万输出 Token 的美元价格，仅用于统计估算。',
+  'field.estimatedCachedInputUsdPerMillion.title': '缓存读取价格',
+  'field.estimatedCachedInputUsdPerMillion.help': '每百万缓存命中输入 Token 的美元价格；留 0 时退回按输入价格计算（旧口径，对缓存密集的调用会高估）。',
+  'field.autoPriceFromCatalog.title': '从本机模型目录自动定价',
+  'field.autoPriceFromCatalog.help': '本机安装的 pi-ai 模型目录（models.dev 快照）里有这条 provider/模型时自动取出单价。手填的价格永远优先；目录里没有就交给在线价格库。',
+  'field.autoPriceOnline.title': '在线价格库兜底',
+  'field.autoPriceOnline.help': '本机目录查不到时向 models.dev 查一次（结果缓存 24 小时）。只按 provider + 模型精确匹配，绝不跨 provider 猜价——同一个模型 id 在不同转售商手里能差 6 倍。',
+  'field.priceProviderOverride.title': '价格来源 Provider',
+  'field.priceProviderOverride.help': '转售路由（例如 command-code）两张价格表里都没有时，填一个 provider id（例如 openrouter），按它的挂牌价折算。留空表示不猜：未定价的路由成本记为 0。',
 
   // Settings Actions & Alerts
   'settings.catalogFailures': '部分模型目录读取失败',
@@ -472,6 +480,14 @@ export const en: I18nDict = {
   'field.estimatedInputUsdPerMillion.help': 'USD price per million input tokens, for statistical estimation only.',
   'field.estimatedOutputUsdPerMillion.title': 'Output Price',
   'field.estimatedOutputUsdPerMillion.help': 'USD price per million output tokens, for statistical estimation only.',
+  'field.estimatedCachedInputUsdPerMillion.title': 'Cached Input Price',
+  'field.estimatedCachedInputUsdPerMillion.help': 'USD per million cached prompt tokens. Left at 0 it falls back to the input price, which is the old estimate and over-reports cache-heavy calls.',
+  'field.autoPriceFromCatalog.title': 'Auto Price From Catalog',
+  'field.autoPriceFromCatalog.help': 'Price this judge route from the installed pi-ai model catalog (a models.dev snapshot). Typed prices always win; a route the catalog does not describe moves on to the online lookup.',
+  'field.autoPriceOnline.title': 'Online Price Lookup',
+  'field.autoPriceOnline.help': 'When the installed catalog has no entry, query models.dev once (cached for 24 hours). Matching is exact provider + model only — prices are never guessed across providers, where the same model id can differ sixfold.',
+  'field.priceProviderOverride.title': 'Price Source Provider',
+  'field.priceProviderOverride.help': 'For a reseller route neither price table knows (for example command-code), name the provider whose list price to follow (for example openrouter). Empty means never guess and leave the route unpriced.',
 
   // Settings Actions & Alerts
   'settings.catalogFailures': 'Some model catalogs failed to load',
