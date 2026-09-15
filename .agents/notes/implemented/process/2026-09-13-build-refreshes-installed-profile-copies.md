@@ -39,3 +39,5 @@ Status: implemented
 - 每次构建多约 0.5 秒，并会重写 profile 中该包目录；除此之外不触碰 profile 的任何其它内容。
 - 发布链路不变：CI/新克隆没有 profile，这一步是 no-op；`lib/` 仍入库、`prepublishOnly` 仍只在锁定依赖下 typecheck + 测试 + 构建。
 - 提醒：这条脚本只解决"产物 → 已安装副本"的同步；**同一个模块实例**这件事由"包安装在 profile 树内、peer 从宿主解析"保证，不要再引入软链安装。
+
+> 更新（2026-09-15）：刷新改为「先移开、失败恢复」，并在删除任何东西之前修复仓库搬家后陈旧的 `file:` pin；只把本包列进 `dsh.profile.bundles` 的 profile 不再被报成"有声明却没安装"。见 `.agents/notes/implemented/bug-fix/2026-09-15-profile-sync-loses-install-on-failed-refresh.md`。
