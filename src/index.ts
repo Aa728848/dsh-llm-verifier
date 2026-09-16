@@ -116,11 +116,14 @@ const MAX_EXPLICIT_PLANNED_CALLS = 500
  * routine work. The floor is 2 because "choose the best of one" is not a choice.
  */
 /**
- * P06: one process-selection cycle per task.
+ * P06 allowance of the RECOVERY mode: one process-selection cycle per task.
  *
- * The shipped allowance is a single cycle by design. There is no private per-session process
- * counter: the router meters a process cycle against the SAME task/session route allowance as every
- * other routed decision (plan 8.1), so one task's cycle can never consume another task's.
+ * A single cycle by design for this mode — the task is stuck, and one differently informed attempt
+ * is the whole intervention. The every-step mode instead allows
+ * `autoProcessCyclesPerTask`, and {@link processAllowance} maps the mode onto the router's
+ * per-task process counter. There is no private per-session process counter: the router meters a
+ * process cycle against the SAME task/session route allowance as every other routed decision
+ * (plan 8.1), so one task's cycle can never consume another task's.
  */
 const MAX_PROCESS_PER_TASK = 1
 const MIN_BEST_OF_N = 2
@@ -664,7 +667,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     return { result: { text: completion.text, stats }, selected }
   }, phase, observation)
   const extractTask = async (agent: Agent, fromSeq: number, toSeq: number, maxChars: number, signal: AbortSignal) => extractSession(agent, async (ref: ImageAttachmentRef) => { const stored = await services.attachments.readImage(ref, signal); return { data: stored.data, mediaType: stored.ref.mediaType } }, { fromSeq, toSeq, includeAssistantText: true, maxChars })
-  const routePolicy = (selected: ReturnType<typeof current>, minFinalModelCalls: number) => ({ mode: selected.autoVerifyMode, minConfidence: selected.autoRouteMinConfidence, maxCandidates: selected.autoRouteMaxCandidates, maxRoutePerTask: selected.autoRouteMaxPerTask, maxRoutePerSession: selected.autoRouteMaxPerSession, maxFinalPerTask: selected.autoVerifyMaxPerTask, maxFinalPerSession: selected.autoVerifyMaxPerSession, maxModelCallsPerTask: selected.autoMaxModelCallsPerTask, maxModelCallsPerSession: selected.autoMaxModelCallsPerSession, maxInputChars: selected.autoRouteMaxInputChars, maxItemChars: selected.autoRouteMaxItemChars, minFinalModelCalls, maxProcessPerTask: MAX_PROCESS_PER_TASK })
+  // The process counter is a THIRD, independent allowance: it is neither the routing quota nor the
+  // final-acceptance quota, and its size follows the P06 mode (one cycle for recovery, the
+  // configured per-task ceiling for every-step). Sharing a counter with either neighbour would let
+  // an expensive every-step configuration starve the mandatory final gate.
+  const processAllowance = (selected: ReturnType<typeof current>): number =>
+    selected.autoProcessSelection === 'every-step' ? selected.maxProcessCyclesPerTask : MAX_PROCESS_PER_TASK
+  const routePolicy = (selected: ReturnType<typeof current>, minFinalModelCalls: number) => ({ mode: selected.autoVerifyMode, minConfidence: selected.autoRouteMinConfidence, maxCandidates: selected.autoRouteMaxCandidates, maxRoutePerTask: selected.autoRouteMaxPerTask, maxRoutePerSession: selected.autoRouteMaxPerSession, maxFinalPerTask: selected.autoVerifyMaxPerTask, maxFinalPerSession: selected.autoVerifyMaxPerSession, maxModelCallsPerTask: selected.autoMaxModelCallsPerTask, maxModelCallsPerSession: selected.autoMaxModelCallsPerSession, maxInputChars: selected.autoRouteMaxInputChars, maxItemChars: selected.autoRouteMaxItemChars, minFinalModelCalls, maxProcessPerTask: processAllowance(selected) })
   /**
    * The policy one process-selection cycle is admitted under.
    *
@@ -781,7 +790,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     settings: () => {
       const selected = current()
       return {
-        active: selected.enabled && selected.autoProcessSelection,
+        // Anything but the explicit 'off' arm may enter the path; the mode's own trigger decides
+        // WHETHER an intent was registered, so the selector must not second-guess the mode here.
+        active: selected.enabled && selected.autoProcessSelection !== 'off',
         smart: selected.autoVerifyMode === 'smart',
         timeoutMs: selected.timeoutMs,
         maxItemChars: selected.autoRouteMaxItemChars,
@@ -925,38 +936,61 @@ export function apply(ctx: Context, config: Config = {}): void {
   clearProcessIntents = () => processSelector.clearAll()
 
   /**
-   * Arm one process-selection intent when the task is stuck in the two-failure recovery.
+   * Arm one process-selection intent for the task's next real main request.
    *
    * Registration buys nothing by itself: it records that the NEXT real main request of this task
    * may be worth an alternative reply. Every precondition is re-checked when a request actually
    * arrives, so a stale intent can only ever be ignored. A log that cannot be read does NOT buy —
    * the safe side of "already purchased or unknown" is to keep the original path.
+   *
+   * Three modes share one registration path and differ only in the trigger and the allowance:
+   *
+   * - `off` returns immediately (the shipped closed path);
+   * - `recovery` keeps the original semantics exactly: the two-failure recovery signal is required and
+   *   the task may buy at most ONE cycle for its whole life;
+   * - `every-step` needs no recovery signal at all — every main-loop request may select — and is
+   *   bounded per task by {@link ResolvedConfig.maxProcessCyclesPerTask}. The recovery signal is
+   *   still inspected, because when it happens to hold the alternative is handed its failure evidence
+   *   (when the operator left that on); otherwise the cycle runs without it.
    * @param agent - the agent proposing the step.
    * @param signal - the turn's cancellation signal.
    */
   const registerProcessIntent = async (agent: Agent, signal: AbortSignal): Promise<void> => {
     const selected = current()
-    if (!selected.enabled || !selected.autoProcessSelection || selected.autoVerifyMode !== 'smart') return
+    const mode = selected.autoProcessSelection
+    if (!selected.enabled || mode === 'off' || selected.autoVerifyMode !== 'smart') return
     if (signal.aborted) return
     const sessionId = String(agent.id)
     if (processSelector.pending(sessionId)) return
     const events = sessionEvents(agent.session)
     const taskStartSeq = latestDirectUserSeq(events)
     if (taskStartSeq === undefined) return
-    if (autoRouter.hasProcessAttempt(agent)) return
+    // Two independent ledgers, and the purchase counts only when BOTH allow it. The in-memory router
+    // counter is authoritative within this process; the sidecar survives a plugin reload. The
+    // in-memory counter also counts every reservation the router GRANTED, while the sidecar counts
+    // every purchase that actually happened, so neither alone is the whole truth.
+    const inMemoryCycles = autoRouter.processAttemptCount(agent)
     const lookup = await topic(agent.session.header).process.lookup(sessionId, taskStartSeq)
     if (!lookup.ok) {
       ctx.logger.warn('llm-verifier process selection: the cycle log could not be read (' + String(lookup.reason) + '); no cycle will be bought for this task')
       return
     }
-    if (lookup.purchased) return
+    const boughtCycles = Math.max(inMemoryCycles, lookup.count)
+    // Recovery mode is the original contract: one purchase per task, and only once the task has shown
+    // two consecutive failed verification runs. Both rules are enforced here so a task that already
+    // bought its cycle keeps passing its requests through untouched.
+    if (mode === 'recovery' && (boughtCycles > 0 || lookup.purchased)) return
+    // Every-step: no signal required, but the per-task allowance is a hard ceiling.
+    if (mode === 'every-step' && boughtCycles >= selected.maxProcessCyclesPerTask) return
+    // The recovery digest is optional context: recovery mode cannot register without it, while
+    // every-step uses it only when the condition happens to hold and the operator asked for it.
     const recovery = inspectRecoverySignal(events, selected.autoRouteMaxItemChars)
-    if (recovery === undefined) return
+    if (mode === 'recovery' && recovery === undefined) return
     // Handing the alternative the failure evidence is what makes it a differently informed attempt
     // instead of a resample of a reply already shown to fail; the toggle exists so the controlled
     // comparison can run the other arm.
-    const failureContext = selected.autoProcessFailureContext ? recovery.failureContext : undefined
-    processSelector.register({ sessionId, agent, taskStartSeq, signal: recovery.signature, registeredAt: Date.now(), lastSeq: events.at(-1)?.seq ?? taskStartSeq, ...(failureContext === undefined ? {} : { failureContext }) })
+    const failureContext = selected.autoProcessFailureContext ? recovery?.failureContext : undefined
+    processSelector.register({ sessionId, agent, taskStartSeq, signal: recovery?.signature ?? 'every-step', registeredAt: Date.now(), lastSeq: events.at(-1)?.seq ?? taskStartSeq, ...(failureContext === undefined ? {} : { failureContext }) })
   }
 
   const handleStatisticsQuery = async (payload: unknown): Promise<{ ok: true; value: StatisticsOverview } | { ok: false; error: { code: 'bad-request'; message: string; details: { issues: never[] } } }> => {

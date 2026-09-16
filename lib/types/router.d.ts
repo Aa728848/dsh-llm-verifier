@@ -514,11 +514,13 @@ export declare class AutoVerifierRouter {
     /** Whether this exact fingerprint already passed within the current task. */
     completedFingerprint(agent: RoutedAgent, fingerprint: string): boolean;
     /**
-     * Whether this task already bought its process-selection cycle.
+     * How many process-selection cycles this task bought while the plugin has been loaded.
      *
-     * The in-memory counter is authoritative while the plugin is loaded; the durable sidecar
-     * covers a reload, which is why {@link hasProcessAttempt} exists next to it.
+     * The in-memory counter is authoritative for the current process; the durable sidecar
+     * covers a reload, which is why the caller reads BOTH and takes the larger.
      */
+    processAttemptCount(agent: RoutedAgent): number;
+    /** Whether this task already bought at least one process-selection cycle. */
     hasProcessAttempt(agent: RoutedAgent): boolean;
     finalRequired(agent: RoutedAgent): number | undefined;
     /**

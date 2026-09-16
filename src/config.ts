@@ -9,6 +9,59 @@ export const VERIFIER_SETTINGS_NAMESPACE = 'llm-verifier' as never
 
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict'
 
+/**
+ * When the P06 request-level selector may register an intent.
+ *
+ * `off` is the shipped default and the closed path. `recovery` is the original behaviour: one cycle
+ * per task, and only once two consecutive verification runs have failed. `every-step` buys a
+ * request-level selection for EVERY main-loop request, bounded per task by
+ * {@link Config.maxProcessCyclesPerTask}.
+ */
+export type AutoProcessSelectionMode = 'off' | 'recovery' | 'every-step'
+
+/** The three legal values, in the order the settings page renders them. */
+export const AUTO_PROCESS_SELECTION_MODES: readonly AutoProcessSelectionMode[] = ['off', 'recovery', 'every-step']
+
+/**
+ * Normalize the P06 switch, accepting the pre-3-mode BOOLEAN spelling.
+ *
+ * `true` meant "the recovery trigger" before the mode existed, so it must resolve to `recovery` and
+ * never to `every-step`: silently upgrading a saved boolean to the expensive mode would multiply an
+ * existing installation's spend without the operator asking for it. `false` and an absent value are
+ * `off`.
+ *
+ * Strings are NOT normalized here: an illegal string is a configuration error, not a typo to repair,
+ * so it is left for {@link resolveConfig} to reject (fail closed).
+ * @param value - raw value from the config, the schema or the settings page.
+ * @returns The mode, or undefined when the value is neither a mode nor a boolean.
+ */
+export function normalizeAutoProcessSelection(value: unknown): AutoProcessSelectionMode | undefined {
+  if (value === true) return 'recovery'
+  if (value === false || value === undefined || value === null) return 'off'
+  return typeof value === 'string' && (AUTO_PROCESS_SELECTION_MODES as readonly string[]).includes(value)
+    ? value as AutoProcessSelectionMode
+    : undefined
+}
+
+/**
+ * The schemastery schema of a P06 mode: the three modes first, the legacy boolean last.
+ *
+ * The boolean member exists so the HOST can still resolve a section an older client saved — the
+ * schema validates the stored user layer, and rejecting `true` there would make the whole namespace
+ * unreadable. It is placed AFTER the strings so a raw `Schema.simplify` prefers the real modes, and
+ * {@link normalizeAutoProcessSelection} projects whatever comes out onto the three legal values.
+ */
+export function autoProcessSelectionSchema(): z<AutoProcessSelectionMode | boolean, AutoProcessSelectionMode> {
+  // The OUTER `.default('off')` is the one that matters: a transform swallows the inner default
+  // (its own meta.default stays unset unless set explicitly), so without it an absent key would
+  // resolve to undefined even though the union alone defaults correctly. The union has already
+  // rejected everything outside the three modes and the boolean, so the callback's fallback is
+  // unreachable — it exists only to keep the projection total.
+  return z
+    .transform(z.union([...AUTO_PROCESS_SELECTION_MODES, z.boolean()]).default('off'), (value: AutoProcessSelectionMode | boolean): AutoProcessSelectionMode => normalizeAutoProcessSelection(value) ?? 'off')
+    .default('off') as unknown as z<AutoProcessSelectionMode | boolean, AutoProcessSelectionMode>
+}
+
 export interface JudgeConfig {
   provider?: string
   model?: string
@@ -61,12 +114,22 @@ export interface Config {
   autoRouteMaxPerSession?: number
   autoTrackCompletionThreshold?: number
   /**
-   * P06 request-level selection over \`llm/stream\`: give a struck task one alternative next reply.
+   * P06 request-level selection over \`llm/stream\`: give a task an alternative next reply.
    *
-   * Default OFF and never turned on automatically. Only smart mode enters the path, at most one
-   * cycle is bought per task, and a selection is never an acceptance.
+   * Default OFF and never turned on automatically. Only smart mode enters the path, and a selection
+   * is never an acceptance. The legacy boolean is still accepted (`true` → `recovery`).
    */
-  autoProcessSelection?: boolean
+  autoProcessSelection?: AutoProcessSelectionMode | boolean
+  /**
+   * P06: cycles the \`every-step\` mode may buy within ONE task.
+   *
+   * Every-step buys a cycle for every main-loop request, so without a per-task ceiling a long task
+   * would select on every step indefinitely. This allowance is INDEPENDENT of the routing quota
+   * (\`autoRouteMaxPerTask\`) and of the final acceptance quota (\`autoVerifyMaxPerTask\`): the three
+   * counters never share a value, so spending cycles can neither starve the final gate nor be
+   * starved by it.
+   */
+  maxProcessCyclesPerTask?: number
   /**
    * P06: hand the alternative reply the failing-run evidence the cycle was triggered by.
    *
@@ -76,12 +139,14 @@ export interface Config {
    */
   autoProcessFailureContext?: boolean
   /**
-   * P06: generate the alternative reply with this `provider/model` instead of the request's own.
+   * P06: generate the alternative replies with these `provider/model` routes instead of the request's own.
    *
-   * Empty (the default) resamples the session model. A second model is the upstream ensemble idea
-   * without the proxy: the candidates are then genuinely different hypotheses rather than two
-   * samples of one model. It turns the comparison into "which model's next step is better", which is
-   * a different question — hence the arm is recorded on the row (`route.alternativeModel`).
+   * A COMMA-SEPARATED list. Entry i supplies the i-th generated candidate, and a list shorter than
+   * the candidate count wraps around (see `resolveAlternativeTargets`). Empty (the default) resamples
+   * the session model. A second model is the upstream ensemble idea without the proxy: the candidates
+   * are then genuinely different hypotheses rather than samples of one model. It turns the comparison
+   * into "which model's next step is better", which is a different question — hence the arm is
+   * recorded on the row (`route.alternativeModel`), as the normalized whole list.
    */
   autoProcessAlternativeModel?: string
   /**
@@ -157,7 +222,8 @@ export interface ResolvedConfig {
   autoRouteMaxPerTask: number
   autoRouteMaxPerSession: number
   autoTrackCompletionThreshold: number
-  autoProcessSelection: boolean
+  autoProcessSelection: AutoProcessSelectionMode
+  maxProcessCyclesPerTask: number
   autoProcessFailureContext: boolean
   autoProcessAlternativeModel: string
   autoProcessCandidates: number
@@ -216,7 +282,8 @@ export const Config: z<Config> = z.object({
   autoRouteMaxPerTask: z.number().step(1).min(1).default(2),
   autoRouteMaxPerSession: z.number().step(1).min(1).default(8),
   autoTrackCompletionThreshold: z.number().min(0).max(1).default(0.684),
-  autoProcessSelection: z.boolean().default(false),
+  autoProcessSelection: autoProcessSelectionSchema(),
+  maxProcessCyclesPerTask: z.number().step(1).min(1).max(32).default(4),
   autoProcessFailureContext: z.boolean().default(true),
   autoProcessAlternativeModel: z.string().default(''),
   autoProcessCandidates: z.number().step(1).min(2).default(2),
@@ -293,18 +360,37 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   if (!Number.isFinite(autoVerifyThreshold) || autoVerifyThreshold < 0 || autoVerifyThreshold > 1) throw new Error('llm-verifier: autoVerifyThreshold must be between 0 and 1')
   const temperature = config.temperature ?? 0.2
   if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) throw new Error('llm-verifier: temperature must be between 0 and 2')
-  // P06's alternative-model override: empty means "use the request's own route", anything else must
-  // name both halves, because a half-specified route would silently fall back to the session model
-  // while the row claimed a second model was used.
   // P06's candidate count. The upper bound is a spend ceiling, not a technical one: at N=4 the
   // tournament is 6 pairs under the shipped criteria, which is already a third of the task budget.
   const processCandidates = config.autoProcessCandidates ?? 2
   if (!Number.isSafeInteger(processCandidates) || processCandidates < 2 || processCandidates > 4) {
     throw new Error('llm-verifier: autoProcessCandidates must be an integer between 2 and 4')
   }
-  const alternativeModel = (config.autoProcessAlternativeModel ?? '').trim()
-  if (alternativeModel !== '' && !/^[^\s/]+\/[^\s]+$/u.test(alternativeModel)) {
-    throw new Error('llm-verifier: autoProcessAlternativeModel must be "provider/model" or empty')
+  // The alternative-model pool: a comma-separated list of complete routes. Each entry is validated
+  // on its own (a half-specified route would silently fall back to the session model while the row
+  // claimed a second model was used), blank entries are dropped, and the normalized list is stored
+  // back as the comma-joined string the statistics row reports.
+  const alternativeModelParts = (config.autoProcessAlternativeModel ?? '')
+    .split(',')
+    .map(entry => entry.trim())
+    .filter(entry => entry !== '')
+  for (const entry of alternativeModelParts) {
+    if (!/^[^\s/]+\/[^\s]+$/u.test(entry)) {
+      throw new Error('llm-verifier: autoProcessAlternativeModel entry "' + entry + '" must be "provider/model"')
+    }
+  }
+  const alternativeModel = alternativeModelParts.join(',')
+  // P06's trigger mode. The legacy boolean is normalized (true -> recovery) and anything else that is
+  // neither a mode nor a boolean fails closed, so a typo cannot silently select a more expensive arm.
+  const processSelection = normalizeAutoProcessSelection(config.autoProcessSelection)
+  if (processSelection === undefined) {
+    throw new Error('llm-verifier: autoProcessSelection must be off, recovery, or every-step')
+  }
+  // The every-step per-task allowance. The upper bound is a spend ceiling, not a technical one: each
+  // cycle is a whole extra generation plus a judged pair.
+  const maxProcessCyclesPerTask = config.maxProcessCyclesPerTask ?? 4
+  if (!Number.isSafeInteger(maxProcessCyclesPerTask) || maxProcessCyclesPerTask < 1 || maxProcessCyclesPerTask > 32) {
+    throw new Error('llm-verifier: maxProcessCyclesPerTask must be an integer between 1 and 32')
   }
   const values = {
     autoVerifyRepeats: config.autoVerifyRepeats ?? 1,
@@ -424,7 +510,8 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     autoRouteMinConfidence,
     autoTrackCompletionThreshold,
     captureDecisions: config.captureDecisions ?? true,
-    autoProcessSelection: config.autoProcessSelection ?? false,
+    autoProcessSelection: processSelection,
+    maxProcessCyclesPerTask,
     autoProcessFailureContext: config.autoProcessFailureContext ?? true,
     autoProcessAlternativeModel: alternativeModel,
     autoProcessCandidates: processCandidates,

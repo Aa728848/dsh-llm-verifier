@@ -25,6 +25,7 @@ import {
   removeExtraJudge,
   serializeExtraJudges,
 } from './client-judges.ts'
+import { buildProcessCycles, type ProcessCycleTone } from './client-process-cycles.ts'
 import {
   FIELDS,
   PROFILES,
@@ -166,8 +167,13 @@ const muted: React.CSSProperties = { color: 'var(--dsw-alias-label-tertiary)', f
 /** Chart palette rides the state aliases so bars and line stay legible in both themes. */
 const chartBarColor = 'var(--dsw-alias-state-business-primary)'
 const chartLineColor = 'var(--dsw-alias-state-warn-primary)'
-/** Status chip tones; each one mixes its own state token, so a fill, a ring and its text move together. */
-type StatusTone = 'pass' | 'warn' | 'error' | 'neutral'
+/**
+ * Status chip tones; each one mixes its own state token, so a fill, a ring and its text move together.
+ *
+ * The process-cycle view model declares the same union locally (it must not import from this module),
+ * so the two are kept structurally identical and `toneChip` accepts either name.
+ */
+type StatusTone = ProcessCycleTone
 function toneChip(tone: StatusTone): React.CSSProperties {
   const token = tone === 'error' ? 'var(--dsw-alias-state-error-primary)'
     : tone === 'warn' ? 'var(--dsw-alias-state-warn-primary)'
@@ -187,6 +193,8 @@ function values(view: SettingsNamespaceView): Values { return valuesFromView(rec
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 /** The endpoint answered but rejected the request: a transport fallback would only repeat it. */
 class EndpointError extends Error {}
+/** A cycle id is a long random reservation id; the head identifies it and the full one stays in the title. */
+function shortCycleId(cycleId: string): string { return cycleId.length <= 10 ? cycleId : cycleId.slice(0, 8) }
 function startOfRange(days: number): number { const date = new Date(); date.setHours(0,0,0,0); date.setDate(date.getDate() - days + 1); return date.getTime() }
 function endOfToday(): number { const date = new Date(); date.setHours(0,0,0,0); date.setDate(date.getDate() + 1); return date.getTime() }
 
@@ -397,6 +405,9 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
       <option value="smart">{t['field.autoVerifyMode.smart']}</option>
       <option value="strict">{t['field.autoVerifyMode.strict']}</option>
     </select>
+    if (field.select === 'processSelection') return <select style={selectStyle} disabled={busy} aria-label={inputAria(field)} value={draft.autoProcessSelection} onChange={event => patch('autoProcessSelection', event.target.value as Values['autoProcessSelection'])}>
+      {(['off','recovery','every-step'] as const).map(id => <option key={id} value={id}>{t[('field.autoProcessSelection.' + id) as keyof I18nDict] as string}</option>)}
+    </select>
     if (field.select === 'criteriaPreset') return <select style={selectStyle} disabled={busy} aria-label={inputAria(field)} value={draft.criteriaPreset} onChange={event => patch('criteriaPreset', event.target.value as Values['criteriaPreset'])}>
       {(['coding','debug','research','ops','writing','custom'] as const).map(id => <option key={id} value={id}>{t[('field.criteriaPreset.' + id) as keyof I18nDict] as string}</option>)}
     </select>
@@ -510,6 +521,10 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
           <div style={fieldHelp}>{helpFor(field)}</div>
         </div>
         <div style={controlCell}>{renderControl(field)}</div>
+        {/* The every-step arm buys an alternative and a judging round on EVERY main-loop request, so
+            the cost warning belongs next to the switch that turns it on, not only in the help text
+            of a section the operator may never open. */}
+        {field.key === 'autoProcessSelection' && draft.autoProcessSelection === 'every-step' && <p style={{ ...fullLine, margin: '6px 0 2px', padding: '6px 9px', borderRadius: 8, ...toneChip('warn') }}>{t['field.autoProcessSelection.everyStepWarning']}</p>}
         {message && <p style={{ ...fullLine, color: 'var(--dsw-alias-state-error-primary)' }}>{issueText(message)}</p>}
         {warning && <p style={{ ...fullLine, color: 'var(--dsw-alias-state-warn-label)' }}>{warning}</p>}
       </div>
@@ -781,6 +796,9 @@ export function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: 
   }, [days, sessionOnly, sessionId, refresh, rpc, t, queryKey])
 
   const totals = data?.totals
+  // The same reservation can produce more than one row (a skip row carries the reason, the purchase
+  // row carries the spend), so the pipeline is grouped by cycleId instead of drawn per row.
+  const processCycles = useMemo(() => buildProcessCycles(data?.recent ?? [], t as unknown as Record<string, string>), [data?.recent, t])
   return <main style={{ height: '100%', overflow: 'auto', boxSizing: 'border-box', padding: '22px clamp(16px, 3vw, 38px) 48px', color: 'var(--dsw-alias-label-primary)', background: 'radial-gradient(circle at 10% 0%, rgba(115,77,255,.09), transparent 32%), radial-gradient(circle at 100% 8%, rgba(47,197,201,.07), transparent 28%)' }}>
     <div style={{ maxWidth: 1180, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 16 }}>
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
@@ -929,6 +947,32 @@ export function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: 
             </div>
           })}{(data?.recent.length ?? 0) === 0 && <div style={{ padding: 24, textAlign: 'center', ...muted }}>{t['recent.empty']}</div>}</div></div>
           <div style={{ ...dashboardCard, padding: '18px' }}><strong>{t['models.title']}</strong><div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>{(data?.models ?? []).map(model => <div key={model.provider + '\0' + model.model} style={{ padding: '11px 12px', borderRadius: 10, background: 'var(--dsw-alias-interactive-bg-hover)' }}><div style={{ fontWeight: 650, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis' }}>{model.model}</div><div style={{ ...muted, marginTop: 3 }}>{model.provider}</div><div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 9, fontSize: 12 }}><span>{tFormat(t['models.calls'], { calls: compact(model.calls, lang) })}</span><span>{tFormat(t['models.tokens'], { tokens: compact(model.tokens, lang) })}</span><strong>{money(model.estimatedCostUsd)}</strong></div></div>)}{(data?.models.length ?? 0) === 0 && <div style={muted}>{t['models.empty']}</div>}</div></div></section>
+        {/* The recent list answers "what did each call cost"; this block answers "what happened to
+            each process-selection cycle", which is the only place the skip reasons and the replay
+            decision are visible together. Hidden entirely when no cycle ran in the range. */}
+        {processCycles.length > 0 && <section style={{ ...dashboardCard, padding: '18px 20px 16px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+            <strong>{t['processCycles.title']}</strong>
+            <span style={muted}>{tFormat(t['processCycles.note'], { count: processCycles.length })}</span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
+            {processCycles.map(cycle => <div key={cycle.cycleId} style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '10px 12px', borderRadius: 10, background: 'var(--dsw-alias-interactive-bg-hover)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                <span title={cycle.cycleId} style={{ fontSize: 11, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', color: 'var(--dsw-alias-label-secondary)' }}>{tFormat(t['processCycles.cycle'], { cycle: shortCycleId(cycle.cycleId) })}</span>
+                {/* The full id stays in the title: the head is enough to tell two cycles apart. */}
+                {cycle.startedAt > 0 && <span style={muted}>{dateTime(cycle.startedAt, lang)}</span>}
+                {/* Only worth saying when the grouping actually folded more than one row together. */}
+                {cycle.rows > 1 && <span style={muted}>{tFormat(t['processCycles.rows'], { rows: cycle.rows })}</span>}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
+                {cycle.stages.map((stage, index) => <Fragment key={stage.stage}>
+                  {index > 0 && <span aria-hidden="true" style={{ color: 'var(--dsw-alias-label-tertiary)', fontSize: 11 }}>→</span>}
+                  <span style={{ padding: '1px 6px', borderRadius: 4, fontSize: 11, ...toneChip(stage.tone) }}>{stage.text}</span>
+                </Fragment>)}
+              </div>
+            </div>)}
+          </div>
+        </section>}
       </>}
     </div>
   </main>

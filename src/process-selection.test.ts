@@ -6,7 +6,7 @@ import { isAgentLoopRequest, markAgentLoopRequest, type GenerateOptions, type St
 import {
   PROCESS_CANDIDATE_CAP_CHARS, PROCESS_INTENT_TTL_MS, ProcessCycleStore, ProcessSelector,
   buildAlternativeRequest, buildProcessView, candidateIdentity, finishKind, measureChunk, renderCandidate,
-  renderCandidateView, renderToolDigest, resolveAlternativeTarget, usageFromChunks, type ProcessCycleReport, type ProcessDeliveryCorrection,
+  renderCandidateView, renderToolDigest, resolveAlternativeTarget, resolveAlternativeTargets, alternativeTargetAt, usageFromChunks, type ProcessCycleReport, type ProcessDeliveryCorrection,
   type ProcessIntent, type ProcessSelectorDeps,
 } from './process-selection.ts'
 import type { ProcessActivityView } from './process-activity.ts'
@@ -361,6 +361,31 @@ describe('alternative model target', () => {
     expect(resolveAlternativeTarget('  a/b  ')).toEqual({ provider: 'a', model: 'b' })
     expect(resolveAlternativeTarget('p/a/b')).toEqual({ provider: 'p', model: 'a/b' })
     for (const value of ['', '   ', 'a', '/b', 'a/']) expect(resolveAlternativeTarget(value)).toBeUndefined()
+    // The legacy single-route helper is exactly the first entry of the pool.
+    expect(resolveAlternativeTarget('a/1,b/2')).toEqual({ provider: 'a', model: '1' })
+  })
+
+  it('parses the alternative pool as a comma-separated list and drops blank entries', () => {
+    expect(resolveAlternativeTargets('  a/1 , b/2  ')).toEqual([{ provider: 'a', model: '1' }, { provider: 'b', model: '2' }])
+    expect(resolveAlternativeTargets('p/a/b')).toEqual([{ provider: 'p', model: 'a/b' }])
+    // Blank entries are skipped, never turned into a route and never rejected here: 'resolveConfig'
+    // is the gate that rejects a malformed entry, and this parser must agree on what "blank" is.
+    expect(resolveAlternativeTargets('a/1,,b/2')).toEqual([{ provider: 'a', model: '1' }, { provider: 'b', model: '2' }])
+    expect(resolveAlternativeTargets('a/1, ,b/2')).toEqual([{ provider: 'a', model: '1' }, { provider: 'b', model: '2' }])
+    for (const value of [undefined, '', '   ', ',', ' , , ']) expect(resolveAlternativeTargets(value)).toEqual([])
+  })
+
+  it('rotates the pool across the alternatives and wraps a short list', () => {
+    const pool = resolveAlternativeTargets('a/1,b/2')
+    // Candidate indices are the ALTERNATIVE ordinals: 0 is the first generated candidate.
+    expect(alternativeTargetAt(pool, 0)).toEqual({ provider: 'a', model: '1' })
+    expect(alternativeTargetAt(pool, 1)).toEqual({ provider: 'b', model: '2' })
+    // Boundary: index 2 is the first wrap, and index 3 the second entry again.
+    expect(alternativeTargetAt(pool, 2)).toEqual({ provider: 'a', model: '1' })
+    expect(alternativeTargetAt(pool, 3)).toEqual({ provider: 'b', model: '2' })
+    // An empty pool mirrors the original request — the shipped resampling behaviour.
+    expect(alternativeTargetAt([], 0)).toBeUndefined()
+    expect(alternativeTargetAt(resolveAlternativeTargets(''), 3)).toBeUndefined()
   })
 })
 
@@ -368,14 +393,33 @@ describe('process cycle log', () => {
   it('records a purchase and reads it back as purchased', async () => {
     const file = tempPath()
     const store = new ProcessCycleStore(file)
-    expect(await store.lookup('s', 5)).toEqual({ ok: true, purchased: false })
+    expect(await store.lookup('s', 5)).toEqual({ ok: true, purchased: false, count: 0 })
     expect(await store.begin({ cycleId: 'c1', sessionId: 's', taskStartSeq: 5, signal: 'sig', startedAt: 1 })).toBe(true)
-    expect(await store.lookup('s', 5)).toEqual({ ok: true, purchased: true })
+    expect(await store.lookup('s', 5)).toEqual({ ok: true, purchased: true, count: 1 })
     // A different task of the same session is unaffected.
-    expect((await store.lookup('s', 9)).purchased).toBe(false)
+    expect(await store.lookup('s', 9)).toEqual({ ok: true, purchased: false, count: 0 })
     await store.finish('c1', 'candidate-selected', 'candidate')
     const reopened = new ProcessCycleStore(file)
-    expect((await reopened.lookup('s', 5)).purchased).toBe(true)
+    expect(await reopened.lookup('s', 5)).toEqual({ ok: true, purchased: true, count: 1 })
+  })
+
+  it('counts every purchased cycle of one task, and only that task', async () => {
+    // The every-step mode spends an ALLOWANCE, so the log has to say how many cycles were bought,
+    // not merely whether one was.
+    const file = tempPath()
+    const store = new ProcessCycleStore(file)
+    for (let index = 0; index < 3; index += 1) {
+      expect(await store.begin({ cycleId: 'c' + index, sessionId: 's', taskStartSeq: 5, signal: 'sig' + index, startedAt: index })).toBe(true)
+      expect(await store.lookup('s', 5)).toEqual({ ok: true, purchased: true, count: index + 1 })
+    }
+    // 'purchased' stays exactly 'count > 0', so the recovery mode's one-cycle rule is unchanged.
+    expect((await store.lookup('s', 5)).purchased).toBe(true)
+    // Another task of the same session, and the same task of another session, each start at zero.
+    expect(await store.lookup('s', 9)).toEqual({ ok: true, purchased: false, count: 0 })
+    expect(await store.lookup('other', 5)).toEqual({ ok: true, purchased: false, count: 0 })
+    // Boundary: the count survives a reload, so a plugin restart cannot re-spend a task's allowance.
+    const reopened = new ProcessCycleStore(file)
+    expect((await reopened.lookup('s', 5)).count).toBe(3)
   })
 
   it('treats an unreadable log as unknown rather than as free', async () => {
@@ -387,6 +431,9 @@ describe('process cycle log', () => {
     const lookup = await store.lookup('s', 5)
     expect(lookup.ok).toBe(false)
     expect(lookup.purchased).toBe(false)
+    // An unreadable log reports count 0, and the caller must treat that as "unknown", NOT as "free":
+    // the every-step allowance check keys off 'ok' before it ever reads the count.
+    expect(lookup.count).toBe(0)
     expect(await store.begin({ cycleId: 'c', sessionId: 's', taskStartSeq: 5, signal: 'x', startedAt: 1 })).toBe(false)
   })
 })
@@ -543,6 +590,40 @@ describe('process cycle execution', () => {
     expect(report?.outcome).toBe('identical-candidate')
     expect(report?.judgeCalls).toBe(0)
     expect(chunks).toEqual(textChunks('ORIGINAL'))
+  })
+
+  it('dispatches each alternative on its own pool entry, wrapping a short list', async () => {
+    // The pool is the multi-model arm: candidate i must really be generated by entry i, otherwise the
+    // statistics row would claim models the dispatch never used.
+    const models: Array<{ provider?: string; model?: string }> = []
+    let dispatched = 0
+    const h = harness({
+      settings: () => ({ active: true, smart: true, timeoutMs: 5000, maxItemChars: 20_000, maxInputChars: 60_000, candidates: 4, alternativeModel: '  a/1 , b/2  ' }),
+      stream: request => { models.push(request); dispatched += 1; return streamOf(textChunks('ALTERNATIVE-' + dispatched)) },
+      // All four candidates must stay byte-distinct, or the engine collapses them before dispatch
+      // accounting can be observed.
+      select: async () => selectResult(3),
+    })
+    const { report } = await run(h, { original: textChunks('ORIGINAL') })
+    expect(models).toHaveLength(3)
+    // Entry i for i in 0..2; index 2 wraps back to the FIRST entry of the two-route pool.
+    expect(models.map(request => request.provider + '/' + request.model)).toEqual(['a/1', 'b/2', 'a/1'])
+    // The row records the normalized WHOLE pool, not just the route of one candidate.
+    expect(report?.observation.alternativeModel).toBe('a/1,b/2')
+    expect(report?.generatedCalls).toBe(3)
+  })
+
+  it('mirrors the original route, and records no pool, when the list is empty', async () => {
+    const models: Array<{ provider?: string; model?: string }> = []
+    const h = harness({
+      settings: () => ({ active: true, smart: true, timeoutMs: 5000, maxItemChars: 20_000, maxInputChars: 60_000, alternativeModel: ' , ' }),
+      stream: request => { models.push(request); return streamOf(textChunks('ALTERNATIVE')) },
+    })
+    const { report } = await run(h, { original: textChunks('ORIGINAL') })
+    // An all-blank pool is the shipped resampling behaviour: no override at all.
+    expect(models[0]?.provider).toBe('p')
+    expect(models[0]?.model).toBe('m')
+    expect(report?.observation.alternativeModel).toBeUndefined()
   })
 
   it('falls back to one pair when the tournament seam is missing', async () => {

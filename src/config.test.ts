@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { Config, MAX_EXTRA_JUDGES, resolveConfig } from './config.ts'
+import { AUTO_PROCESS_SELECTION_MODES, Config, MAX_EXTRA_JUDGES, normalizeAutoProcessSelection, resolveConfig } from './config.ts'
 import { serializeExtraJudges, type ExtraJudgeDraft } from './client-judges.ts'
 
 describe('config - judges ensemble resolution', () => {
@@ -313,13 +313,55 @@ describe('config - judges ensemble resolution', () => {
 
   it('keeps P06 process selection off unless it was explicitly enabled and saved', () => {
     // Default off is a product decision, not an accident: a new install or an old config without
-    // the field must never enter the request-level path.
-    expect(resolveConfig({}).autoProcessSelection).toBe(false)
-    expect(Config({}).autoProcessSelection).toBe(false)
-    // A user-saved true survives resolution and re-serialization through the schema.
-    expect(resolveConfig({ autoProcessSelection: true }).autoProcessSelection).toBe(true)
-    const roundTripped = Config({ ...Config({}), autoProcessSelection: true } as never) as { autoProcessSelection?: boolean }
-    expect(roundTripped.autoProcessSelection).toBe(true)
+    // the field must never enter the request-level path. Both resolution paths must agree, because
+    // the settings namespace reads the schema and the runtime reads resolveConfig.
+    expect(resolveConfig({}).autoProcessSelection).toBe('off')
+    expect(Config({}).autoProcessSelection).toBe('off')
+    for (const mode of AUTO_PROCESS_SELECTION_MODES) {
+      expect(resolveConfig({ autoProcessSelection: mode }).autoProcessSelection).toBe(mode)
+      expect(Config({ autoProcessSelection: mode }).autoProcessSelection).toBe(mode)
+      // A user-saved mode survives resolution and re-serialization through the schema.
+      const roundTripped = Config({ ...Config({}), autoProcessSelection: mode } as never) as { autoProcessSelection?: string }
+      expect(roundTripped.autoProcessSelection).toBe(mode)
+      expect(resolveConfig(Config({ autoProcessSelection: mode }) as never).autoProcessSelection).toBe(mode)
+    }
+  })
+
+  it('normalizes the pre-3-mode boolean, and never upgrades it to the expensive arm', () => {
+    // 'true' meant the recovery trigger before the mode existed. Resolving it to 'every-step' would
+    // silently multiply an existing installation's spend, so it must map to 'recovery' — for
+    // resolveConfig, for the schema (the host validates the stored user layer with it) and for the
+    // shared normalizer the settings page uses.
+    expect(resolveConfig({ autoProcessSelection: true }).autoProcessSelection).toBe('recovery')
+    expect(resolveConfig({ autoProcessSelection: false }).autoProcessSelection).toBe('off')
+    expect(Config({ autoProcessSelection: true }).autoProcessSelection).toBe('recovery')
+    expect(Config({ autoProcessSelection: false }).autoProcessSelection).toBe('off')
+    expect(normalizeAutoProcessSelection(true)).toBe('recovery')
+    expect(normalizeAutoProcessSelection(false)).toBe('off')
+    expect(normalizeAutoProcessSelection(undefined)).toBe('off')
+    expect(normalizeAutoProcessSelection(null)).toBe('off')
+    for (const mode of AUTO_PROCESS_SELECTION_MODES) expect(normalizeAutoProcessSelection(mode)).toBe(mode)
+    expect(normalizeAutoProcessSelection('nonsense')).toBeUndefined()
+    expect(normalizeAutoProcessSelection(1)).toBeUndefined()
+  })
+
+  it('fails closed on an illegal process-selection string instead of picking an arm', () => {
+    for (const bad of ['on', 'true', 'every_step', 'Every-Step', '', 'recovery ', 0, 1, {}] as unknown[]) {
+      expect(() => resolveConfig({ autoProcessSelection: bad as never })).toThrow('llm-verifier: autoProcessSelection must be off, recovery, or every-step')
+    }
+  })
+
+  it('bounds the every-step per-task cycle allowance to 1..32 with a default of 4', () => {
+    expect(resolveConfig({}).maxProcessCyclesPerTask).toBe(4)
+    expect(Config({}).maxProcessCyclesPerTask).toBe(4)
+    // Boundaries are inclusive: the ceiling is a spend cap, not a threshold to stay below.
+    for (const value of [1, 32]) {
+      expect(resolveConfig({ maxProcessCyclesPerTask: value }).maxProcessCyclesPerTask).toBe(value)
+      expect(Config({ maxProcessCyclesPerTask: value }).maxProcessCyclesPerTask).toBe(value)
+    }
+    for (const bad of [0, 33, 2.5, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => resolveConfig({ maxProcessCyclesPerTask: bad })).toThrow('llm-verifier: maxProcessCyclesPerTask must be an integer between 1 and 32')
+    }
   })
 
   it('defaults the failure-evidence hand-off ON inside P06, and can be turned off', () => {
@@ -346,6 +388,33 @@ describe('config - judges ensemble resolution', () => {
     for (const bad of ['openai', '/gpt-5', 'openai/', 'a b/c']) {
       expect(() => resolveConfig({ autoProcessAlternativeModel: bad })).toThrow(/provider\/model/)
     }
+  })
+
+  it('accepts a comma-separated alternative-model pool and normalizes each entry', () => {
+    // A pool is how the multi-model arm is configured: candidate i gets entry i.
+    expect(resolveConfig({ autoProcessAlternativeModel: ' openai/gpt-5 , anthropic/claude-4 ' }).autoProcessAlternativeModel).toBe('openai/gpt-5,anthropic/claude-4')
+    expect(resolveConfig({ autoProcessAlternativeModel: 'a/1,b/2,c/3' }).autoProcessAlternativeModel).toBe('a/1,b/2,c/3')
+    // The schema preserves what the operator typed; resolveConfig is what trims and joins.
+    expect(Config({ autoProcessAlternativeModel: ' a/1 , b/2 ' }).autoProcessAlternativeModel).toBe(' a/1 , b/2 ')
+    expect(resolveConfig(Config({ autoProcessAlternativeModel: ' a/1 , b/2 ' }) as never).autoProcessAlternativeModel).toBe('a/1,b/2')
+    // Empty stays legal (= resample the session model), and blank entries are DROPPED, never
+    // rejected: a trailing comma is a typing habit, not a malformed route.
+    for (const value of ['', '   ', ',', ' , , ', 'a/1,,b/2', ' , a/1 , ']) {
+      expect(() => resolveConfig({ autoProcessAlternativeModel: value })).not.toThrow()
+    }
+    expect(resolveConfig({ autoProcessAlternativeModel: 'a/1,,b/2' }).autoProcessAlternativeModel).toBe('a/1,b/2')
+    expect(resolveConfig({ autoProcessAlternativeModel: ' , ' }).autoProcessAlternativeModel).toBe('')
+    // A model id may itself contain a slash: only the provider half is constrained.
+    expect(resolveConfig({ autoProcessAlternativeModel: 'p/a/b' }).autoProcessAlternativeModel).toBe('p/a/b')
+  })
+
+  it('names the offending entry when one member of the alternative-model pool is malformed', () => {
+    // The message has to point at the ENTRY, because a pool of four routes makes "must be
+    // provider/model" useless on its own.
+    expect(() => resolveConfig({ autoProcessAlternativeModel: 'a/1,openai' })).toThrow('llm-verifier: autoProcessAlternativeModel entry "openai" must be "provider/model"')
+    expect(() => resolveConfig({ autoProcessAlternativeModel: 'a/1, /b' })).toThrow('llm-verifier: autoProcessAlternativeModel entry "/b" must be "provider/model"')
+    expect(() => resolveConfig({ autoProcessAlternativeModel: 'a/1,b/,c/3' })).toThrow('llm-verifier: autoProcessAlternativeModel entry "b/" must be "provider/model"')
+    expect(() => resolveConfig({ autoProcessAlternativeModel: 'a/1,a b/2' })).toThrow('llm-verifier: autoProcessAlternativeModel entry "a b/2" must be "provider/model"')
   })
 
   it('resolves the criteria preset and defaults to the historical coding rubric', () => {

@@ -99,10 +99,13 @@ export interface ProcessSelectionSettings {
   maxItemChars: number
   maxInputChars: number
   /**
-   * `provider/model` for the alternative reply; empty or absent means the request's own route.
+   * Comma-separated `provider/model` pool for the alternative replies; empty or absent means the
+   * request's own route.
    *
-   * Optional so a settings producer that predates the knob cannot abort a cycle: an absent value
-   * simply mirrors the original request, which is what the plugin did before the override existed.
+   * Candidate i is dispatched on entry i, wrapping around a shorter list (see
+   * {@link alternativeTargetAt}). Optional so a settings producer that predates the knob cannot abort
+   * a cycle: an absent value simply mirrors the original request, which is what the plugin did before
+   * the override existed.
    */
   alternativeModel?: string
   /**
@@ -114,18 +117,64 @@ export interface ProcessSelectionSettings {
   candidates?: number
 }
 
+/** One resolved generation route of the alternative pool. */
+export interface AlternativeTarget { provider: string; model: string }
+
 /**
- * Parse the configured alternative-model override.
- * @param value - raw `provider/model` setting (empty allowed).
- * @returns The route to generate the alternative with, or undefined to mirror the original.
+ * Parse ONE `provider/model` entry.
+ * @param value - raw entry.
+ * @returns The route, or undefined for a half-specified entry.
  */
-export function resolveAlternativeTarget(value: string | undefined): { provider: string; model: string } | undefined {
-  const trimmed = (value ?? '').trim()
+function parseAlternativeTarget(value: string): AlternativeTarget | undefined {
+  const trimmed = value.trim()
   const slash = trimmed.indexOf('/')
   if (slash <= 0 || slash === trimmed.length - 1) return undefined
   const provider = trimmed.slice(0, slash).trim()
   const model = trimmed.slice(slash + 1).trim()
   return provider === '' || model === '' ? undefined : { provider, model }
+}
+
+/**
+ * Parse the configured alternative-model POOL.
+ *
+ * Comma-separated `provider/model` entries; blank entries are skipped, exactly like `resolveConfig`
+ * drops them, so a trailing comma never becomes a malformed route. The result is empty when nothing
+ * usable was configured, which means "resample the session model" — the historical behaviour.
+ * @param value - raw setting (comma-separated).
+ * @returns The usable routes, in configured order.
+ */
+export function resolveAlternativeTargets(value: string | undefined): AlternativeTarget[] {
+  const targets: AlternativeTarget[] = []
+  for (const entry of (value ?? '').split(',')) {
+    const target = parseAlternativeTarget(entry)
+    if (target !== undefined) targets.push(target)
+  }
+  return targets
+}
+
+/**
+ * The route one generated candidate is dispatched on: entry `index` of the pool, wrapping around a
+ * list shorter than the candidate count.
+ *
+ * A short pool wraps rather than cycling the session model for the surplus candidates: the operator
+ * asked for those models, and reverting to the session model would silently change the arm the
+ * statistics row reports.
+ * @param targets - the resolved pool.
+ * @param index - 0-based alternative ordinal (the original reply is not a target).
+ * @returns The route, or undefined to mirror the original request.
+ */
+export function alternativeTargetAt(targets: readonly AlternativeTarget[], index: number): AlternativeTarget | undefined {
+  if (targets.length === 0) return undefined
+  return targets[((index % targets.length) + targets.length) % targets.length]
+}
+
+/**
+ * Parse the configured alternative-model override (first entry of the pool).
+ * @param value - raw `provider/model` setting (empty allowed).
+ * @returns The first route to generate an alternative with, or undefined to mirror the original.
+ */
+export function resolveAlternativeTarget(value: string | undefined): AlternativeTarget | undefined {
+  return resolveAlternativeTargets(value)[0]
 }
 
 /** Everything the selector reports back for the statistics sidecar. */
@@ -728,17 +777,23 @@ export class ProcessCycleStore {
    * \`ok: false\` means the log could not be read, and the caller must NOT buy: an unreadable log
    * is indistinguishable from "already purchased", and the safe side of that ambiguity is to
    * keep the original path.
+   * `count` aggregates every PURCHASE row of the task. Only {@link begin} writes rows, so every
+   * record in the log is one bought cycle; a refused cycle is reported to the statistics row with
+   * `purchased: false` and never reaches this log, so it can never consume an allowance.
+   * `purchased` is kept as `count > 0` so every pre-existing caller — notably the recovery mode's
+   * one-cycle rule — keeps working unchanged.
    * @param sessionId - session owning the cycle.
    * @param taskStartSeq - task boundary sequence of the cycle.
-   * @returns Read status plus whether a record already exists.
+   * @returns Read status, whether a record already exists, and how many cycles were purchased.
    */
-  async lookup(sessionId: string, taskStartSeq: number): Promise<{ ok: boolean; purchased: boolean; reason?: string }> {
+  async lookup(sessionId: string, taskStartSeq: number): Promise<{ ok: boolean; purchased: boolean; count: number; reason?: string }> {
     try {
       await this.load()
-      return { ok: true, purchased: this.records.some(record => record.sessionId === sessionId && record.taskStartSeq === taskStartSeq) }
+      const count = this.records.filter(record => record.sessionId === sessionId && record.taskStartSeq === taskStartSeq).length
+      return { ok: true, purchased: count > 0, count }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { ok: true, purchased: false }
-      return { ok: false, purchased: false, reason: error instanceof Error ? error.message : String(error) }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { ok: true, purchased: false, count: 0 }
+      return { ok: false, purchased: false, count: 0, reason: error instanceof Error ? error.message : String(error) }
     }
   }
 
@@ -959,14 +1014,21 @@ export class ProcessSelector {
     const expected = count === 2
       ? (count - 1) + criteria.length * PROCESS_REPEATS * judges
       : (count - 1) + estimateRoutedCalls({ kind: 'select', candidates: new Array(count).fill(null) } as never, PROCESS_REPEATS, criteria.length) * judges
-    const fingerprint = stableHash({ phase: 'process', sessionId: intent.sessionId, taskStartSeq: intent.taskStartSeq, signal: intent.signal })
+    // The fingerprint must be unique per REQUEST, not per task. The router keeps completed
+    // fingerprints for the whole task and refuses a repeated one, so keying it on the task would cap
+    // every mode at one cycle per task — recovery's contract, but not the every-step allowance. The
+    // registration timestamp is what makes each intent distinct, and it is stable for the lifetime of
+    // the intent, so a re-dispatched request cannot double-buy the same cycle.
+    const fingerprint = stableHash({ phase: 'process', sessionId: intent.sessionId, taskStartSeq: intent.taskStartSeq, signal: intent.signal, registeredAt: intent.registeredAt })
     const reservation = router.reserve(intent.agent as RoutedAgent, 'process', fingerprint, expected, policy)
     if (reservation === undefined) {
       await this.skip(startedAt, intent, 'no-process-budget', 'the task/session budget or the one-per-task process allowance refused the cycle')
       return undefined
     }
-    const alternativeTarget = resolveAlternativeTarget(settings.alternativeModel)
-    const observation: RouteObservation = { cycleId: reservation.id, trigger: 'llm-stream', stage: 'process', destination: 'process', attempt: reservation.attempt, reservedCalls: reservation.expectedCalls, replayed: 'original', generatedCalls: 0, judgeCalls: 0, sameCandidate: false, ...(intent.failureContext === undefined ? {} : { alternativeAugmented: true }), ...(alternativeTarget === undefined ? {} : { alternativeModel: alternativeTarget.provider + '/' + alternativeTarget.model }) }
+    // The pool is recorded WHOLE on the row, so "which models produced these candidates" survives
+    // even though each candidate may use a different entry of it.
+    const alternativeTargets = resolveAlternativeTargets(settings.alternativeModel)
+    const observation: RouteObservation = { cycleId: reservation.id, trigger: 'llm-stream', stage: 'process', destination: 'process', attempt: reservation.attempt, reservedCalls: reservation.expectedCalls, replayed: 'original', generatedCalls: 0, judgeCalls: 0, sameCandidate: false, ...(intent.failureContext === undefined ? {} : { alternativeAugmented: true }), ...(alternativeTargets.length === 0 ? {} : { alternativeModel: alternativeTargets.map(target => target.provider + '/' + target.model).join(',') }) }
     const started = await this.deps.store(intent.agent).begin({ cycleId: reservation.id, sessionId: intent.sessionId, taskStartSeq: intent.taskStartSeq, signal: intent.signal, startedAt: this.deps.now() })
     if (!started) {
       // The purchase record could not be written: buying anyway would make the cycle unaccountable.
@@ -1016,7 +1078,9 @@ export class ProcessSelector {
     }
     const dispatches: ProcessDispatch[] = []
     for (let index = 0; index < count - 1; index += 1) {
-      const request = buildAlternativeRequest(options, phase.signal, intent.failureContext, alternativeTarget)
+      // Candidate i uses pool entry i, wrapping around a shorter list; an empty pool mirrors the
+      // original request, which is the shipped resampling behaviour.
+      const request = buildAlternativeRequest(options, phase.signal, intent.failureContext, alternativeTargetAt(alternativeTargets, index))
       this.internal.add(request as object)
       const chunks: StreamChunk[] = []
       const generated = drainAlternative(this.deps.stream(request), PROCESS_CANDIDATE_CAP_CHARS, chunks)

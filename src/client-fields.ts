@@ -1,5 +1,6 @@
 import { normalizeExtraJudges, type ExtraJudgeDraft } from './client-judges.ts'
 import { computeJudgeCount, computeWorstCaseBudget, WORST_CASE_CRITERIA_PER_COMPARISON } from './client-i18n.ts'
+import { normalizeAutoProcessSelection, type AutoProcessSelectionMode } from './config.ts'
 
 /**
  * The settings form's single source of truth.
@@ -17,7 +18,8 @@ import { computeJudgeCount, computeWorstCaseBudget, WORST_CASE_CRITERIA_PER_COMP
 export interface Values {
   enabled: boolean
   captureDecisions: boolean
-  autoProcessSelection: boolean
+  autoProcessSelection: AutoProcessSelectionMode
+  maxProcessCyclesPerTask: number
   autoProcessFailureContext: boolean
   autoProcessAlternativeModel: string
   autoProcessCandidates: number
@@ -77,7 +79,8 @@ export interface Values {
 export const CONFIG_DEFAULTS: Values = {
   enabled: true,
   captureDecisions: true,
-  autoProcessSelection: false,
+  autoProcessSelection: 'off',
+  maxProcessCyclesPerTask: 4,
   autoProcessFailureContext: true,
   autoProcessAlternativeModel: '',
   autoProcessCandidates: 2,
@@ -151,7 +154,7 @@ export const SECTIONS: readonly SectionSpec[] = [
 ]
 
 export type FieldKind = 'toggle' | 'number' | 'text' | 'select' | 'custom'
-export type SelectSource = 'mode' | 'criteriaPreset' | 'provider' | 'model' | 'effort'
+export type SelectSource = 'mode' | 'criteriaPreset' | 'processSelection' | 'provider' | 'model' | 'effort'
 export type UnitKey = 'settings.unit.ms' | 'settings.unit.chars' | 'settings.unit.calls' | 'settings.unit.tokens'
 
 export interface FieldSpec {
@@ -219,7 +222,8 @@ export const FIELDS: readonly FieldSpec[] = [
   toggle('autoVerifyTeamTasks', 'routing'),
   toggle('autoVerifyPlanMode', 'routing'),
   toggle('autoVerifySubagents', 'routing'),
-  toggle('autoProcessSelection', 'routing'),
+  select('autoProcessSelection', 'routing', 'processSelection'),
+  number('maxProcessCyclesPerTask', 'routing', { min: 1, max: 32, integer: true }),
   toggle('autoProcessFailureContext', 'routing'),
   text('autoProcessAlternativeModel', 'routing'),
   number('autoProcessCandidates', 'routing', { min: 2, max: 4, integer: true }),
@@ -296,6 +300,10 @@ export function valuesFromView(view: Record<string, unknown> | undefined): Value
     return raw === undefined || raw === null ? (CONFIG_DEFAULTS[key] as number) : Number(raw)
   }
   const mode = v.autoVerifyMode === 'manual' || v.autoVerifyMode === 'strict' ? v.autoVerifyMode : 'smart'
+  // The draft always holds one of the three modes, exactly like the two history-bearing enums: a
+  // legacy boolean and an unknown string both degrade to a legal value instead of leaking into
+  // 'validateValues' and blocking a save the host would accept.
+  const processSelection = normalizeAutoProcessSelection(v.autoProcessSelection) ?? 'off'
   const preset =
     v.criteriaPreset === 'debug' ||
     v.criteriaPreset === 'research' ||
@@ -307,7 +315,8 @@ export function valuesFromView(view: Record<string, unknown> | undefined): Value
   return {
     enabled: v.enabled !== false,
     captureDecisions: v.captureDecisions !== false,
-    autoProcessSelection: v.autoProcessSelection === true,
+    autoProcessSelection: processSelection,
+    maxProcessCyclesPerTask: numberOr('maxProcessCyclesPerTask'),
     autoProcessFailureContext: v.autoProcessFailureContext !== false,
     autoProcessAlternativeModel: typeof v.autoProcessAlternativeModel === 'string' ? v.autoProcessAlternativeModel.trim() : '',
     autoProcessCandidates: numberOr('autoProcessCandidates'),
@@ -396,7 +405,7 @@ export function acceptsNumber(field: FieldSpec, raw: string): boolean {
 
 export interface FieldIssue {
   key: keyof Values
-  code: 'required' | 'range' | 'min' | 'max' | 'integer' | 'cacheDirRelative' | 'routeBudget'
+  code: 'required' | 'range' | 'min' | 'max' | 'integer' | 'cacheDirRelative' | 'routeBudget' | 'altModelList'
   params?: Record<string, string | number>
 }
 
@@ -453,6 +462,14 @@ export function validateValues(values: Values): FieldIssue[] {
         issues.push({ key: field.key, code: 'cacheDirRelative' })
       }
     }
+  }
+  // The alternative-model POOL is a comma-separated list, so a single-entry regex over the whole
+  // string would reject a perfectly valid pool. Every non-blank entry is validated on its own, in
+  // lockstep with 'resolveConfig'; empty stays legal (= resample the session model) and blank
+  // entries are dropped rather than rejected.
+  const alternativePool = values.autoProcessAlternativeModel.split(',').map(entry => entry.trim()).filter(entry => entry !== '')
+  if (alternativePool.some(entry => !/^[^\s/]+\/[^\s]+$/u.test(entry))) {
+    issues.push({ key: 'autoProcessAlternativeModel', code: 'altModelList' })
   }
   if (!values.provider.trim()) issues.push({ key: 'provider', code: 'required' })
   if (!values.model.trim()) issues.push({ key: 'model', code: 'required' })
@@ -515,6 +532,7 @@ const POLICY_KEYS = [
   'autoVerifyPlanMode',
   'autoVerifySubagents',
   'autoProcessSelection',
+  'maxProcessCyclesPerTask',
   'autoProcessFailureContext',
   'autoProcessCandidates',
 ] as const satisfies readonly (keyof Values)[]
@@ -613,6 +631,9 @@ export function sectionSummary(id: SectionId, values: Values, t: Translate, form
         state: values.autoRouteSemantic ? label('settings.summary.on') : label('settings.summary.off'),
         task: values.autoRouteMaxPerTask,
         session: values.autoRouteMaxPerSession,
+        // The collapsed header states the P06 arm too: 'every-step' is the one setting on this page
+        // that can multiply spend per step, and it must be visible without expanding the section.
+        selection: label('field.autoProcessSelection.' + values.autoProcessSelection),
       })
     case 'budgets':
       return format('settings.summary.budgets', {

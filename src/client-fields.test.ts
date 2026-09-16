@@ -158,6 +158,80 @@ describe('settings values', () => {
   })
 })
 
+describe('P06 settings mirror resolveConfig', () => {
+  it('offers the three modes as a select with one label key each', () => {
+    const field = FIELDS.find(entry => entry.key === 'autoProcessSelection')!
+    expect(field.kind).toBe('select')
+    expect(field.select).toBe('processSelection')
+    expect(field.section).toBe('routing')
+    expect(CONFIG_DEFAULTS.autoProcessSelection).toBe('off')
+    // Every selectable mode has a label in BOTH dictionaries; I18nDict makes a missing one a
+    // compile error, and this keeps the render list and the dictionaries from drifting apart.
+    for (const mode of ['off', 'recovery', 'every-step']) {
+      expect(typeof zhT('field.autoProcessSelection.' + mode)).toBe('string')
+      expect(typeof enT('field.autoProcessSelection.' + mode)).toBe('string')
+    }
+    // The every-step warning copy the settings page wires up later must exist in both dictionaries.
+    expect(typeof zhT('field.autoProcessSelection.everyStepWarning')).toBe('string')
+    expect(typeof enT('field.autoProcessSelection.everyStepWarning')).toBe('string')
+  })
+
+  it('reads a legacy boolean and an unknown mode as a legal draft value', () => {
+    // The saved section may predate the mode (boolean) or be corrupt; neither may leak into the
+    // draft, because '#validateValues' only knows the three modes.
+    expect(valuesFromView({ autoProcessSelection: true }).autoProcessSelection).toBe('recovery')
+    expect(valuesFromView({ autoProcessSelection: false }).autoProcessSelection).toBe('off')
+    expect(valuesFromView({ autoProcessSelection: 'every-step' }).autoProcessSelection).toBe('every-step')
+    expect(valuesFromView({ autoProcessSelection: 'nonsense' }).autoProcessSelection).toBe('off')
+    expect(valuesFromView({}).autoProcessSelection).toBe('off')
+    for (const raw of [true, false, 'nonsense', 'every-step', undefined]) {
+      expect(validateValues(valuesFromView({ provider: 'p', model: 'm', autoProcessSelection: raw })), String(raw)).toEqual([])
+    }
+  })
+
+  it('bounds the every-step cycle allowance exactly like resolveConfig', () => {
+    const field = FIELDS.find(entry => entry.key === 'maxProcessCyclesPerTask')!
+    expect(field.kind).toBe('number')
+    expect(field.section).toBe('routing')
+    expect({ min: field.min, max: field.max, integer: field.integer }).toEqual({ min: 1, max: 32, integer: true })
+    expect(CONFIG_DEFAULTS.maxProcessCyclesPerTask).toBe(4)
+    // Boundaries inclusive, and the exact mirror of the server rule.
+    expect(validateValues({ ...base, maxProcessCyclesPerTask: 1 })).toEqual([])
+    expect(validateValues({ ...base, maxProcessCyclesPerTask: 32 })).toEqual([])
+    expect(codesFor({ ...base, maxProcessCyclesPerTask: 0 }, 'maxProcessCyclesPerTask')).toEqual(['range'])
+    expect(codesFor({ ...base, maxProcessCyclesPerTask: 33 }, 'maxProcessCyclesPerTask')).toEqual(['range'])
+    expect(codesFor({ ...base, maxProcessCyclesPerTask: 2.5 }, 'maxProcessCyclesPerTask')).toEqual(['integer'])
+  })
+
+  it('validates the alternative-model POOL entry by entry, not the joined string', () => {
+    // A single regex over the whole setting would reject every valid pool.
+    expect(codesFor(base, 'autoProcessAlternativeModel')).toEqual([])
+    expect(codesFor({ ...base, autoProcessAlternativeModel: 'a/1,b/2' }, 'autoProcessAlternativeModel')).toEqual([])
+    expect(codesFor({ ...base, autoProcessAlternativeModel: 'a/1,b/2,c/3' }, 'autoProcessAlternativeModel')).toEqual([])
+    expect(codesFor({ ...base, autoProcessAlternativeModel: 'p/a/b' }, 'autoProcessAlternativeModel')).toEqual([])
+    // Empty and blank entries stay legal: they mean "resample the session model".
+    expect(codesFor({ ...base, autoProcessAlternativeModel: '' }, 'autoProcessAlternativeModel')).toEqual([])
+    expect(codesFor({ ...base, autoProcessAlternativeModel: ' , ' }, 'autoProcessAlternativeModel')).toEqual([])
+    expect(codesFor({ ...base, autoProcessAlternativeModel: 'a/1,,b/2' }, 'autoProcessAlternativeModel')).toEqual([])
+    // Exactly the entries resolveConfig rejects.
+    for (const bad of ['openai', 'a/1,openai', 'a/1, /b', 'b/', 'a b/2', 'a/1,b/2,/']) {
+      expect(codesFor({ ...base, autoProcessAlternativeModel: bad }, 'autoProcessAlternativeModel'), bad).toEqual(['altModelList'])
+    }
+    expect(typeof zhT('settings.invalid.altModelList')).toBe('string')
+    expect(typeof enT('settings.invalid.altModelList')).toBe('string')
+  })
+
+  it('owns the P06 fields in every profile, so a switch resets the expensive arm', () => {
+    for (const id of PROFILE_IDS) {
+      const next = applyProfile({ ...base, autoProcessSelection: 'every-step', maxProcessCyclesPerTask: 32 }, id)
+      expect(next.autoProcessSelection, id).toBe('off')
+      expect(next.maxProcessCyclesPerTask, id).toBe(4)
+    }
+    // A hand-tuned every-step draft is 'custom' rather than a profile it no longer matches.
+    expect(activeProfile({ ...base, autoProcessSelection: 'every-step' })).toBe('custom')
+  })
+})
+
 describe('settings validation', () => {
   it('mirrors the resolveConfig bounds that a text box can violate', () => {
     expect(codesFor({ ...base, autoVerifyThreshold: 1.5 }, 'autoVerifyThreshold')).toEqual(['range'])
@@ -301,6 +375,10 @@ describe('settings navigation', () => {
     expect(sectionSummary('autoVerify', { ...base, autoVerifyMode: 'manual' }, zhT, format)).toBe(zhT('settings.summary.manualShort'))
     expect(sectionSummary('autoVerify', base, zhT, format)).toContain('0.65')
     expect(sectionSummary('routing', base, zhT, format)).toContain('2/8')
+    // The collapsed routing header states the P06 arm: the one setting here that can multiply spend
+    // per step must be readable without expanding the section.
+    expect(sectionSummary('routing', base, zhT, format)).toContain(zhT('field.autoProcessSelection.off'))
+    expect(sectionSummary('routing', { ...base, autoProcessSelection: 'every-step' }, zhT, format)).toContain(zhT('field.autoProcessSelection.every-step'))
     expect(sectionSummary('budgets', base, zhT, format)).toContain('96')
     expect(sectionSummary('model', base, zhT, format)).toBe('')
   })

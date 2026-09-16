@@ -1606,12 +1606,15 @@ export class AutoVerifierRouter {
   completedFingerprint(agent: RoutedAgent, fingerprint: string): boolean { return this.state(agent)?.completed.has(fingerprint) ?? false }
 
   /**
-   * Whether this task already bought its process-selection cycle.
+   * How many process-selection cycles this task bought while the plugin has been loaded.
    *
-   * The in-memory counter is authoritative while the plugin is loaded; the durable sidecar
-   * covers a reload, which is why {@link hasProcessAttempt} exists next to it.
+   * The in-memory counter is authoritative for the current process; the durable sidecar
+   * covers a reload, which is why the caller reads BOTH and takes the larger.
    */
-  hasProcessAttempt(agent: RoutedAgent): boolean { return (this.state(agent)?.processAttempts ?? 0) > 0 }
+  processAttemptCount(agent: RoutedAgent): number { return this.state(agent)?.processAttempts ?? 0 }
+
+  /** Whether this task already bought at least one process-selection cycle. */
+  hasProcessAttempt(agent: RoutedAgent): boolean { return this.processAttemptCount(agent) > 0 }
 
   finalRequired(agent: RoutedAgent): number | undefined { return this.state(agent)?.finalRequiredFromSeq }
 

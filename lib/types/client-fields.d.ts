@@ -1,4 +1,5 @@
 import { type ExtraJudgeDraft } from './client-judges.ts';
+import { type AutoProcessSelectionMode } from './config.ts';
 /**
  * The settings form's single source of truth.
  *
@@ -14,7 +15,8 @@ import { type ExtraJudgeDraft } from './client-judges.ts';
 export interface Values {
     enabled: boolean;
     captureDecisions: boolean;
-    autoProcessSelection: boolean;
+    autoProcessSelection: AutoProcessSelectionMode;
+    maxProcessCyclesPerTask: number;
     autoProcessFailureContext: boolean;
     autoProcessAlternativeModel: string;
     autoProcessCandidates: number;
@@ -86,7 +88,7 @@ export interface SectionSpec {
  */
 export declare const SECTIONS: readonly SectionSpec[];
 export type FieldKind = 'toggle' | 'number' | 'text' | 'select' | 'custom';
-export type SelectSource = 'mode' | 'criteriaPreset' | 'provider' | 'model' | 'effort';
+export type SelectSource = 'mode' | 'criteriaPreset' | 'processSelection' | 'provider' | 'model' | 'effort';
 export type UnitKey = 'settings.unit.ms' | 'settings.unit.chars' | 'settings.unit.calls' | 'settings.unit.tokens';
 export interface FieldSpec {
     key: keyof Values;
@@ -137,7 +139,7 @@ export declare function textIssue(field: FieldSpec, raw: string): FieldIssue | n
 export declare function acceptsNumber(field: FieldSpec, raw: string): boolean;
 export interface FieldIssue {
     key: keyof Values;
-    code: 'required' | 'range' | 'min' | 'max' | 'integer' | 'cacheDirRelative' | 'routeBudget';
+    code: 'required' | 'range' | 'min' | 'max' | 'integer' | 'cacheDirRelative' | 'routeBudget' | 'altModelList';
     params?: Record<string, string | number>;
 }
 export declare function validateValues(values: Values): FieldIssue[];

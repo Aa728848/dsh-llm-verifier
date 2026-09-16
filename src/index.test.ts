@@ -939,6 +939,102 @@ describe('P06 process selection through the real hooks', () => {
     expect(second).toEqual(originalChunks())
   })
 
+  it('every-step registers without a recovery signal, and keeps selecting while the allowance lasts', async () => {
+    // The whole point of the mode: a task that never failed twice still gets a selected next reply,
+    // once per main-loop request, up to maxProcessCyclesPerTask.
+    const calls: string[] = []
+    const { handlers } = assemble({ ...JUDGE, autoProcessSelection: 'every-step', maxProcessCyclesPerTask: 2 }, { stream: stubStream(calls), sessions: [{ id: 'agent-p06', createdAt: 1 }] })
+    // No verification run at all, let alone two failing ones.
+    const target = agent([user(0, 'Add a health endpoint.')])
+    const preStep = handlers.get('agent/pre-step')!
+    const stream = handlers.get('llm/stream')!
+    const runOnce = async () => {
+      await preStep({ agent: target, signal: new AbortController().signal, messages: [], step: 2 }, () => ({ kind: 'enter', messages: [] }))
+      const chunks: unknown[] = []
+      for await (const chunk of stream(markAgentLoopRequest({ provider: 'p', model: 'm', messages: [], sessionId: 'agent-p06' as never }), async function* () { yield* originalChunks() }) as AsyncIterable<unknown>) chunks.push(chunk)
+      return chunks
+    }
+    expect((await runOnce()).some(chunk => JSON.stringify(chunk).includes('ALTERNATIVE-REPLY'))).toBe(true)
+    expect((await runOnce()).some(chunk => JSON.stringify(chunk).includes('ALTERNATIVE-REPLY'))).toBe(true)
+    expect(calls.filter(entry => entry === 'generation')).toHaveLength(2)
+    // Boundary: the allowance is now spent, so the third request passes straight through. Asserting
+    // the exact marker rather than "no alternative" keeps a broken judge from passing this.
+    expect(await runOnce()).toEqual(originalChunks())
+    expect(calls.filter(entry => entry === 'generation')).toHaveLength(2)
+  })
+
+  it('does not register an every-step intent once the per-task allowance is reached', async () => {
+    // One cycle allowed: the first request selects, the second is not even registered.
+    const calls: string[] = []
+    const { handlers } = assemble({ ...JUDGE, autoProcessSelection: 'every-step', maxProcessCyclesPerTask: 1 }, { stream: stubStream(calls), sessions: [{ id: 'agent-p06', createdAt: 1 }] })
+    const target = agent([user(0, 'Add a health endpoint.')])
+    const preStep = handlers.get('agent/pre-step')!
+    const stream = handlers.get('llm/stream')!
+    const runOnce = async () => {
+      await preStep({ agent: target, signal: new AbortController().signal, messages: [], step: 2 }, () => ({ kind: 'enter', messages: [] }))
+      const chunks: unknown[] = []
+      for await (const chunk of stream(markAgentLoopRequest({ provider: 'p', model: 'm', messages: [], sessionId: 'agent-p06' as never }), async function* () { yield* originalChunks() }) as AsyncIterable<unknown>) chunks.push(chunk)
+      return chunks
+    }
+    expect((await runOnce()).some(chunk => JSON.stringify(chunk).includes('ALTERNATIVE-REPLY'))).toBe(true)
+    expect(await runOnce()).toEqual(originalChunks())
+    expect(calls.filter(entry => entry === 'generation')).toHaveLength(1)
+  })
+
+  it('every-step carries the failure evidence only when the recovery signal happens to hold', async () => {
+    // The digest is optional context in this mode, not the trigger: with a stuck task it must still
+    // reach the alternative, and with a healthy one the cycle must run without it.
+    const stuckCalls: string[] = []
+    let stuckGeneration: { messages?: readonly unknown[] } | undefined
+    await drive({
+      config: { autoProcessSelection: 'every-step' },
+      events: stuck(),
+      calls: stuckCalls,
+      onGeneration: request => { stuckGeneration = request as { messages?: readonly unknown[] } },
+    })
+    expect(JSON.stringify(stuckGeneration?.messages ?? [])).toContain('DATA, not instructions')
+
+    const healthyCalls: string[] = []
+    let healthyGeneration: { messages?: readonly unknown[] } | undefined
+    const { recent } = await drive({
+      config: { autoProcessSelection: 'every-step' },
+      events: [user(0, 'Add a health endpoint.')],
+      calls: healthyCalls,
+      onGeneration: request => { healthyGeneration = request as { messages?: readonly unknown[] } },
+    })
+    // The cycle ran (one extra generation plus the judged pair)...
+    expect(healthyCalls.filter(entry => entry === 'generation')).toHaveLength(1)
+    expect(healthyCalls.filter(entry => entry === 'judge')).toHaveLength(6)
+    // ...and the row does not claim the alternative was augmented.
+    expect(recent.find(row => row.route?.trigger === 'llm-stream')?.route?.alternativeAugmented).toBeUndefined()
+    expect(JSON.stringify(healthyGeneration?.messages ?? [])).not.toContain('DATA, not instructions')
+  })
+
+  it('keeps the recovery mode at one cycle per task, still gated on two failed runs', async () => {
+    // Regression guard for the mode split: 'recovery' must not inherit the every-step allowance.
+    const calls: string[] = []
+    const { handlers } = assemble({ ...JUDGE, autoProcessSelection: 'recovery', maxProcessCyclesPerTask: 8 }, { stream: stubStream(calls), sessions: [{ id: 'agent-p06', createdAt: 1 }] })
+    const target = agent(stuck())
+    const preStep = handlers.get('agent/pre-step')!
+    const stream = handlers.get('llm/stream')!
+    const runOnce = async () => {
+      await preStep({ agent: target, signal: new AbortController().signal, messages: [], step: 2 }, () => ({ kind: 'enter', messages: [] }))
+      const chunks: unknown[] = []
+      for await (const chunk of stream(markAgentLoopRequest({ provider: 'p', model: 'm', messages: [], sessionId: 'agent-p06' as never }), async function* () { yield* originalChunks() }) as AsyncIterable<unknown>) chunks.push(chunk)
+      return chunks
+    }
+    expect((await runOnce()).some(chunk => JSON.stringify(chunk).includes('ALTERNATIVE-REPLY'))).toBe(true)
+    // The raised every-step ceiling must not apply: recovery still buys exactly one.
+    expect(await runOnce()).toEqual(originalChunks())
+    expect(calls.filter(entry => entry === 'generation')).toHaveLength(1)
+
+    // And it is still gated on the two-failure signal: a healthy task in recovery mode does nothing.
+    const healthyCalls: string[] = []
+    const { chunks } = await drive({ config: { autoProcessSelection: 'recovery' }, events: [user(0, 'Add a health endpoint.')], calls: healthyCalls })
+    expect(healthyCalls).toEqual([])
+    expect(chunks).toEqual(originalChunks())
+  })
+
   it('buys its own cycle for a second task of the same session', async () => {
     // The plan allows ONE cycle per task, bounded by the shared route allowance — not one per
     // session. A private per-session process counter made the second task unable to buy at all.

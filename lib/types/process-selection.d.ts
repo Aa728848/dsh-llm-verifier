@@ -89,10 +89,13 @@ export interface ProcessSelectionSettings {
     maxItemChars: number;
     maxInputChars: number;
     /**
-     * `provider/model` for the alternative reply; empty or absent means the request's own route.
+     * Comma-separated `provider/model` pool for the alternative replies; empty or absent means the
+     * request's own route.
      *
-     * Optional so a settings producer that predates the knob cannot abort a cycle: an absent value
-     * simply mirrors the original request, which is what the plugin did before the override existed.
+     * Candidate i is dispatched on entry i, wrapping around a shorter list (see
+     * {@link alternativeTargetAt}). Optional so a settings producer that predates the knob cannot abort
+     * a cycle: an absent value simply mirrors the original request, which is what the plugin did before
+     * the override existed.
      */
     alternativeModel?: string;
     /**
@@ -103,15 +106,39 @@ export interface ProcessSelectionSettings {
      */
     candidates?: number;
 }
-/**
- * Parse the configured alternative-model override.
- * @param value - raw `provider/model` setting (empty allowed).
- * @returns The route to generate the alternative with, or undefined to mirror the original.
- */
-export declare function resolveAlternativeTarget(value: string | undefined): {
+/** One resolved generation route of the alternative pool. */
+export interface AlternativeTarget {
     provider: string;
     model: string;
-} | undefined;
+}
+/**
+ * Parse the configured alternative-model POOL.
+ *
+ * Comma-separated `provider/model` entries; blank entries are skipped, exactly like `resolveConfig`
+ * drops them, so a trailing comma never becomes a malformed route. The result is empty when nothing
+ * usable was configured, which means "resample the session model" — the historical behaviour.
+ * @param value - raw setting (comma-separated).
+ * @returns The usable routes, in configured order.
+ */
+export declare function resolveAlternativeTargets(value: string | undefined): AlternativeTarget[];
+/**
+ * The route one generated candidate is dispatched on: entry `index` of the pool, wrapping around a
+ * list shorter than the candidate count.
+ *
+ * A short pool wraps rather than cycling the session model for the surplus candidates: the operator
+ * asked for those models, and reverting to the session model would silently change the arm the
+ * statistics row reports.
+ * @param targets - the resolved pool.
+ * @param index - 0-based alternative ordinal (the original reply is not a target).
+ * @returns The route, or undefined to mirror the original request.
+ */
+export declare function alternativeTargetAt(targets: readonly AlternativeTarget[], index: number): AlternativeTarget | undefined;
+/**
+ * Parse the configured alternative-model override (first entry of the pool).
+ * @param value - raw `provider/model` setting (empty allowed).
+ * @returns The first route to generate an alternative with, or undefined to mirror the original.
+ */
+export declare function resolveAlternativeTarget(value: string | undefined): AlternativeTarget | undefined;
 /** Everything the selector reports back for the statistics sidecar. */
 export interface ProcessCycleReport {
     agent: unknown;
@@ -450,13 +477,19 @@ export declare class ProcessCycleStore {
      * \`ok: false\` means the log could not be read, and the caller must NOT buy: an unreadable log
      * is indistinguishable from "already purchased", and the safe side of that ambiguity is to
      * keep the original path.
+     * `count` aggregates every PURCHASE row of the task. Only {@link begin} writes rows, so every
+     * record in the log is one bought cycle; a refused cycle is reported to the statistics row with
+     * `purchased: false` and never reaches this log, so it can never consume an allowance.
+     * `purchased` is kept as `count > 0` so every pre-existing caller — notably the recovery mode's
+     * one-cycle rule — keeps working unchanged.
      * @param sessionId - session owning the cycle.
      * @param taskStartSeq - task boundary sequence of the cycle.
-     * @returns Read status plus whether a record already exists.
+     * @returns Read status, whether a record already exists, and how many cycles were purchased.
      */
     lookup(sessionId: string, taskStartSeq: number): Promise<{
         ok: boolean;
         purchased: boolean;
+        count: number;
         reason?: string;
     }>;
     /**

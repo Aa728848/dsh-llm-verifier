@@ -5,6 +5,40 @@ import { type CriteriaPresetId } from './core.ts';
 export type CriteriaPresetSelection = CriteriaPresetId | 'custom';
 export declare const VERIFIER_SETTINGS_NAMESPACE: never;
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict';
+/**
+ * When the P06 request-level selector may register an intent.
+ *
+ * `off` is the shipped default and the closed path. `recovery` is the original behaviour: one cycle
+ * per task, and only once two consecutive verification runs have failed. `every-step` buys a
+ * request-level selection for EVERY main-loop request, bounded per task by
+ * {@link Config.maxProcessCyclesPerTask}.
+ */
+export type AutoProcessSelectionMode = 'off' | 'recovery' | 'every-step';
+/** The three legal values, in the order the settings page renders them. */
+export declare const AUTO_PROCESS_SELECTION_MODES: readonly AutoProcessSelectionMode[];
+/**
+ * Normalize the P06 switch, accepting the pre-3-mode BOOLEAN spelling.
+ *
+ * `true` meant "the recovery trigger" before the mode existed, so it must resolve to `recovery` and
+ * never to `every-step`: silently upgrading a saved boolean to the expensive mode would multiply an
+ * existing installation's spend without the operator asking for it. `false` and an absent value are
+ * `off`.
+ *
+ * Strings are NOT normalized here: an illegal string is a configuration error, not a typo to repair,
+ * so it is left for {@link resolveConfig} to reject (fail closed).
+ * @param value - raw value from the config, the schema or the settings page.
+ * @returns The mode, or undefined when the value is neither a mode nor a boolean.
+ */
+export declare function normalizeAutoProcessSelection(value: unknown): AutoProcessSelectionMode | undefined;
+/**
+ * The schemastery schema of a P06 mode: the three modes first, the legacy boolean last.
+ *
+ * The boolean member exists so the HOST can still resolve a section an older client saved — the
+ * schema validates the stored user layer, and rejecting `true` there would make the whole namespace
+ * unreadable. It is placed AFTER the strings so a raw `Schema.simplify` prefers the real modes, and
+ * {@link normalizeAutoProcessSelection} projects whatever comes out onto the three legal values.
+ */
+export declare function autoProcessSelectionSchema(): z<AutoProcessSelectionMode | boolean, AutoProcessSelectionMode>;
 export interface JudgeConfig {
     provider?: string;
     model?: string;
@@ -54,12 +88,22 @@ export interface Config {
     autoRouteMaxPerSession?: number;
     autoTrackCompletionThreshold?: number;
     /**
-     * P06 request-level selection over \`llm/stream\`: give a struck task one alternative next reply.
+     * P06 request-level selection over \`llm/stream\`: give a task an alternative next reply.
      *
-     * Default OFF and never turned on automatically. Only smart mode enters the path, at most one
-     * cycle is bought per task, and a selection is never an acceptance.
+     * Default OFF and never turned on automatically. Only smart mode enters the path, and a selection
+     * is never an acceptance. The legacy boolean is still accepted (`true` → `recovery`).
      */
-    autoProcessSelection?: boolean;
+    autoProcessSelection?: AutoProcessSelectionMode | boolean;
+    /**
+     * P06: cycles the \`every-step\` mode may buy within ONE task.
+     *
+     * Every-step buys a cycle for every main-loop request, so without a per-task ceiling a long task
+     * would select on every step indefinitely. This allowance is INDEPENDENT of the routing quota
+     * (\`autoRouteMaxPerTask\`) and of the final acceptance quota (\`autoVerifyMaxPerTask\`): the three
+     * counters never share a value, so spending cycles can neither starve the final gate nor be
+     * starved by it.
+     */
+    maxProcessCyclesPerTask?: number;
     /**
      * P06: hand the alternative reply the failing-run evidence the cycle was triggered by.
      *
@@ -69,12 +113,14 @@ export interface Config {
      */
     autoProcessFailureContext?: boolean;
     /**
-     * P06: generate the alternative reply with this `provider/model` instead of the request's own.
+     * P06: generate the alternative replies with these `provider/model` routes instead of the request's own.
      *
-     * Empty (the default) resamples the session model. A second model is the upstream ensemble idea
-     * without the proxy: the candidates are then genuinely different hypotheses rather than two
-     * samples of one model. It turns the comparison into "which model's next step is better", which is
-     * a different question — hence the arm is recorded on the row (`route.alternativeModel`).
+     * A COMMA-SEPARATED list. Entry i supplies the i-th generated candidate, and a list shorter than
+     * the candidate count wraps around (see `resolveAlternativeTargets`). Empty (the default) resamples
+     * the session model. A second model is the upstream ensemble idea without the proxy: the candidates
+     * are then genuinely different hypotheses rather than samples of one model. It turns the comparison
+     * into "which model's next step is better", which is a different question — hence the arm is
+     * recorded on the row (`route.alternativeModel`), as the normalized whole list.
      */
     autoProcessAlternativeModel?: string;
     /**
@@ -149,7 +195,8 @@ export interface ResolvedConfig {
     autoRouteMaxPerTask: number;
     autoRouteMaxPerSession: number;
     autoTrackCompletionThreshold: number;
-    autoProcessSelection: boolean;
+    autoProcessSelection: AutoProcessSelectionMode;
+    maxProcessCyclesPerTask: number;
     autoProcessFailureContext: boolean;
     autoProcessAlternativeModel: string;
     autoProcessCandidates: number;
