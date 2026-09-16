@@ -3,7 +3,7 @@ import type { ModelProviderGroup, SettingsNamespaceView } from '@deepseek-ai/dsh
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-import { Button, IconDataOutline16, IconRefreshOutline16, Input, StateDot, type StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconDataOutline16, IconRefreshOutline16, StateDot, type StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage,
@@ -149,7 +149,9 @@ const badgeStyle: React.CSSProperties = { flex: '0 0 auto', padding: '0 6px', bo
 const linkButton: React.CSSProperties = { border: 0, background: 'transparent', padding: 0, font: 'inherit', fontSize: 12, lineHeight: '18px', cursor: 'pointer', color: 'var(--dsw-alias-link)' }
 const row: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px 24px', minHeight: 56, padding: '10px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)' }
 const labelCell: React.CSSProperties = { flex: '1 1 220px', minWidth: 0 }
-const controlCell: React.CSSProperties = { flex: '0 1 268px', minWidth: 170, display: 'flex', justifyContent: 'flex-end' }
+const controlCell: React.CSSProperties = { flex: '0 0 268px', maxWidth: '100%', minWidth: 0, display: 'flex', justifyContent: 'flex-end' }
+/** The switch is a fixed 40px glyph; this cell keeps it on the same right edge as every other control. */
+const toggleCell: React.CSSProperties = { width: '100%', display: 'flex', justifyContent: 'flex-end' }
 const fieldTitle: React.CSSProperties = { fontSize: 14, fontWeight: 400, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' }
 const fieldHelp: React.CSSProperties = { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)', marginTop: 2 }
 const fullLine: React.CSSProperties = { flex: '1 1 100%', margin: '0 0 2px', fontSize: 12, lineHeight: '18px' }
@@ -159,7 +161,18 @@ const toolbarStyle: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', a
 const summaryLineStyle: React.CSSProperties = { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' }
 const stickyBar: React.CSSProperties = { position: 'sticky', bottom: 0, zIndex: 5, display: 'flex', flexDirection: 'column', gap: 6, padding: '10px 0 12px', borderTop: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-alias-bg-module-platform)', boxShadow: '0 -10px 24px var(--dsw-alias-bg-mask-2)' }
 const statusStyle: React.CSSProperties = { fontSize: 12, lineHeight: '18px', display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'wrap' }
-const selectStyle: React.CSSProperties = { boxSizing: 'border-box', width: '100%', height: 36, padding: '0 34px 0 12px', borderRadius: 8, color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-specific-input-major)', border: '1px solid var(--dsw-alias-border-l2)', font: 'inherit', fontSize: 14, lineHeight: '22px', outline: 'none' }
+/**
+ * ONE box model for every settings control — select, number, text and the judges grid all paint
+ * the same 36px layer, so their columns measure equally and their right edges line up. A control
+ * that cannot stretch (the host `Input`, for instance, owns an inline-flex wrapper that collapses
+ * to its content and hard-codes a 32px height) is not usable here; the native elements below
+ * spread this constant and only add their own padding.
+ */
+const controlStyle: React.CSSProperties = { boxSizing: 'border-box', width: '100%', height: 36, borderRadius: 8, color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-specific-input-major)', border: '1px solid var(--dsw-alias-border-l2)', font: 'inherit', fontSize: 14, lineHeight: '22px', outline: 'none' }
+/** A native select only adds the dropdown-arrow gutter. */
+const selectStyle: React.CSSProperties = { ...controlStyle, padding: '0 34px 0 12px' }
+/** A native text/number input keeps the same box with symmetric horizontal padding. */
+const inputStyle: React.CSSProperties = { ...controlStyle, padding: '0 12px' }
 const toggleStyle = (enabled: boolean): React.CSSProperties => ({ position: 'relative', flex: '0 0 auto', width: 40, height: 22, padding: 0, border: 0, borderRadius: 999, cursor: 'pointer', transition: 'background .15s ease', background: enabled ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-specific-input-major)' })
 const toggleThumbStyle = (enabled: boolean): React.CSSProperties => ({ position: 'absolute', top: 3, left: enabled ? 21 : 3, width: 16, height: 16, borderRadius: '50%', background: 'var(--dsw-static-neutral-00)', boxShadow: '0 1px 3px rgba(0,0,0,.28)', transition: 'left .15s ease' })
 const dashboardCard: React.CSSProperties = { border: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-alias-bg-module-platform)', borderRadius: 16, boxShadow: '0 12px 36px var(--dsw-alias-bg-mask-2)' }
@@ -356,8 +369,8 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     const current = Number(draft[key])
     return <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <Input
-          style={{ flex: '1 1 auto', minWidth: 0, height: 36, borderRadius: 8 }}
+        <input
+          style={{ ...inputStyle, flex: '1 1 auto', minWidth: 0 }}
           type="text"
           inputMode="decimal"
           disabled={busy}
@@ -389,8 +402,8 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
   const renderText = (field: FieldSpec) => {
     const key = field.key
     const placeholder = key === 'criteriaFile' ? 'criteria/my-task.md' : key === 'cacheDir' ? 'verifier' : undefined
-    return <Input
-      style={{ width: '100%', height: 36, borderRadius: 8 }}
+    return <input
+      style={inputStyle}
       type="text"
       disabled={busy}
       placeholder={placeholder}
@@ -436,7 +449,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
   const renderControl = (field: FieldSpec) => {
     if (field.kind === 'toggle') {
       const on = Boolean(draft[field.key])
-      return <button type="button" role="switch" aria-checked={on} aria-label={inputAria(field)} disabled={busy} onClick={() => patch(field.key, !on as never)} style={toggleStyle(on)}><span style={toggleThumbStyle(on)}/></button>
+      return <div style={toggleCell}><button type="button" role="switch" aria-checked={on} aria-label={inputAria(field)} disabled={busy} onClick={() => patch(field.key, !on as never)} style={toggleStyle(on)}><span style={toggleThumbStyle(on)}/></button></div>
     }
     if (field.kind === 'number') return renderNumber(field)
     if (field.kind === 'text') return renderText(field)
@@ -486,7 +499,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
             <option value="">{t['field.reasoningEffort.default']}</option>
             {judgeEfforts.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}
           </select>
-          <Input style={{ width: '100%', height: 36, borderRadius: 8 }} type="text" disabled={busy} placeholder={t['field.extraJudges.labelPlaceholder']} aria-label={tFormat(t['field.extraJudges.labelAria'], { index: idx + 1 })} value={judge.label ?? ''} onChange={event => updateJudge(idx, { label: event.target.value })}/>
+          <input style={inputStyle} type="text" disabled={busy} placeholder={t['field.extraJudges.labelPlaceholder']} aria-label={tFormat(t['field.extraJudges.labelAria'], { index: idx + 1 })} value={judge.label ?? ''} onChange={event => updateJudge(idx, { label: event.target.value })}/>
           <Button variant="outline" disabled={busy} aria-label={tFormat(t['field.extraJudges.removeAria'], { index: idx + 1 })} onClick={() => removeJudge(idx)}>{t['field.extraJudges.remove']}</Button>
         </div>
       })}

@@ -864,5 +864,88 @@ describe('client activity card structure', () => {
   })
 })
 
+/**
+ * Every control in a settings row must share one box model and one right edge.
+ *
+ * The row is a two-cell flex line (label | control); its controls used to come from two different
+ * implementations — the host `Input` (an inline-flex wrapper that shrinks to its content and
+ * hard-codes 32px) for numbers/text and a 36px native select — so the same column rendered at two
+ * heights, two widths and two right edges. The regression therefore has to pin the source shape,
+ * not a rendered pixel: one shared style constant, native elements only, and a control column that
+ * cannot be squeezed by a long label. Mirrors the source-scan style of the tests above.
+ */
+describe('client settings layout', () => {
+  const read = (): string => readFileSync(fileURLToPath(new URL('./client.tsx', import.meta.url)), 'utf8')
+  /** One single-line `const NAME: React.CSSProperties = { ... }` declaration, verbatim. */
+  const declaration = (source: string, name: string): string =>
+    new RegExp('const ' + name + ': React\\.CSSProperties = \\{[^}]*\\}').exec(source)?.[0] ?? ''
+
+  it('declares one shared control box and derives only the per-element padding from it', () => {
+    const source = read()
+    const control = declaration(source, 'controlStyle')
+    for (const expected of [
+      "boxSizing: 'border-box'",
+      "width: '100%'",
+      'height: 36',
+      'borderRadius: 8',
+      "font: 'inherit'",
+      'fontSize: 14',
+      "lineHeight: '22px'",
+      '--dsw-alias-label-primary',
+      '--dsw-specific-input-major',
+      '--dsw-alias-border-l2',
+      "outline: 'none'",
+    ]) expect(control, 'controlStyle ' + expected).toContain(expected)
+    // select and input must be the same constant plus their own padding, never a parallel box model.
+    expect(declaration(source, 'selectStyle')).toBe("const selectStyle: React.CSSProperties = { ...controlStyle, padding: '0 34px 0 12px' }")
+    expect(declaration(source, 'inputStyle')).toBe("const inputStyle: React.CSSProperties = { ...controlStyle, padding: '0 12px' }")
+  })
+
+  it('renders every settings control as a native element across the shared constant', () => {
+    const source = read()
+    // The host Input's wrapper collapses to content (inline-flex) and fixes 32px, which is exactly
+    // the misalignment being fixed — so the primitives import must not carry it at all.
+    expect(source).not.toContain("Input } from '@deepseek-ai/dsh-client-ui-primitives'")
+    expect(source).not.toContain('Input,')
+    expect(source).not.toContain('<Input')
+    // The text renderer and the judges-grid label input carry the shared constant verbatim.
+    expect(source.match(/style=\{inputStyle\}/g)?.length).toBe(2)
+    // The number renderer keeps it and only adds the flex share for its unit suffix.
+    expect(source.match(/style=\{\{ \.\.\.inputStyle, flex: '1 1 auto', minWidth: 0 \}\}/g)?.length).toBe(1)
+    // Every select resolves to the constant-derived style: verbatim in a row, spread in the toolbar.
+    const selects = source.match(/<select/g)?.length ?? 0
+    const styledSelects = (source.match(/style=\{selectStyle\}/g)?.length ?? 0)
+      + (source.match(/style=\{\{ \.\.\.selectStyle/g)?.length ?? 0)
+    expect(selects).toBeGreaterThanOrEqual(10)
+    expect(styledSelects).toBe(selects)
+    // No control may carry a rival box model inline (the shared constant is the only one).
+    expect(source).not.toMatch(/\{\{[^}]*height: 36, borderRadius: 8/)
+  })
+
+  it('keeps the control column at a fixed width so no long label can squeeze it', () => {
+    const source = read()
+    const cell = declaration(source, 'controlCell')
+    expect(cell).toContain("flex: '0 0 268px'")
+    expect(cell).toContain("justifyContent: 'flex-end'")
+    // A shrinkable control column is the bug: rows would then measure differently.
+    expect(cell).not.toMatch(/flex: '0 1/)
+    // ...and so is any positive floor: the width must come from the basis alone.
+    expect(cell).not.toMatch(/minWidth: (?!0\b)\d/)
+    // The fixed column must still be allowed to fall back to the full row width when the row wraps.
+    expect(cell).toContain("maxWidth: '100%'")
+    expect(cell).toContain('minWidth: 0')
+    expect(declaration(source, 'row')).toContain("flexWrap: 'wrap'")
+  })
+
+  it('parks the fixed-width switch on the same right edge as the inputs and selects', () => {
+    const source = read()
+    const toggle = declaration(source, 'toggleCell')
+    expect(toggle).toContain("width: '100%'")
+    expect(toggle).toContain("justifyContent: 'flex-end'")
+    // The switch itself is a 40px glyph and must be wrapped, not asked to stretch.
+    expect(source).toContain("return <div style={toggleCell}><button type=\"button\" role=\"switch\"")
+  })
+})
+
 
 
