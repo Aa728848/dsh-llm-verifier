@@ -131,6 +131,24 @@ export function resolveCapabilityFile(cacheDir: string, cwd = process.cwd()): st
   return join(root, 'capabilities-v1.json')
 }
 
+/** Replace failures that are a transient lock rather than a verdict about the capability file directory. */
+const TRANSIENT_REPLACE_CODES = new Set(['EPERM', 'EACCES', 'EBUSY'])
+
+let replaceOrdinal = 0
+
+async function replaceFile(temporary: string, target: string): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await rename(temporary, target)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (attempt >= 5 || code === undefined || !TRANSIENT_REPLACE_CODES.has(code)) throw error
+      await new Promise(resolve => setTimeout(resolve, attempt * 10))
+    }
+  }
+}
+
 export class TopLogprobCapabilityCache {
   private readonly unsupported = new Map<string, number>()
   private loaded = false
@@ -190,27 +208,31 @@ export class TopLogprobCapabilityCache {
     const key = provider + '\0' + model
     this.unsupported.delete(key)
     if (this.file === undefined) return
-    this.writing = this.writing
+    const next = this.writing
+      .catch(() => {})
       .then(() => this.ensureLoaded())
       .then(() => { this.unsupported.delete(key); return this.writeDocument() })
-      .catch(() => { /* capability memory is best-effort */ })
+    this.writing = next
+    next.catch(() => { /* capability memory is best-effort */ })
   }
 
   /** Serialize behind hydration so an early mark never clobbers not-yet-loaded entries. */
   private persist(): void {
     if (this.file === undefined) return
-    this.writing = this.writing
+    const next = this.writing
+      .catch(() => {})
       .then(() => this.ensureLoaded())
       .then(() => this.writeDocument())
-      .catch(() => { /* capability memory is best-effort; the next mark rewrites the file */ })
+    this.writing = next
+    next.catch(() => { /* capability memory is best-effort; the next mark rewrites the file */ })
   }
 
   private async writeDocument(): Promise<void> {
     const snapshot: CapabilityDocument = { version: 1, entries: Object.fromEntries(this.unsupported) }
     await mkdir(dirname(this.file!), { recursive: true })
-    const temporary = this.file! + '.tmp-' + process.pid
+    const temporary = this.file! + '.tmp-' + process.pid + '-' + (++replaceOrdinal)
     await writeFile(temporary, JSON.stringify(snapshot), 'utf8')
-    try { await rename(temporary, this.file!) } catch (error) { await unlink(temporary).catch(() => {}); throw error }
+    try { await replaceFile(temporary, this.file!) } catch (error) { await unlink(temporary).catch(() => {}); throw error }
   }
 
   /** Resolves once the trailing persistence attempt settles; exposed for tests. */

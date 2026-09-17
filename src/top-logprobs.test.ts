@@ -118,6 +118,21 @@ describe('TopLogprobCapabilityCache persistence', () => {
     expect(cache.isUnsupported('p', 'm')).toBe(true)
     expect(cache.isUnsupported('p', 'other')).toBe(false)
   })
+
+  it('survives rapid consecutive marks without clobbering temporary files', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-caps-'))
+    try {
+      const file = resolveCapabilityFile(dir)
+      const cache = new TopLogprobCapabilityCache(file)
+      for (let i = 0; i < 10; i++) {
+        cache.markUnsupported('provider', 'model-' + i)
+      }
+      await cache.flush()
+      const raw = JSON.parse(readFileSync(file, 'utf8')) as { version: number; entries: Record<string, number> }
+      expect(raw.version).toBe(1)
+      expect(Object.keys(raw.entries)).toHaveLength(10)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
 })
 
 describe('callTopLogprobs temperature', () => {
