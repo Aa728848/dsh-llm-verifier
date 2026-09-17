@@ -462,6 +462,18 @@ describe('config - judges ensemble resolution', () => {
     ])
   })
 
+  it('defaults host workspace evidence ON, and can be turned off', () => {
+    // ON by default: the acceptance judge scores the host's own record of what changed on disk
+    // rather than the agent's account of its edits. OFF reproduces the pre-0.1.6 prompt exactly.
+    expect(resolveConfig({}).autoWorkspaceEvidence).toBe(true)
+    expect(Config({}).autoWorkspaceEvidence).toBe(true)
+    expect(resolveConfig({ autoWorkspaceEvidence: false }).autoWorkspaceEvidence).toBe(false)
+    const roundTripped = Config({ ...Config({}), autoWorkspaceEvidence: false } as never) as { autoWorkspaceEvidence?: boolean }
+    expect(roundTripped.autoWorkspaceEvidence).toBe(false)
+    // The schema is the save-time gate: a non-boolean must be refused, not quietly read as an arm.
+    expect(() => Config({ autoWorkspaceEvidence: 'yes' as never })).toThrow(/expected boolean/u)
+  })
+
   it('Config schema accepts optional keys inside extraJudges array and defaults to []', () => {
     const fromEmpty = Config({})
     expect(fromEmpty.extraJudges).toEqual([])

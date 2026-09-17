@@ -62,6 +62,7 @@ export interface Values {
     autoPriceOnline: boolean;
     priceProviderOverride: string;
     autoVerifySubagents: boolean;
+    autoWorkspaceEvidence: boolean;
     extraJudges: ExtraJudgeDraft[];
 }
 /**

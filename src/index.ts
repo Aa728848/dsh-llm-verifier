@@ -11,7 +11,7 @@ import { TopLogprobCapabilityCache, resolveCapabilityFile } from './top-logprobs
 import { ScoreCache, SingleFlight, resolveCacheFile, stableHash, type CachedPairScore } from './cache.ts'
 import { VerifierEngine, mergeRunStats, normalizeCriteria, partialStats, type JudgeScore, type RunStats } from './engine.ts'
 import { loadVerifierImages } from './images.ts'
-import { extractSession, sanitizeVerifierText, sessionEvents } from './session.ts'
+import { extractSession, sanitizeVerifierText, sessionEvents, type SessionExtraction } from './session.ts'
 import { CriteriaResolver, type ResolvedCriteria } from './criteria.ts'
 import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, MAX_ROUTE_FEEDBACK_CHARS, type AcceptanceCriterion, type RoutedCandidateRef } from './auto.ts'
 import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, inspectRecoverySignal, latestDirectUserSeq, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type CandidateArtifact, type Reservation, type RouteDecision, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
@@ -19,11 +19,13 @@ import { VerifierActivities, createActivityObserver, type ActivityView } from '.
 import { ProcessCycleStore, ProcessSelector, resolveProcessFile, type ProcessCycleReport } from './process-selection.ts'
 import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, PROPOSAL_CRITERIA, buildGenerationPrompt, buildPairwisePrompt, extractScore, renderDiagnostics, renderReferenceContext, type Diagnostic, type ReviewStage } from './core.ts'
 import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from './plan-gate.ts'
+import { cancelledCall, denyWithInfo } from './tool-decision.ts'
 import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from './team-gate.ts'
 import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, parseStatisticsQuery, resolveStatisticsFile, summarizeVerdict, type RouteObservation, type StatisticsOverview, type VerdictSummary, type VerifierToolName } from './statistics.ts'
 import { resolveTopicDataDir, type SessionArtifactLocator } from './topic-storage.ts'
 import { DecisionStore, boundDecisionCalls, resolveDecisionsFile, type DecisionCall, type DecisionRecord, type DecisionTrace } from './decisions.ts'
 import { PriceResolver, costUsd } from './pricing.ts'
+import { probeWorkspaceChanges, renderWorkspaceChanges } from './workspace.ts'
 
 export const name = 'llm-verifier'
 export const inject = ['tools', 'agents', 'attachments', 'llm', 'connection', 'sessionPersistence']
@@ -39,6 +41,7 @@ export * from './router.ts'
 export * from './pricing.ts'
 export * from './plan-gate.ts'
 export * from './team-gate.ts'
+export * from './workspace.ts'
 export { callVerifier, RequestLimiter, type VerifierClientConfig, type VerifierImage, type UsageStats, type VerifierCompletion } from './caller.ts'
 
 const criterionSchema = { type: 'object' as const, additionalProperties: false, properties: { id: { type: 'string' as const, required: true as const }, name: { type: 'string' as const, required: true as const }, description: { type: 'string' as const, required: true as const } } }
@@ -126,6 +129,8 @@ const MAX_EXPLICIT_PLANNED_CALLS = 500
  * (plan 8.1), so one task's cycle can never consume another task's.
  */
 const MAX_PROCESS_PER_TASK = 1
+/** Bound on the plan pre-review findings, both in the refusal sentence and in its structured detail. */
+const PLAN_REVIEW_FEEDBACK_CHARS = 4000
 const MIN_BEST_OF_N = 2
 const MAX_BEST_OF_N = 4
 const DEFAULT_BEST_OF_N = 3
@@ -438,9 +443,46 @@ export function apply(ctx: Context, config: Config = {}): void {
     evidenceOmitted: view.omitted,
     evidenceChars: view.evidenceChars,
   })
+  /**
+   * The host's own record of what this turn changed on disk, as an acceptance evidence block.
+   *
+   * Session acceptance used to read the agent's edits only from what it said in `tool/call`
+   * arguments, so a patch that was described but never applied, or a file rewritten after the
+   * claim, was indistinguishable from real work. The host's workspace-change service knows the
+   * difference, and this block is where that knowledge reaches the judge — through the existing
+   * reference-context seam, so it is wrapped in the same delimited block, carries the same
+   * content-derived nonce, and joins the prompt hash (hence the score cache key).
+   *
+   * Purely additive by construction: a disabled switch, a host without the service (0.1.1/0.1.5),
+   * a session disposed since the turn, or any read failure all mean "no block" — never a failed
+   * acceptance, which by then has already spent judge budget.
+   * @param agent - agent whose session is being verified.
+   * @param extracted - the extracted range, which also bounds which change events count.
+   * @param signal - tool-call abort signal.
+   * @returns The evidence block, or undefined when there is nothing to attach.
+   */
+  const workspaceEvidence = async (agent: Agent, extracted: SessionExtraction, signal: AbortSignal): Promise<string | undefined> => {
+    const selected = current()
+    if (!selected.autoWorkspaceEvidence) return undefined
+    const source = probeWorkspaceChanges(ctx)
+    if (source === undefined) return undefined
+    // Only the changes inside the range being reviewed: a later turn's edits are not evidence for
+    // (nor against) the work this verification reads.
+    const events = sessionEvents(agent.session).filter(event => event.seq >= extracted.fromSeq && event.seq <= extracted.toSeq)
+    const rendered = await renderWorkspaceChanges(events, String(agent.id), source, {
+      maxItemChars: selected.autoRouteMaxItemChars,
+      maxInputChars: selected.autoRouteMaxInputChars,
+      warn: message => ctx.logger.warn(message),
+    }, signal).catch(error => {
+      ctx.logger.warn('llm-verifier workspace evidence unavailable: ' + (error instanceof Error ? error.message : String(error)))
+      return ''
+    })
+    return rendered.trim() === '' ? undefined : rendered
+  }
   const verifySession = async (agent: Agent, options: SessionVerificationOptions, signal: AbortSignal, phase = 'explicit', rubricOverride?: ResolvedCriteria, observation?: RouteObservation): Promise<SessionVerificationResult & { provider: string; model: string }> => record('verifier_current_session', agent, async (trace) => {
     const extracted = await extractSession(agent, async (ref: ImageAttachmentRef) => { const stored = await services.attachments.readImage(ref, signal); return { data: stored.data, mediaType: stored.ref.mediaType } }, { fromSeq: options.fromSeq, toSeq: options.toSeq, includeAssistantText: options.includeAssistantText, redactPatterns: options.redactPatterns, maxChars: options.maxChars })
     if (!extracted.problem.trim()) throw new Error('llm-verifier: no direct user task found in the selected session range — widen from_seq so the task statement is included')
+    const evidence = await workspaceEvidence(agent, extracted, signal)
     const { verifier, selected } = await engine(agent)
     const rubric = rubricOverride ?? await configuredCriteria()
     const repeats = positive(options.repeats, 2, 'repeats')
@@ -451,7 +493,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const planned = rubric.criteria.length * repeats * selected.judges.length
       if (planned > MAX_EXPLICIT_PLANNED_CALLS) throw new Error('llm-verifier: this session verification would issue about ' + planned + ' judge calls; reduce repeats, criteria or judges')
     }
-    const compared = await verifier.compare({ problem: extracted.problem, candidateA: extracted.trace, candidateB: EMPTY_WORK_BASELINE, criteria: rubric.criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats, images: extracted.images, ...(trace ? { trace } : {}) }, signal)
+    const compared = await verifier.compare({ problem: extracted.problem, candidateA: extracted.trace, candidateB: EMPTY_WORK_BASELINE, ...(evidence === undefined ? {} : { context: evidence }), criteria: rubric.criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats, images: extracted.images, ...(trace ? { trace } : {}) }, signal)
     const result: SessionVerificationResult = { sessionId: extracted.sessionId, problem: extracted.problem, score: compared.scoreA, baselineScore: compared.scoreB, winner: compared.winner, criteria: compared.criteria.map(row => ({ id: row.id, name: row.name, score: row.scoreA })), diagnostics: compared.diagnostics, fromSeq: extracted.fromSeq, toSeq: extracted.toSeq, omittedCharacters: extracted.omittedCharacters, calls: compared.calls, stats: compared.stats, judges: compared.judges, agreement: compared.agreement }
     return { result, selected }
   }, phase, observation)
@@ -1188,7 +1230,10 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.on('tools/pre-execute', async (exec, next) => {
     const selected = current()
     if (!selected.enabled || selected.autoVerifyMode === 'manual' || !selected.autoVerifyPlanMode) return next()
-    if (exec.name !== 'exit_plan_mode' || exec.agent === undefined || exec.signal.aborted) return next()
+    if (exec.name !== 'exit_plan_mode' || exec.agent === undefined) return next()
+    // A call the caller already cancelled is not a policy refusal: hand the host its own
+    // cancellation result instead of letting this gate decide a call that will not run.
+    if (exec.signal.aborted) return cancelledCall()
     if (!selected.autoVerifySubagents && isSubagentSession(exec.agent)) return next()
     const plan = planFromArguments(exec.arguments)
     if (!plan) return next()
@@ -1223,10 +1268,11 @@ export function apply(ctx: Context, config: Config = {}): void {
         return next()
       }
       autoRouter.fail(agent, reservation, selected.autoVerifyMode === 'strict')
-      return {
-        kind: 'deny',
-        reason: '[Automatic Verifier Plan Pre-review] scored ' + (verdict.score * 100).toFixed(1) + '% against a ' + (selected.autoVerifyThreshold * 100).toFixed(0) + '% threshold.\n' + verdict.feedback.slice(0, 4000) + '\nRevise the plan to address these findings, then call exit_plan_mode again.',
-      }
+      const findings = verdict.feedback.slice(0, PLAN_REVIEW_FEEDBACK_CHARS)
+      return denyWithInfo(
+        '[Automatic Verifier Plan Pre-review] scored ' + (verdict.score * 100).toFixed(1) + '% against a ' + (selected.autoVerifyThreshold * 100).toFixed(0) + '% threshold.\n' + findings + '\nRevise the plan to address these findings, then call exit_plan_mode again.',
+        { name: 'VerifierPlanPreReviewDenied', code: 'VERIFIER_PLAN_PRE_REVIEW_DENIED', reason: findings },
+      )
     } catch (error) {
       autoRouter.fail(agent, reservation, false)
       ctx.logger.warn('llm-verifier plan pre-review failed: ' + (error instanceof Error ? error.message : String(error)))

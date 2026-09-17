@@ -298,6 +298,8 @@ export declare const zh: {
     'field.captureDecisions.help': string;
     'field.autoVerifySubagents.title': string;
     'field.autoVerifySubagents.help': string;
+    'field.autoWorkspaceEvidence.title': string;
+    'field.autoWorkspaceEvidence.help': string;
     'section.routing': string;
     'section.budgets': string;
     'section.storage': string;
@@ -645,6 +647,8 @@ export declare const dictionaries: {
         'field.captureDecisions.help': string;
         'field.autoVerifySubagents.title': string;
         'field.autoVerifySubagents.help': string;
+        'field.autoWorkspaceEvidence.title': string;
+        'field.autoWorkspaceEvidence.help': string;
         'section.routing': string;
         'section.budgets': string;
         'section.storage': string;
@@ -989,6 +993,8 @@ export declare const dictionaries: {
         'field.captureDecisions.help': string;
         'field.autoVerifySubagents.title': string;
         'field.autoVerifySubagents.help': string;
+        'field.autoWorkspaceEvidence.title': string;
+        'field.autoWorkspaceEvidence.help': string;
         'section.routing': string;
         'section.budgets': string;
         'section.storage': string;

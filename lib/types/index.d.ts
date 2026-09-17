@@ -14,6 +14,7 @@ export * from './router.ts';
 export * from './pricing.ts';
 export * from './plan-gate.ts';
 export * from './team-gate.ts';
+export * from './workspace.ts';
 export { callVerifier, RequestLimiter, type VerifierClientConfig, type VerifierImage, type UsageStats, type VerifierCompletion } from './caller.ts';
 export declare function apply(ctx: Context, config?: Config): void;
 //# sourceMappingURL=index.d.ts.map

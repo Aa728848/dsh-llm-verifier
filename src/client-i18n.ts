@@ -333,6 +333,8 @@ export const zh = {
   'field.captureDecisions.help': '将裁判调用的提示词与原始回复脱敏后保存在本话题下，用于看板中追溯评审理由。',
   'field.autoVerifySubagents.title': '同时验收子 Agent',
   'field.autoVerifySubagents.help': '是否对派生的子 Agent 会话同样执行自动复核与验收。开启后会消耗更多裁判额度。',
+  'field.autoWorkspaceEvidence.title': '接入真实文件改动证据',
+  'field.autoWorkspaceEvidence.help': '会话验收（显式 verifier_current_session 与自动最终验收）是否附带宿主记录的本轮真实文件改动：改动文件清单、增删行数与逐文件前后对比。证据来自宿主机对工作区的观测，而不是 Agent 自述；受累进证据的单项/总字符上限约束，任何读取失败都静默降级为不带该证据。需要 DSH 0.1.6 及以上宿主，旧宿主自动忽略本项。',
 
   // Settings page: navigation, profiles, validation
   'section.routing': '自动路由',
@@ -715,6 +717,8 @@ export const en: I18nDict = {
   'field.captureDecisions.help': 'Saves sanitized prompts and raw outputs of judge calls in the topic directory for dashboard tracing.',
   'field.autoVerifySubagents.title': 'Verify Subagent Sessions',
   'field.autoVerifySubagents.help': 'Whether to also run automatic routing and acceptance on delegated child sessions. Consumes additional judge budget.',
+  'field.autoWorkspaceEvidence.title': 'Attach real file-change evidence',
+  'field.autoWorkspaceEvidence.help': 'Whether session acceptance (the explicit verifier_current_session tool and the automatic final gate) carries the host\'s own record of what this turn changed on disk: the changed-file list with added/deleted counts, plus a per-file before/after comparison. The evidence comes from the host observing the workspace rather than from the agent\'s own account, is bounded by the per-item and combined character caps, and any read failure degrades silently to no evidence. Requires a DSH 0.1.6+ host; older hosts ignore this setting.',
 
   // Settings page: navigation, profiles, validation
   'section.routing': 'Automatic Routing',

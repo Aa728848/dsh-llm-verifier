@@ -11,7 +11,7 @@
 ```bash
 pnpm run build           # 清空 lib/ → tsc 生成 lib/types → tsdown 打包 ESM + 客户端 CJS → 刷新已安装该插件的 profile 副本
 pnpm run typecheck       # 按 package.json 锁定的 @deepseek-ai/dsh-* 检查（发版门禁用这份）
-pnpm run typecheck:local # 按 ../deepseek-harness 的实际类型检查（本地有 checkout 时提前探测兼容性）
+pnpm run typecheck:local # 先跑 scripts/check-harness-types.mjs 校验宿主产物新鲜度，再按 ../deepseek-harness 的实际类型检查
 pnpm test                # vitest run，全部单测
 npx vitest run src/router.test.ts   # 跑单个文件
 pnpm run verify:release  # typecheck + test + build，prepublishOnly 会自动调用
@@ -20,6 +20,8 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 
 - 受限沙箱下 `pnpm test` 可能因 esbuild 的 piped stdio 报 `spawn EPERM`，属于沙箱边界而非代码问题。
 - `pnpm run typecheck` 与 `typecheck:local` 结论可能不同，**一律以 package.json 锁定的 npm 版本为准**。
+- `tsconfig.local.json` 把 `@deepseek-ai/*` 映射到 `../deepseek-harness/*/lib/types`，那是**构建产物**。映射目标不存在或比源码旧时，TypeScript **不会报错**，而是静默回退到 `node_modules` 的锁定版本——看起来是绿的，实际验的是旧宿主。`scripts/check-harness-types.mjs` 就是拦这个：它按 `paths` 反推包根，比对 `lib/types` 与 `src` 的 mtime，不新鲜直接失败并给出重建命令。应急可用 `DSH_VERIFIER_SKIP_HARNESS_CHECK=1` 跳过。
+- 客户端面（`client/ui-settings`、`client/ui-conversation`、`client/locale`、`api/remotes`）依赖 harness 的可选依赖才能 emit，缺依赖时它们会一直停在旧产物上——`typecheck:local` 对客户端面的结论因此可能不完整。
 
 ## 仓库结构
 
@@ -37,6 +39,7 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 | `router.ts` | 结构化 + 语义路由、证据索引、reservation/commit/fail 状态机、预算估算、检查点渲染上限 |
 | `auto.ts` | 自动验收策略判定（`analyzeAutoTask` / `sessionAccepted`）、子 Agent 识别、低分定位反馈文案 |
 | `plan-gate.ts` / `team-gate.ts` | `exit_plan_mode` 预审 / Agent Teams 任务验收 |
+| `workspace.ts` | 宿主 `workspaceChanges` 探测与真实文件改动证据渲染（改动清单 + 逐文件对比，双层限长、失败静默降级） |
 | `statistics.ts` | 调用记录持久化与多话题聚合 |
 | `process-selection.ts` | P06 请求级过程选优：`llm/stream` 意图绑定、原回复缓冲、备选生成、比较、胜者原样回放、侧车记录 |
 | `topic-storage.ts` | 侧车目录解析（随话题生命周期归档/清理） |
@@ -90,6 +93,15 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 - **Smart 模式下 track 仅作为观察**：`track` 不无条件触发 steering。有诊断时发诊断；已完成或低分且无定位诊断时，直接落入最终验收；低进度绝不可跳过最终验收。
 - **交付阶段快路径**：当前任务 Todo 全部完成且存在真实有效验证运行时，停止边界跳过过程进度路由，直接进入最终验收。
 
+### 2b. 真实文件改动证据（`workspace.ts`）
+
+- **只走 context seam，不进 route decision**：验收路径（显式 `verifier_current_session` 与自动最终验收）经 `CompareOptions.context` 附带宿主机
+  `workspaceChanges` 的摘要与逐文件对比；**绝不**把它并进 route decision 的 lengths（那条要过 `boundDecision`，多一个字符就整条丢弃）。
+- **探测失败一律降级**：`ctx.get('workspaceChanges')` 缺失、`summary`/`diff` 非函数、会话已销毁、`diff` 抛错，全部返回空证据（必要时
+  `ctx.logger.warn`）并让验收照常进行。**不要**把它加进 `index.ts` 的 `inject`，也不要 import 宿主类型——那会让插件在 0.1.1/0.1.5 宿主上不加载。
+- **双层限长**：整块 ≤ `autoRouteMaxItemChars`（即单个提示词项），文件数上限 `MAX_WORKSPACE_FILES`，其余字符按 `itemBudget(files.length, maxItemChars, contentBudget)` 分摊；
+  表头与分隔符也计入预算。二进制/超大文件只渲染一行且**不调用** `diff`。
+
 ### 3. 评分引擎与判官通道
 
 - **概率期望处理**：同一字母的多个 token 变体概率必须相加（`extractScore`），不可取 max。显式标签通道无质量下限（归一化处理）。
@@ -120,6 +132,12 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 - **四层定价规则**：手填 > 本地 pi-ai 目录 > models.dev 快照 > 未定价（0）。严格按精确 provider+model 匹配，绝不跨厂商猜测价格；缓存 token 走专用单价。
 - **设置页单一定义源**：默认值唯一存在于 `client-fields.ts` 的 `CONFIG_DEFAULTS`。前端校验仅严格镜像 `resolveConfig` 实际规则；非必填字段（如 `criteriaFile`、`priceProviderOverride` 等）允许为空。
 - **设置保存语义**：优先使用 `settings.replace`（整层替换），宿主不支持时退回带 `{reInheritBase: false}` 的 `update`，确保清空覆盖项和恢复默认生效。
+
+### 7. 宿主版本兼容（0.1.6 对齐）
+
+- **`snapshotEvents()` 是有豁免的调用，不是待清理的遗留**：DSH 0.1.6 废弃了 `eventAt()` / `snapshotEvents()` / `ownEvents()`，并**连包装它们的新别名也一并禁止**——`session.ts` 的 `sessionEvents()` 正是这种包装，仍刻意保留。官方替代品 `SessionController.page()` 只放行 `user/message` 与 `assistant/message`，`tool/call`、`tool/result`、PTC dispatch 这些**证据来源全都取不到**；宿主自己的 `auto-review` 也挂着同样的豁免。迁移方向是改用注册式 Session projection 增量维护证据，决策记录见对应 Agent Note。**不要**因为看到 `@deprecated` 就把它换成 `page()`。
+- **`PreToolDecision` 的 `info` / `cancel` 是有意的跨版本发射**：0.1.6 才引入这两个字段，而插件仍声明支持 0.1.1–0.1.6。`tool-decision.ts` 是唯一适配点：`info` 在旧宿主只读 `reason` 时被忽略；`cancel` 只在**信号确已中止**时发出，因为旧宿主对未知 `kind` 会落到它自己的 `callerCancelled(exec)` 检查，正好是 0.1.6 `cancel` 选中的同一条取消路径。**前提是信号真已中止**，否则会误拒一个活调用。
+- **`peerDependencies` 必须覆盖实际运行线**：semver 的 `^0.1.6` **不匹配** `0.1.6-alpha.2` 这类预发布版，新增版本线要照现有写法显式列出预发布形态（`^0.1.6-alpha.1 || ^0.1.6-alpha.2 || ~0.1.6`）。
 
 ## 宿主契约速查（`../deepseek-harness`）
 

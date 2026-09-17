@@ -180,6 +180,14 @@ export interface Config {
   autoVerifyTeamTasks?: boolean
   autoVerifyPlanMode?: boolean
   autoVerifySubagents?: boolean
+  /**
+   * Attach the host's own record of what the workspace changed to session acceptance.
+   *
+   * DSH 0.1.6 keeps per-turn file summaries and serves them through `workspaceChanges`; without
+   * this the acceptance judge only sees what the agent said it changed. Absent or disabled, no
+   * evidence block is added — which is also the behaviour on hosts that do not provide the service.
+   */
+  autoWorkspaceEvidence?: boolean
   provider?: string
   model?: string
   reasoningEffort?: string
@@ -237,6 +245,7 @@ export interface ResolvedConfig {
   autoVerifyTeamTasks: boolean
   autoVerifyPlanMode: boolean
   autoVerifySubagents: boolean
+  autoWorkspaceEvidence: boolean
   provider: string
   model: string
   reasoningEffort?: string
@@ -297,6 +306,7 @@ export const Config: z<Config> = z.object({
   autoVerifyTeamTasks: z.boolean().default(true),
   autoVerifyPlanMode: z.boolean().default(true),
   autoVerifySubagents: z.boolean().default(false),
+  autoWorkspaceEvidence: z.boolean().default(true),
   provider: z.string().default('deepseek-official'),
   model: z.string().default('deepseek-flash'),
   reasoningEffort: z.string(),
@@ -520,6 +530,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     autoVerifyTeamTasks: config.autoVerifyTeamTasks ?? true,
     autoVerifyPlanMode: config.autoVerifyPlanMode ?? true,
     autoVerifySubagents: config.autoVerifySubagents ?? false,
+    autoWorkspaceEvidence: config.autoWorkspaceEvidence ?? true,
     provider,
     model,
     ...(reasoningEffort ? { reasoningEffort } : {}),

@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { apply } from './index.ts'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
@@ -19,7 +19,7 @@ afterEach(() => { for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive:
  * reject a model-driven call BEFORE any model/topic work happens, both of which
  * were previously uncovered (every other module has a sibling spec).
  */
-function assemble(config: Record<string, unknown> = {}, options: { root?: string; initiator?: unknown; sessions?: unknown[]; stream?: (options: { messages: readonly unknown[] }) => AsyncIterable<unknown> } = {}) {
+function assemble(config: Record<string, unknown> = {}, options: { root?: string; initiator?: unknown; sessions?: unknown[]; stream?: (options: { messages: readonly unknown[] }) => AsyncIterable<unknown>; workspace?: unknown } = {}) {
   const tools = new Map<string, { output: { schema: { properties: Record<string, unknown> } }; execute: (args: unknown, exec: unknown) => Promise<unknown> }>()
   const warnings: string[] = []
   const rpc = new Map<string, (endpoint: string, payload: unknown) => unknown>()
@@ -28,7 +28,7 @@ function assemble(config: Record<string, unknown> = {}, options: { root?: string
   const handlers = new Map<string, (payload: unknown, next?: () => unknown) => unknown>()
   const ctx = {
     inject() {}, on(name: string, handler: (payload: unknown, next?: () => unknown) => unknown) { handlers.set(name, handler) }, effect() {},
-    get() { return undefined },
+    get(name: string) { return name === 'workspaceChanges' ? options.workspace : undefined },
     logger: { warn(value: unknown) { warnings.push(String(value)) }, info() {}, error() {}, debug() {} },
     tools: { register(definition: never) { tools.set((definition as unknown as { name: string }).name, definition as never) } },
     agents: { currentInitiator() { return options.initiator } },
@@ -473,6 +473,88 @@ describe('verifier_current_session', () => {
       expect(row.scoreA).toBeUndefined()
       expect(row.scoreB).toBeUndefined()
     }
+  })
+
+  /**
+   * The host's own record of what the turn changed on disk, as acceptance evidence.
+   *
+   * Acceptance used to see only the `tool/call` arguments the agent wrote about itself. The block
+   * below is the host's observation instead, so these specs drive the real assembly end to end:
+   * it must reach EVERY judge prompt of the acceptance, and its absence or failure must leave the
+   * verdict untouched rather than failing the gate.
+   */
+  describe('host-recorded workspace changes', () => {
+    /** The same session, one turn later: the host appended its changed-file summary. */
+    const withChanges = {
+      agent: {
+        id: 'agent-3',
+        session: {
+          header: { id: 'session-3' },
+          requestHeader: () => ({ config: { provider: 'session-provider', model: 'session-model', reasoningEffort: 'high' } }),
+          snapshotEvents: () => [...sessionExec.agent.session.snapshotEvents(), { type: 'workspace/changes', seq: 3, data: { turn: 1 } }],
+        },
+      },
+      signal: new AbortController().signal,
+    }
+    const files = [
+      { path: 'src/parser.ts', display: 'src/parser.ts', added: 1, deleted: 1 },
+      { path: 'assets/logo.png', display: 'assets/logo.png', added: 0, deleted: 0, binary: true },
+    ]
+    const patch = {
+      kind: 'text', path: 'src/parser.ts', display: 'src/parser.ts', before: true, after: true, coarse: false,
+      hunks: [{ oldStart: 10, oldLines: 2, newStart: 10, newLines: 2, lines: [' const sep = ","', '-const cut = s.split(sep)', '+const cut = s.split(sep).filter(Boolean)'] }],
+    }
+    /** Records every judge prompt and answers with a fixed A/T verdict. */
+    const recorder = (prompts: string[]) => (options: { messages: readonly unknown[] }) => {
+      prompts.push(promptText(options))
+      return textStream('<score_A> A </score_A>\n<score_B> T </score_B>')
+    }
+
+    it('attaches the changed-file summary and its comparison to every acceptance call', async () => {
+      const prompts: string[] = []
+      const diff = vi.fn(async (_sessionId: string, _seq: number, index: number) => index === 0 ? patch : undefined)
+      const workspace = {
+        summary: (sessionId: string, seq: number) => sessionId === 'agent-3' && seq === 3 ? { turn: 1, cwd: '/repo', total: 2, added: 1, deleted: 1, files } : undefined,
+        diff,
+      }
+      const definition = assemble(JUDGE, { stream: recorder(prompts), workspace, sessions: [{ id: 'session-3', createdAt: 1 }] }).tools.get('verifier_current_session')!
+      const result = await definition.execute({}, withChanges) as Record<string, any>
+      assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'current_session')
+      expect(prompts.length).toBeGreaterThan(0)
+      const blocks = prompts.map(prompt => section(prompt, 'CONTEXT'))
+      // Every judge call of the acceptance carries it, not just the first.
+      expect(blocks.every(block => block !== '')).toBe(true)
+      expect(blocks[0]).toContain('Host-recorded workspace changes for turn 1')
+      expect(blocks[0]).toContain('src/parser.ts (+1/-1)')
+      expect(blocks[0]).toContain('+const cut = s.split(sep).filter(Boolean)')
+      expect(blocks[0]).toContain('assets/logo.png (+0/-0) — binary file; contents not compared')
+      // One comparison: the binary file's answer is known without reading a snapshot.
+      expect(diff).toHaveBeenCalledTimes(1)
+      expect(diff.mock.calls[0]![3]).toBe(withChanges.signal)
+    })
+
+    it('leaves the historical prompt byte-identical when the host provides no such service', async () => {
+      const prompts: string[] = []
+      // Exactly the 0.1.1/0.1.5 shape: `ctx.get('workspaceChanges')` answers nothing at all.
+      const definition = assemble(JUDGE, { stream: recorder(prompts), sessions: [{ id: 'session-3', createdAt: 1 }] }).tools.get('verifier_current_session')!
+      const result = await definition.execute({}, sessionExec) as Record<string, any>
+      assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'current_session')
+      expect(prompts.length).toBeGreaterThan(0)
+      expect(prompts.some(prompt => prompt.includes('<<<CONTEXT:'))).toBe(false)
+    })
+
+    it('completes the acceptance, with the failure named, when a comparison cannot be read', async () => {
+      const prompts: string[] = []
+      const workspace = {
+        summary: () => ({ total: 1, added: 1, deleted: 1, files: [files[0]] }),
+        diff: async () => { throw new Error('snapshot read failed') },
+      }
+      const { tools, warnings } = assemble(JUDGE, { stream: recorder(prompts), workspace, sessions: [{ id: 'session-3', createdAt: 1 }] })
+      const result = await tools.get('verifier_current_session')!.execute({}, withChanges) as Record<string, any>
+      assertMatchesSchema(result, tools.get('verifier_current_session')!.output.schema as Record<string, any>, 'current_session')
+      expect(section(prompts[0]!, 'CONTEXT')).toContain('comparison unavailable')
+      expect(warnings.some(warning => warning.includes('snapshot read failed'))).toBe(true)
+    })
   })
 })
 
@@ -1307,6 +1389,60 @@ describe('routing-cycle budget through the real hooks', () => {
     expect(prompts.filter(isJudge).length).toBeGreaterThan(0)
   })
 
+  it('refuses a plan below the threshold and carries the findings as structured detail', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble({ ...JUDGE, autoVerifyPlanMode: true }, {
+      stream: (options: { messages: readonly unknown[] }) => {
+        const prompt = promptText(options)
+        calls.push({ prompt })
+        return textStream(isPlan(prompt) ? 'Verdict: T\nSummary: no rollback step and no verification.' : 'Verdict: T\nSummary: unrelated.')
+      },
+      sessions: [{ id: 'agent-cycle', createdAt: 1 }],
+    })
+    const decision = await handlers.get('tools/pre-execute')!(
+      { name: 'exit_plan_mode', arguments: { plan: 'Just start coding.' }, agent: agent(alternatives, []), signal: new AbortController().signal },
+      () => ({ kind: 'allow' }),
+    ) as { kind: string; reason: string; info?: { name: string; code: string; reason?: string } }
+
+    expect(decision.kind).toBe('deny')
+    // The model still reads one sentence, and the reader gets the identity and the raw findings.
+    expect(decision.reason).toContain('[Automatic Verifier Plan Pre-review]')
+    expect(decision.info?.name).toBe('VerifierPlanPreReviewDenied')
+    expect(decision.info?.code).toBe('VERIFIER_PLAN_PRE_REVIEW_DENIED')
+    expect(decision.info?.reason).toContain('no rollback step')
+  })
+
+  it('hands an already-cancelled gate call the cancellation result instead of a refusal', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble({ ...JUDGE, autoVerifyPlanMode: true }, { stream: cycleStream(calls), sessions: [{ id: 'agent-cycle', createdAt: 1 }] })
+    const controller = new AbortController()
+    controller.abort()
+
+    const decision = await handlers.get('tools/pre-execute')!(
+      { name: 'exit_plan_mode', arguments: { plan: 'Anything.' }, agent: agent(alternatives, []), signal: controller.signal },
+      () => ({ kind: 'allow' }),
+    )
+
+    expect(decision).toEqual({ kind: 'cancel' })
+    // Cancellation is decided by the host, never bought from a judge.
+    expect(calls).toHaveLength(0)
+  })
+
+  it('delegates calls it does not gate, cancellation included', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble({ ...JUDGE, autoVerifyPlanMode: true }, { stream: cycleStream(calls), sessions: [{ id: 'agent-cycle', createdAt: 1 }] })
+    const controller = new AbortController()
+    controller.abort()
+
+    const decision = await handlers.get('tools/pre-execute')!(
+      { name: 'bash', arguments: { command: 'ls' }, agent: agent(alternatives, []), signal: controller.signal },
+      () => ({ kind: 'allow' }),
+    )
+
+    expect(decision).toEqual({ kind: 'allow' })
+    expect(calls).toHaveLength(0)
+  })
+
   it('stores a classification and its promoted execution under one cycle id', async () => {
     const calls: Array<Record<string, unknown>> = []
     const { handlers, rpc } = assemble({ ...JUDGE, autoRouteMaxPerTask: 2 }, { stream: cycleStream(calls), sessions: [{ id: 'agent-cycle', createdAt: 1 }] })
@@ -1435,6 +1571,23 @@ describe('delivery-phase scheduling and tie feedback', () => {
     const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ toolName: string; verdict?: { outcome?: string }; route?: { skipReason?: string } }> } }
     const skipped = overview.value.recent.find(row => row.toolName === 'verifier_track' && row.verdict?.outcome === 'delivery-phase')
     expect(skipped?.route?.skipReason).toBe('delivery-phase')
+  })
+
+  it('carries the host workspace changes into the automatic final gate too', async () => {
+    // The explicit tool and the automatic gate share one acceptance path, but only a test that
+    // drives the real stop hook proves the gate — not just the tool — gets the evidence.
+    const calls: Array<Record<string, unknown>> = []
+    const workspace = {
+      summary: () => ({ turn: 1, total: 1, added: 4, deleted: 1, files: [{ path: 'src/parser.ts', display: 'src/parser.ts', added: 4, deleted: 1 }] }),
+      diff: async () => ({ kind: 'text', path: 'src/parser.ts', display: 'src/parser.ts', before: true, after: true, coarse: false, hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['+const fixed = true'] }] }),
+    }
+    const { handlers } = assemble(JUDGE, { stream: deliveryStream(calls), workspace, sessions: [{ id: 'agent-delivery', createdAt: 1 }] })
+    const steered: unknown[] = []
+    const events = [...deliveryEvents(), { type: 'workspace/changes', seq: 11, data: { turn: 1 } }]
+    await handlers.get('agent/turn-stopping')!({ agent: agent(events, steered), signal: new AbortController().signal })
+    const final = calls.map(entry => String(entry.prompt)).filter(isFinalCall)
+    expect(final.length).toBeGreaterThan(0)
+    expect(final.every(prompt => section(prompt, 'CONTEXT').includes('+const fixed = true'))).toBe(true)
   })
 
   it('does not skip routing twice on the same finished state', async () => {

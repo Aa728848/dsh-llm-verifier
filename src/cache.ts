@@ -126,10 +126,39 @@ export class ScoreCache {
     const snapshot: CacheDocument = { version: 1, entries: Object.fromEntries(this.entries) }
     this.writing = this.writing.catch(() => {}).then(async () => {
       await mkdir(dirname(this.file), { recursive: true })
-      const temporary = this.file + '.tmp-' + process.pid
+      // The process-wide ordinal is what keeps two writers of one cache file apart: the pid alone
+      // names the same temporary file for both, and the share violation that follows is what
+      // Windows reports as EPERM on the replace below.
+      const temporary = this.file + '.tmp-' + process.pid + '-' + (replaceOrdinal += 1)
       await writeFile(temporary, JSON.stringify(snapshot), 'utf8')
-      try { await rename(temporary, this.file) } catch (error) { await unlink(temporary).catch(() => {}); throw error }
+      try { await replaceFile(temporary, this.file) } catch (error) { await unlink(temporary).catch(() => {}); throw error }
     })
     await this.writing
+  }
+}
+
+/** Replace failures that are a transient lock rather than a verdict about the cache directory. */
+const TRANSIENT_REPLACE_CODES = new Set(['EPERM', 'EACCES', 'EBUSY'])
+
+/** Distinguishes the temporary file of every write in this process, across all cache instances. */
+let replaceOrdinal = 0
+
+/**
+ * Windows refuses the replace with a transient sharing violation while a scanner or indexer still
+ * holds the freshly written file. The score this snapshot carries was already paid for, so those
+ * codes are retried; anything else, or a persistent failure, still fails the write.
+ * @param temporary - the written snapshot, or the named source of the replace.
+ * @param target - the cache file every reader opens.
+ */
+async function replaceFile(temporary: string, target: string): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await rename(temporary, target)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (attempt >= 5 || code === undefined || !TRANSIENT_REPLACE_CODES.has(code)) throw error
+      await new Promise(resolve => setTimeout(resolve, attempt * 10))
+    }
   }
 }

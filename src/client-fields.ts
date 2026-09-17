@@ -65,6 +65,7 @@ export interface Values {
   autoPriceOnline: boolean
   priceProviderOverride: string
   autoVerifySubagents: boolean
+  autoWorkspaceEvidence: boolean
   extraJudges: ExtraJudgeDraft[]
 }
 
@@ -124,6 +125,7 @@ export const CONFIG_DEFAULTS: Values = {
   autoPriceOnline: true,
   priceProviderOverride: '',
   autoVerifySubagents: false,
+  autoWorkspaceEvidence: true,
   extraJudges: [],
 }
 
@@ -222,6 +224,7 @@ export const FIELDS: readonly FieldSpec[] = [
   toggle('autoVerifyTeamTasks', 'routing'),
   toggle('autoVerifyPlanMode', 'routing'),
   toggle('autoVerifySubagents', 'routing'),
+  toggle('autoWorkspaceEvidence', 'routing'),
   select('autoProcessSelection', 'routing', 'processSelection'),
   number('maxProcessCyclesPerTask', 'routing', { min: 1, max: 32, integer: true }),
   toggle('autoProcessFailureContext', 'routing'),
@@ -362,6 +365,7 @@ export function valuesFromView(view: Record<string, unknown> | undefined): Value
     autoPriceOnline: v.autoPriceOnline !== false,
     priceProviderOverride: typeof v.priceProviderOverride === 'string' ? v.priceProviderOverride.trim() : '',
     autoVerifySubagents: v.autoVerifySubagents === true,
+    autoWorkspaceEvidence: v.autoWorkspaceEvidence !== false,
     extraJudges: normalizeExtraJudges(v.extraJudges),
   }
 }
