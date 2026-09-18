@@ -1385,6 +1385,11 @@ export function apply(ctx: Context, config: Config = {}): void {
       return
     }
 
+    if (subagentsPending) {
+      ctx.logger.info?.('llm-verifier automatic session acceptance skipped: subagent work remains in flight')
+      return
+    }
+
     if (selected.autoVerifyTeamTasks) {
       const teamInspection = inspectTeamTasks(snapshot, evidence.taskStartSeq)
       // Every completion still pending in this turn, oldest first. A pass does not
