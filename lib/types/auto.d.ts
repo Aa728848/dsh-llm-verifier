@@ -23,6 +23,8 @@ export interface AutoTaskEvidence {
     hasManualSessionVerification: boolean;
     /** That verification passed the threshold and no consequential work happened since. */
     manualVerificationAccepted: boolean;
+    /** Whether background subagents started during the task remain in flight. */
+    pendingSubagents: boolean;
     eligible: boolean;
     reason: string;
 }
@@ -36,6 +38,19 @@ export interface AutoTaskEvidence {
 export declare function isSubagentSession(agent: {
     session?: unknown;
 } | undefined): boolean;
+/**
+ * Whether background subagents started during the current task remain in flight.
+ *
+ * A background subagent returns immediately with a start receipt (`started subagent <id>`
+ * or `started background subagent job <id>`) and settles later via a runtime-injected notice
+ * (`source.kind === 'subagent-settled'` or a job settlement notice). Performing session
+ * acceptance while subagents are in flight will always fail and steer prematurely because the
+ * delegated work has not reported back yet.
+ * @param events - session events.
+ * @param taskStartSeq - sequence number of the current direct user task statement.
+ * @returns True when at least one background subagent remains unsettled.
+ */
+export declare function hasPendingSubagents(events: readonly SessionEvent[], taskStartSeq: number): boolean;
 export declare function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVerifyPolicy, sessionId?: string): AutoTaskEvidence;
 /** One criterion's outcome from a session acceptance (candidate A is the session). */
 export interface AcceptanceCriterion {

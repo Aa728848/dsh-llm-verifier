@@ -1236,6 +1236,30 @@ describe('automatic gate lifecycle', () => {
     expect(calls.length).toBeGreaterThan(0)
   })
 
+  it('skips final acceptance gate when a background subagent is in flight', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: scriptedStream(1, [], calls), sessions: [{ id: 'topic-subagent', createdAt: 1 }] })
+    const steered: unknown[] = []
+    const inFlightEvents = [
+      user(0, 'Implement it'),
+      call(1, 'r', 'read'), result(2, 'r', 'file content'),
+      call(3, 'e', 'edit'), result(4, 'e', 'file edited'),
+      call(5, 'sub', 'subagent'), result(6, 'sub', 'started subagent 6a7dd90d-fa00-4c8c-9c0d-f2d3d5053a8f'),
+    ]
+    await handlers.get('agent/turn-stopping')!({ agent: agent(inFlightEvents, steered), signal: new AbortController().signal })
+    // No verifier judge calls made and no steering because subagent is in flight
+    expect(calls.length).toBe(0)
+    expect(steered.length).toBe(0)
+
+    // Once the subagent finishes and the settlement notice arrives, the final gate runs
+    const settledEvents = [
+      ...inFlightEvents,
+      { seq: 7, type: 'user/message', data: { source: { kind: 'subagent-settled', senderSessionId: '6a7dd90d-fa00-4c8c-9c0d-f2d3d5053a8f' }, content: [{ type: 'text', text: 'Background subagent finished' }] } },
+    ]
+    await handlers.get('agent/turn-stopping')!({ agent: agent(settledEvents, steered), signal: new AbortController().signal })
+    expect(calls.length).toBeGreaterThan(0)
+  })
+
   it('records a low-confidence classification so "not routed" has a reason', async () => {
     // Diagnostics gap named by the review: a task that was never routed showed nothing on the
     // dashboard. The classification decision itself is now stored with its reason.

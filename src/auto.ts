@@ -30,6 +30,8 @@ export interface AutoTaskEvidence {
   hasManualSessionVerification: boolean
   /** That verification passed the threshold and no consequential work happened since. */
   manualVerificationAccepted: boolean
+  /** Whether background subagents started during the task remain in flight. */
+  pendingSubagents: boolean
   eligible: boolean
   reason: string
 }
@@ -144,9 +146,146 @@ function isSuccessfulCodeDispatch(data: CodeDispatchData): boolean {
   return true
 }
 
+const SUBAGENT_TOOLS = new Set(['subagent', 'subagent_fork'])
+const CONTINUABLE_SUBAGENT_START = /^\s*started subagent\s+([^\s`]+)/imu
+const BACKGROUND_SUBAGENT_JOB_START = /^\s*started background subagent job\s+([^\s`]+)/imu
+const GENERAL_SUBAGENT_START = /^\s*started (?:background )?subagent\b/imu
+
+/**
+ * Whether background subagents started during the current task remain in flight.
+ *
+ * A background subagent returns immediately with a start receipt (`started subagent <id>`
+ * or `started background subagent job <id>`) and settles later via a runtime-injected notice
+ * (`source.kind === 'subagent-settled'` or a job settlement notice). Performing session
+ * acceptance while subagents are in flight will always fail and steer prematurely because the
+ * delegated work has not reported back yet.
+ * @param events - session events.
+ * @param taskStartSeq - sequence number of the current direct user task statement.
+ * @returns True when at least one background subagent remains unsettled.
+ */
+export function hasPendingSubagents(events: readonly SessionEvent[], taskStartSeq: number): boolean {
+  const relevant = events.filter(event => event.seq >= taskStartSeq)
+  const pendingContinuable = new Map<string, number>()
+  const pendingJobs = new Map<string, number>()
+  let anonymousPendingCount = 0
+
+  const calls = new Map<string, SessionEvent<'tool/call'>>()
+  for (const event of relevant) {
+    if (event.type === 'tool/call') calls.set(String(event.data.callId), event)
+  }
+
+  for (const event of relevant) {
+    if (event.type === 'tool/result') {
+      const call = calls.get(String(event.data.message.source.callId))
+      if (call && SUBAGENT_TOOLS.has(call.data.name) && event.data.error === undefined) {
+        if (event.data.message.content.every(b => b.isError !== true)) {
+          const text = blockText(event.data.message.content)
+          const contMatch = text.match(CONTINUABLE_SUBAGENT_START)
+          const jobMatch = text.match(BACKGROUND_SUBAGENT_JOB_START)
+          if (contMatch) {
+            pendingContinuable.set(contMatch[1]!, event.seq)
+          } else if (jobMatch) {
+            pendingJobs.set(jobMatch[1]!, event.seq)
+          } else if (GENERAL_SUBAGENT_START.test(text)) {
+            anonymousPendingCount += 1
+          }
+        }
+      }
+    } else if (CODE_DISPATCH_TYPES.has(event.type as string)) {
+      const data = (event as unknown as { data: CodeDispatchData }).data
+      if (data && SUBAGENT_TOOLS.has(data.name) && isSuccessfulCodeDispatch(data)) {
+        const text = blockText(data.content)
+        const contMatch = text.match(CONTINUABLE_SUBAGENT_START)
+        const jobMatch = text.match(BACKGROUND_SUBAGENT_JOB_START)
+        if (contMatch) {
+          pendingContinuable.set(contMatch[1]!, event.seq)
+        } else if (jobMatch) {
+          pendingJobs.set(jobMatch[1]!, event.seq)
+        } else if (GENERAL_SUBAGENT_START.test(text)) {
+          anonymousPendingCount += 1
+        }
+      }
+    }
+
+    if (event.type === 'user/message') {
+      const source = (event as unknown as { data?: { source?: { kind?: unknown; senderSessionId?: unknown; plugin?: unknown }; content?: unknown } }).data?.source
+      const text = blockText((event as unknown as { data?: { content?: unknown } }).data?.content)
+
+      if (source?.kind === 'subagent-settled') {
+        const senderId = typeof source.senderSessionId === 'string' ? source.senderSessionId : undefined
+        if (senderId && pendingContinuable.has(senderId)) {
+          pendingContinuable.delete(senderId)
+        } else {
+          let found = false
+          for (const [id] of pendingContinuable) {
+            if (text.includes(id)) {
+              pendingContinuable.delete(id)
+              found = true
+              break
+            }
+          }
+          if (!found) {
+            if (pendingContinuable.size > 0) {
+              const oldest = pendingContinuable.keys().next().value
+              if (oldest !== undefined) pendingContinuable.delete(oldest)
+            } else if (anonymousPendingCount > 0) {
+              anonymousPendingCount -= 1
+            }
+          }
+        }
+      } else if (source?.plugin === 'tool-jobs' || /background job\b.*finished/iu.test(text)) {
+        for (const [jobId] of pendingJobs) {
+          if (text.includes(jobId)) {
+            pendingJobs.delete(jobId)
+            break
+          }
+        }
+      }
+    }
+
+    if (event.type === 'tool/call') {
+      const name = event.data.name
+      const argsText = event.data.arguments
+      let parsedArgs: Record<string, unknown> = {}
+      if (typeof argsText === 'string') {
+        try { parsedArgs = JSON.parse(argsText) } catch {}
+      } else if (typeof argsText === 'object' && argsText !== null) {
+        parsedArgs = argsText as Record<string, unknown>
+      }
+      if (name === 'interrupt_agent') {
+        const target = String(parsedArgs.target ?? parsedArgs.agent_id ?? '')
+        if (target && pendingContinuable.has(target)) pendingContinuable.delete(target)
+      } else if (name === 'job_kill') {
+        const jobId = String(parsedArgs.job_id ?? '')
+        if (jobId && pendingJobs.has(jobId)) pendingJobs.delete(jobId)
+      }
+    } else if (CODE_DISPATCH_TYPES.has(event.type as string)) {
+      const data = (event as unknown as { data: CodeDispatchData }).data
+      if (data) {
+        const name = data.name
+        let parsedArgs: Record<string, unknown> = {}
+        if (typeof data.arguments === 'string') {
+          try { parsedArgs = JSON.parse(data.arguments) } catch {}
+        } else if (typeof data.arguments === 'object' && data.arguments !== null) {
+          parsedArgs = data.arguments as Record<string, unknown>
+        }
+        if (name === 'interrupt_agent') {
+          const target = String(parsedArgs.target ?? parsedArgs.agent_id ?? '')
+          if (target && pendingContinuable.has(target)) pendingContinuable.delete(target)
+        } else if (name === 'job_kill') {
+          const jobId = String(parsedArgs.job_id ?? '')
+          if (jobId && pendingJobs.has(jobId)) pendingJobs.delete(jobId)
+        }
+      }
+    }
+  }
+
+  return pendingContinuable.size > 0 || pendingJobs.size > 0 || anonymousPendingCount > 0
+}
+
 export function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVerifyPolicy, sessionId?: string): AutoTaskEvidence {
   const taskStartSeq = latestDirectUserSeq(events)
-  if (taskStartSeq === undefined) return { taskStartSeq: 0, toolCalls: 0, completedToolResults: 0, consequentialToolCalls: 0, hasManualSessionVerification: false, manualVerificationAccepted: false, eligible: false, reason: 'no-direct-user-task' }
+  if (taskStartSeq === undefined) return { taskStartSeq: 0, toolCalls: 0, completedToolResults: 0, consequentialToolCalls: 0, hasManualSessionVerification: false, manualVerificationAccepted: false, pendingSubagents: false, eligible: false, reason: 'no-direct-user-task' }
 
   const relevant = events.filter(event => event.seq >= taskStartSeq)
   const calls = relevant.filter((event): event is SessionEvent<'tool/call'> => event.type === 'tool/call')
@@ -216,12 +355,15 @@ export function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVer
     return sessionAccepted({ score: verdict.score, winner: 'A', criteria: verdict.criteria }, policy.threshold) && !stale(verdict.toSeq)
   })
 
-  if (policy.mode === 'manual') return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, eligible: false, reason: 'manual-mode' }
-  if (manualVerificationAccepted) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, eligible: false, reason: 'already-verified' }
-  if (consequentialToolCalls === 0) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, eligible: false, reason: 'no-consequential-work' }
-  if (completedToolResults === 0) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, eligible: false, reason: 'no-completed-evidence' }
-  if (policy.mode === 'smart' && toolCalls < policy.minToolCalls) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, eligible: false, reason: 'insufficient-tool-evidence' }
-  return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, eligible: true, reason: policy.mode + '-eligible' }
+  const pendingSubagents = hasPendingSubagents(events, taskStartSeq)
+
+  if (policy.mode === 'manual') return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, eligible: false, reason: 'manual-mode' }
+  if (manualVerificationAccepted) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, eligible: false, reason: 'already-verified' }
+  if (pendingSubagents) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents: true, eligible: false, reason: 'pending-subagents' }
+  if (consequentialToolCalls === 0) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, eligible: false, reason: 'no-consequential-work' }
+  if (completedToolResults === 0) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, eligible: false, reason: 'no-completed-evidence' }
+  if (policy.mode === 'smart' && toolCalls < policy.minToolCalls) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, eligible: false, reason: 'insufficient-tool-evidence' }
+  return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, eligible: true, reason: policy.mode + '-eligible' }
 }
 
 /** One criterion's outcome from a session acceptance (candidate A is the session). */

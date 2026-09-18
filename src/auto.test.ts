@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, topScoreIndices, type RoutedCandidateRef } from './auto.ts'
+import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, hasPendingSubagents, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, topScoreIndices, type RoutedCandidateRef } from './auto.ts'
 
 function taskSession() {
   const session = Session.create('session-00000000-0000-4000-8000-000000000009' as never)
@@ -230,6 +230,145 @@ describe('automatic verification policy', () => {
     expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work' })
     session.append('tool/ptc-dispatch' as never, { subCallId: 'p3', name: 'edit', arguments: '{}', isError: false, content: [{ type: 'text', text: 'done' }] } as never)
     expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: true, toolCalls: 3, consequentialToolCalls: 1 })
+  })
+
+  it('suppresses eligibility when a background continuable subagent is in flight', () => {
+    const session = taskSession()
+    call(session, 'read', 'r1')
+    call(session, 'edit', 'e1')
+    session.append('tool/call', { turn: 1, step: 1, callId: 'sub-1' as never, name: 'subagent', arguments: '{"prompt":"investigate"}' })
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'sub-1' as never, content: [{ type: 'text', text: 'started subagent 6a7dd90d-fa00-4c8c-9c0d-f2d3d5053a8f' }], isError: false }) }, { surfaceOp: 'append' })
+
+    expect(hasPendingSubagents(session.events, 0)).toBe(true)
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({
+      pendingSubagents: true,
+      eligible: false,
+      reason: 'pending-subagents',
+    })
+
+    // Settle the subagent with the runtime notice
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Background subagent 6a7dd90d-fa00-4c8c-9c0d-f2d3d5053a8f finished and will do no further work unless you send it more.\nIts closing message:\nFindings ready.' }],
+      source: { kind: 'subagent-settled', senderSessionId: '6a7dd90d-fa00-4c8c-9c0d-f2d3d5053a8f' } as never,
+    }), { surfaceOp: 'append' })
+
+    expect(hasPendingSubagents(session.events, 0)).toBe(false)
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({
+      pendingSubagents: false,
+      eligible: true,
+      reason: 'smart-eligible',
+    })
+  })
+
+  it('suppresses eligibility when a background subagent job is in flight', () => {
+    const session = taskSession()
+    call(session, 'read', 'r1')
+    call(session, 'edit', 'e1')
+    session.append('tool/call', { turn: 1, step: 1, callId: 'sub-job' as never, name: 'subagent', arguments: '{"prompt":"investigate"}' })
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'sub-job' as never, content: [{ type: 'text', text: 'started background subagent job subagent-1' }], isError: false }) }, { surfaceOp: 'append' })
+
+    expect(hasPendingSubagents(session.events, 0)).toBe(true)
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({
+      pendingSubagents: true,
+      eligible: false,
+      reason: 'pending-subagents',
+    })
+
+    // Settle via tool-jobs notice
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'background job subagent-1 (subagent: investigate) finished [status: completed, exit code: 0]. Read its output with job_output.' }],
+      source: { kind: 'plugin', plugin: 'tool-jobs' } as never,
+    }), { surfaceOp: 'append' })
+
+    expect(hasPendingSubagents(session.events, 0)).toBe(false)
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({
+      pendingSubagents: false,
+      eligible: true,
+    })
+  })
+
+  it('suppresses eligibility for subagents dispatched via PTC mode', () => {
+    const session = taskSession()
+    session.append('tool/ptc-dispatch' as never, { subCallId: 'p1', name: 'read', arguments: '{}', isError: false, content: [{ type: 'text', text: 'data' }] } as never)
+    session.append('tool/ptc-dispatch' as never, { subCallId: 'p2', name: 'edit', arguments: '{}', isError: false, content: [{ type: 'text', text: 'done' }] } as never)
+    session.append('tool/ptc-dispatch' as never, { subCallId: 'p3', name: 'subagent', arguments: '{}', isError: false, content: [{ type: 'text', text: 'started subagent child-abc' }] } as never)
+
+    expect(hasPendingSubagents(session.events, 0)).toBe(true)
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({
+      pendingSubagents: true,
+      eligible: false,
+      reason: 'pending-subagents',
+    })
+
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Background subagent child-abc finished' }],
+      source: { kind: 'subagent-settled', senderSessionId: 'child-abc' } as never,
+    }), { surfaceOp: 'append' })
+
+    expect(hasPendingSubagents(session.events, 0)).toBe(false)
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({
+      pendingSubagents: false,
+      eligible: true,
+    })
+  })
+
+  it('does not flag foreground subagent output as pending', () => {
+    const session = taskSession()
+    call(session, 'read', 'r1')
+    call(session, 'edit', 'e1')
+    session.append('tool/call', { turn: 1, step: 1, callId: 'fg' as never, name: 'subagent', arguments: '{"run_in_background":false}' })
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'fg' as never, content: [{ type: 'text', text: 'Synchronous analysis completed directly.' }], isError: false }) }, { surfaceOp: 'append' })
+
+    expect(hasPendingSubagents(session.events, 0)).toBe(false)
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({
+      pendingSubagents: false,
+      eligible: true,
+    })
+  })
+
+  it('marks subagent settled when interrupt_agent is called', () => {
+    const session = taskSession()
+    call(session, 'read', 'r1')
+    call(session, 'edit', 'e1')
+    session.append('tool/call', { turn: 1, step: 1, callId: 'sub-2' as never, name: 'subagent', arguments: '{}' })
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'sub-2' as never, content: [{ type: 'text', text: 'started subagent target-agent-1' }], isError: false }) }, { surfaceOp: 'append' })
+
+    expect(hasPendingSubagents(session.events, 0)).toBe(true)
+
+    session.append('tool/call', { turn: 1, step: 2, callId: 'intr' as never, name: 'interrupt_agent', arguments: JSON.stringify({ target: 'target-agent-1' }) })
+    session.append('tool/result', { turn: 1, step: 2, message: createToolResultMessage({ callId: 'intr' as never, content: [{ type: 'text', text: 'interrupted' }], isError: false }) }, { surfaceOp: 'append' })
+
+    expect(hasPendingSubagents(session.events, 0)).toBe(false)
+  })
+
+  it('keeps pending true if only one of multiple subagents settled', () => {
+    const session = taskSession()
+    call(session, 'read', 'r1')
+    call(session, 'edit', 'e1')
+    session.append('tool/call', { turn: 1, step: 1, callId: 'sub-a' as never, name: 'subagent', arguments: '{}' })
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'sub-a' as never, content: [{ type: 'text', text: 'started subagent agent-alpha' }], isError: false }) }, { surfaceOp: 'append' })
+    session.append('tool/call', { turn: 1, step: 1, callId: 'sub-b' as never, name: 'subagent', arguments: '{}' })
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'sub-b' as never, content: [{ type: 'text', text: 'started subagent agent-beta' }], isError: false }) }, { surfaceOp: 'append' })
+
+    expect(hasPendingSubagents(session.events, 0)).toBe(true)
+
+    // Settle only alpha
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Background subagent agent-alpha finished' }],
+      source: { kind: 'subagent-settled', senderSessionId: 'agent-alpha' } as never,
+    }), { surfaceOp: 'append' })
+
+    expect(hasPendingSubagents(session.events, 0)).toBe(true)
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ pendingSubagents: true, eligible: false })
+
+    // Settle beta
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Background subagent agent-beta finished' }],
+      source: { kind: 'subagent-settled', senderSessionId: 'agent-beta' } as never,
+    }), { surfaceOp: 'append' })
+
+    expect(hasPendingSubagents(session.events, 0)).toBe(false)
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ pendingSubagents: false, eligible: true })
   })
 })
 

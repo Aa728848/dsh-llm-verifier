@@ -14,7 +14,7 @@ import { loadVerifierImages } from './images.ts'
 import { extractSession, sanitizeVerifierText, sessionEvents, type SessionExtraction } from './session.ts'
 import { CriteriaResolver, type ResolvedCriteria } from './criteria.ts'
 import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, MAX_ROUTE_FEEDBACK_CHARS, type AcceptanceCriterion, type RoutedCandidateRef } from './auto.ts'
-import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, inspectRecoverySignal, latestDirectUserSeq, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type CandidateArtifact, type Reservation, type RouteDecision, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
+import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, inspectRecoverySignal, latestDirectUserSeq, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type CandidateArtifact, type Reservation, type RouteDecision, type RoutedAgent, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
 import { VerifierActivities, createActivityObserver, type ActivityView } from './verifier-activity.ts'
 import { ProcessCycleStore, ProcessSelector, resolveProcessFile, type ProcessCycleReport } from './process-selection.ts'
 import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, PROPOSAL_CRITERIA, buildGenerationPrompt, buildPairwisePrompt, extractScore, renderDiagnostics, renderReferenceContext, type Diagnostic, type ReviewStage } from './core.ts'
@@ -199,6 +199,49 @@ const PROBE_B = 'The test should pass now.'
 /** Bound the probe: a diagnostics button must not sit on the configured 5-minute timeout plus retries. */
 const PROBE_TIMEOUT_MS = 30000
 interface SessionVerificationResult { sessionId: string; problem: string; score: number; baselineScore: number; winner: 'A' | 'B' | 'tie'; criteria: AcceptanceCriterion[]; /** Located findings of the acceptance comparison; empty means "nothing locatable was reported". */ diagnostics: Diagnostic[]; fromSeq: number; toSeq: number; omittedCharacters: number; calls: number; stats: RunStats; judges: JudgeScore[]; agreement: number }
+
+/**
+ * Probe live host runtime services for subagents or background jobs owned by the agent that remain active.
+ *
+ * Probed at runtime without hardcoded version assumptions, gracefully degrading if services are missing.
+ * @param ctx - plugin Context.
+ * @param agent - calling Agent.
+ * @param signal - cancellation signal.
+ * @returns True when live subagents or background jobs are actively running.
+ */
+export async function hasLiveActiveSubagents(ctx: Context, agent: RoutedAgent, signal?: AbortSignal): Promise<boolean> {
+  try {
+    const subagentsService = (typeof ctx.get === 'function' ? ctx.get('subagents') : undefined)
+      ?? (ctx as unknown as { subagents?: unknown }).subagents
+    const subagents = subagentsService as {
+      listChildren?(parentSessionId: unknown, signal?: AbortSignal): Promise<readonly { kind?: string; activity?: string; status?: string }[]>
+    } | undefined
+    if (typeof subagents?.listChildren === 'function') {
+      const children = await subagents.listChildren(agent.id, signal)
+      if (Array.isArray(children) && children.some(entry => entry.kind === 'child' && (entry.activity === 'running' || entry.status === 'running'))) {
+        return true
+      }
+    }
+  } catch {
+    // Probe fails safely
+  }
+  try {
+    const jobsService = (typeof ctx.get === 'function' ? ctx.get('jobs') : undefined)
+      ?? (ctx as unknown as { jobs?: unknown }).jobs
+    const jobs = jobsService as {
+      list?(owner?: unknown): readonly { status?: string; kind?: string }[]
+    } | undefined
+    if (typeof jobs?.list === 'function') {
+      const list = jobs.list(agent)
+      if (Array.isArray(list) && list.some(job => (job.status === 'running' || job.status === 'stopping') && (job.kind === 'subagent' || job.kind === undefined))) {
+        return true
+      }
+    }
+  } catch {
+    // Probe fails safely
+  }
+  return false
+}
 
 export function apply(ctx: Context, config: Config = {}): void {
   const services = ctx as Context & { attachments: AttachmentStore; connection: HostConnectionHandle; sessionPersistence: SessionArtifactLocator & { list(signal?: AbortSignal): Promise<readonly unknown[]> } }
@@ -1330,6 +1373,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const admittedLastSeq = sessionEvents(agent.session).at(-1)?.seq ?? -1
     const snapshot = sessionEvents(agent.session).filter(event => event.seq <= admittedLastSeq)
     const stillCurrent = () => !signal.aborted && (sessionEvents(agent.session).at(-1)?.seq ?? -1) === admittedLastSeq
+    const subagentsPending = evidence.pendingSubagents || await hasLiveActiveSubagents(ctx, agent, signal)
 
     // A manual `verifier_current_session` that covered the whole task and passed is the
     // strongest acceptance signal available; it discharges the mandatory final gate
@@ -1407,6 +1451,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const deliverySignature = delivery?.signature
     const deliveryReady = delivery !== undefined && delivery.todosComplete && delivery.verification !== undefined
       && deliverySignature !== undefined && !autoRouter.deliveryConsumed(agent, deliverySignature)
+      && !subagentsPending
       && (evidence.eligible || forcedFromSeq !== undefined)
     const structured = finalPreferred ? undefined : analyzeStructuredRoute(snapshot, selected.autoRouteMaxCandidates, selected.autoRouteMaxItemChars, selected.autoRouteMaxInputChars, { processed: fingerprint => autoRouter.completedFingerprint(agent, fingerprint) }) as RouteDecision
     let decision = finalPreferred ? undefined : boundDecision(structured, policy)
@@ -1628,7 +1673,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           const completed = latest >= selected.autoTrackCompletionThreshold
           // The work already reads as done: arm the next boundary to run the mandatory final
           // gate instead of paying for another progress route that would say the same thing.
-          if (completed) autoRouter.preferFinal(agent)
+          if (completed && !subagentsPending) autoRouter.preferFinal(agent)
           const located = renderDiagnostics(result.diagnostics, 1200)
           // P04 (smart only; strict keeps its historical always-steer semantics): a track result is an
           // OBSERVATION. A generic "continue the unfinished work" instruction is only worth sending
@@ -1648,7 +1693,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           // Falling through is only useful when the mandatory gate can actually run here; otherwise the
           // historical nudge stays, so a task is never left with no guidance at all.
           const gateArmed = autoRouter.finalRequired(agent) !== undefined
-          if (forcedFromSeq === undefined && !evidence.eligible && !gateArmed) {
+          if (subagentsPending || (forcedFromSeq === undefined && !evidence.eligible && !gateArmed)) {
             const fallback = completed ? '\nPrepare final delivery evidence; final session verification is mandatory.' : '\nContinue the unfinished work.'
             agent.steer(routeFeedback(decision, detail + fallback))
             return
@@ -1671,8 +1716,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
     }
 
-    if (forcedFromSeq === undefined && !evidence.eligible) {
-      if (selected.autoVerifyMode === 'strict' && autoRouter.strictBlocked(agent)) {
+    if (subagentsPending || (forcedFromSeq === undefined && !evidence.eligible)) {
+      if (subagentsPending) {
+        ctx.logger.info?.('llm-verifier automatic session acceptance skipped: subagent work remains in flight')
+      } else if (selected.autoVerifyMode === 'strict' && autoRouter.strictBlocked(agent)) {
         // Budget-exhausted states can never be cleared, so steering every stop
         // boundary would keep the turn open indefinitely. Notify once, then let
         // the turn close with a warning instead of spinning.
