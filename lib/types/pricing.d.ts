@@ -76,7 +76,7 @@ export declare function parseModelsDevDocument(document: unknown, into: PriceTab
  * @param home - DSH home whose `profiles` are searched last; defaults to `$DSH_HOME`.
  * @returns Absolute `dist/providers/data` directory, or `undefined`.
  */
-export declare function resolveCatalogDataDir(from?: string, home?: string | undefined): string | undefined;
+export declare function resolveCatalogDataDir(from?: string, ...args: [string | undefined] | []): string | undefined;
 /** Reads every `*.json` provider document in a catalog directory into a table. */
 export declare function loadCatalogTable(dataDir: string): PriceTable;
 /** Default lifetime of a loaded price table, matching the capability memory's TTL. */

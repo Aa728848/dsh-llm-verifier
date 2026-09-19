@@ -13,7 +13,7 @@ import { VerifierEngine, mergeRunStats, normalizeCriteria, partialStats, type Ju
 import { loadVerifierImages } from './images.ts'
 import { extractSession, sanitizeVerifierText, sessionEvents, type SessionExtraction } from './session.ts'
 import { CriteriaResolver, type ResolvedCriteria } from './criteria.ts'
-import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, MAX_ROUTE_FEEDBACK_CHARS, type AcceptanceCriterion, type RoutedCandidateRef } from './auto.ts'
+import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, inspectUserInteractionPause, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, MAX_ROUTE_FEEDBACK_CHARS, type AcceptanceCriterion, type RoutedCandidateRef } from './auto.ts'
 import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, inspectRecoverySignal, latestDirectUserSeq, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type CandidateArtifact, type Reservation, type RouteDecision, type RoutedAgent, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
 import { VerifierActivities, createActivityObserver, type ActivityView } from './verifier-activity.ts'
 import { ProcessCycleStore, ProcessSelector, resolveProcessFile, type ProcessCycleReport } from './process-selection.ts'
@@ -1360,7 +1360,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     return { kind: 'enter', messages: [...decision.messages, injected] }
   })
 
-  ctx.on('agent/turn-stopping', async ({ agent, signal }) => {
+  ctx.on('agent/turn-stopping', async ({ agent, turn, signal }: { agent: Agent; turn?: number; signal: AbortSignal }) => {
     const selected = current()
     if (!selected.enabled || selected.autoVerifyMode === 'manual' || signal.aborted) return
     // Delegated child sessions are seeded with a real user message, so they would
@@ -1374,6 +1374,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     const snapshot = sessionEvents(agent.session).filter(event => event.seq <= admittedLastSeq)
     const stillCurrent = () => !signal.aborted && (sessionEvents(agent.session).at(-1)?.seq ?? -1) === admittedLastSeq
     const subagentsPending = evidence.pendingSubagents || await hasLiveActiveSubagents(ctx, agent, signal)
+    const userPause = inspectUserInteractionPause(snapshot, evidence.taskStartSeq, turn)
+    const userInteractionPending = evidence.pendingUserInteraction || userPause !== undefined
 
     // A manual `verifier_current_session` that covered the whole task and passed is the
     // strongest acceptance signal available; it discharges the mandatory final gate
@@ -1387,6 +1389,11 @@ export function apply(ctx: Context, config: Config = {}): void {
 
     if (subagentsPending) {
       ctx.logger.info?.('llm-verifier automatic session acceptance skipped: subagent work remains in flight')
+      return
+    }
+
+    if (userInteractionPending) {
+      ctx.logger.info?.('llm-verifier automatic session verification skipped: agent paused for user interaction (' + (userPause?.reason ?? 'user-interaction-paused') + ')')
       return
     }
 
@@ -1457,6 +1464,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const deliveryReady = delivery !== undefined && delivery.todosComplete && delivery.verification !== undefined
       && deliverySignature !== undefined && !autoRouter.deliveryConsumed(agent, deliverySignature)
       && !subagentsPending
+      && !userInteractionPending
       && (evidence.eligible || forcedFromSeq !== undefined)
     const structured = finalPreferred ? undefined : analyzeStructuredRoute(snapshot, selected.autoRouteMaxCandidates, selected.autoRouteMaxItemChars, selected.autoRouteMaxInputChars, { processed: fingerprint => autoRouter.completedFingerprint(agent, fingerprint) }) as RouteDecision
     let decision = finalPreferred ? undefined : boundDecision(structured, policy)
@@ -1678,7 +1686,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           const completed = latest >= selected.autoTrackCompletionThreshold
           // The work already reads as done: arm the next boundary to run the mandatory final
           // gate instead of paying for another progress route that would say the same thing.
-          if (completed && !subagentsPending) autoRouter.preferFinal(agent)
+          if (completed && !subagentsPending && !userInteractionPending) autoRouter.preferFinal(agent)
           const located = renderDiagnostics(result.diagnostics, 1200)
           // P04 (smart only; strict keeps its historical always-steer semantics): a track result is an
           // OBSERVATION. A generic "continue the unfinished work" instruction is only worth sending
@@ -1698,7 +1706,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           // Falling through is only useful when the mandatory gate can actually run here; otherwise the
           // historical nudge stays, so a task is never left with no guidance at all.
           const gateArmed = autoRouter.finalRequired(agent) !== undefined
-          if (subagentsPending || (forcedFromSeq === undefined && !evidence.eligible && !gateArmed)) {
+          if (subagentsPending || userInteractionPending || (forcedFromSeq === undefined && !evidence.eligible && !gateArmed)) {
             const fallback = completed ? '\nPrepare final delivery evidence; final session verification is mandatory.' : '\nContinue the unfinished work.'
             agent.steer(routeFeedback(decision, detail + fallback))
             return
@@ -1721,9 +1729,11 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
     }
 
-    if (subagentsPending || (forcedFromSeq === undefined && !evidence.eligible)) {
+    if (subagentsPending || userInteractionPending || (forcedFromSeq === undefined && !evidence.eligible)) {
       if (subagentsPending) {
         ctx.logger.info?.('llm-verifier automatic session acceptance skipped: subagent work remains in flight')
+      } else if (userInteractionPending) {
+        ctx.logger.info?.('llm-verifier automatic session acceptance skipped: agent paused for user interaction')
       } else if (selected.autoVerifyMode === 'strict' && autoRouter.strictBlocked(agent)) {
         // Budget-exhausted states can never be cleared, so steering every stop
         // boundary would keep the turn open indefinitely. Notify once, then let

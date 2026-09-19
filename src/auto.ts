@@ -1,7 +1,7 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 // Shared with the router so both agree on what opens a task; imported (type-only in the
 // other direction) rather than duplicated, because a drift here silently disables gating.
-import { latestDirectUserSeq } from './router.ts'
+import { inspectDeliveryPhase, latestDirectUserSeq } from './router.ts'
 import { renderDiagnostics, type Diagnostic, type ReviewStage } from './core.ts'
 import { sanitizeVerifierText } from './session.ts'
 
@@ -32,6 +32,7 @@ export interface AutoTaskEvidence {
   manualVerificationAccepted: boolean
   /** Whether background subagents started during the task remain in flight. */
   pendingSubagents: boolean
+  pendingUserInteraction: boolean
   eligible: boolean
   reason: string
 }
@@ -39,6 +40,7 @@ export interface AutoTaskEvidence {
 const PASSIVE_TOOLS = new Set([
   'read', 'read_image', 'glob', 'grep', 'web_search', 'ssh_list', 'job_list',
   'job_output', 'list_agents', 'get_goal', 'skill', 'mcp__codegraph__codegraph_explore',
+  'ask_user_question',
 ])
 const VERIFIER_TOOLS = new Set([
   'verifier_compare', 'verifier_select', 'verifier_track', 'verifier_best_of_n', 'verifier_current_session',
@@ -283,9 +285,170 @@ export function hasPendingSubagents(events: readonly SessionEvent[], taskStartSe
   return pendingContinuable.size > 0 || pendingJobs.size > 0 || anonymousPendingCount > 0
 }
 
+function parseArgumentsObject(value: unknown): Record<string, unknown> {
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {}
+    } catch { return {} }
+  }
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
+}
+
+const USER_QUESTION_PATTERNS: readonly RegExp[] = [
+  /[?？]\s*["'）)』」]*\s*$/u,
+  /(?:请|麻烦您?)(?:告知|确认|指示|选择|提供|决定|回复)/u,
+  /(?:等待|静待|等)(?:您的|你的|您|你|用户)?(?:确认|指示|回复|决定|指令|反馈|选择|输入)/u,
+  /(?:如果您?|如|若)(?:希望|需要|想)(?:继续|执行).*(?:请|告诉我|告知)/u,
+  /(?:是否|要不要|可否)(?:需要我?|继续|同意|允许|采用).*[？?]?/u,
+  /(?:暂时|先|已)?暂停(?:工作|执行|后续).*(?:等|指示|确认|决定|用户)/u,
+  /\b(?:please\s+(?:confirm|let\s+me\s+know|advise|choose|select|provide|indicate|tell\s+me|reply))\b/iu,
+  /\b(?:waiting\s+for|awaiting)\s+(?:your\s+|user\s+)?(?:input|instructions?|reply|response|confirmation|decision|guidance|feedback)\b/iu,
+  /\b(?:would\s+you\s+like|should\s+i|do\s+you\s+want\s+me\s+to|how\s+would\s+you\s+like|which\s+(?:option|approach|strategy)\s+do\s+you\s+prefer)\b/iu,
+  /\b(?:let\s+me\s+know\s+(?:how|what|if|whether|when))\b/iu,
+  /\b(?:paused?\s+(?:work|execution|here|for\s+now)|stopping\s+here)\b/iu,
+]
+
+export function isAwaitingUserText(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed) return false
+  const lastLine = trimmed.split('\n').filter(l => l.trim()).at(-1) ?? ''
+  return USER_QUESTION_PATTERNS.some(p => p.test(lastLine) || p.test(trimmed))
+}
+
+function narrativeText(blocks: unknown): string {
+  if (typeof blocks === 'string') return blocks.trim()
+  if (!Array.isArray(blocks)) return ''
+  const parts: string[] = []
+  for (const block of blocks as readonly { type?: string; text?: unknown; content?: unknown }[]) {
+    if (block?.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+    else if (block?.type === 'tool-result') parts.push(blockText(block.content))
+  }
+  return parts.join('\n').trim()
+}
+
+export interface UserInteractionPause {
+  paused: true
+  reason: string
+}
+
+/**
+ * Whether the agent has paused to ask the user a question, obtain confirmation, or await user instructions.
+ *
+ * During task execution, an agent may legitimately pause to ask the operator a question
+ * (e.g. calling `ask_user_question`, pausing/blocking a goal, or concluding a turn with prose
+ * awaiting user guidance). Gating or steering in this state forces the model to keep executing,
+ * overriding the user interaction boundary and locking the user out of providing guidance.
+ *
+ * Returns undefined when the work has already reached its delivery phase (all todos completed
+ * with verification evidence), because in that state the agent is delivering the task rather than
+ * pausing for input.
+ */
+export function inspectUserInteractionPause(
+  events: readonly SessionEvent[],
+  taskStartSeq: number,
+  currentTurn?: number,
+): UserInteractionPause | undefined {
+  const delivery = inspectDeliveryPhase(events)
+  if (delivery?.todosComplete && delivery.verification !== undefined) {
+    return undefined
+  }
+
+  let turnEvents: readonly SessionEvent[] = events
+  if (currentTurn !== undefined) {
+    const turnStartIndex = events.findLastIndex(e => e.type === 'turn/start' && (e.data as { turn?: number }).turn === currentTurn)
+    if (turnStartIndex >= 0) {
+      turnEvents = events.slice(turnStartIndex)
+    } else {
+      const byTurn = events.filter(e => (e.data as { turn?: number } | undefined)?.turn === currentTurn)
+      if (byTurn.length > 0) turnEvents = byTurn
+    }
+  } else {
+    const lastTurnStart = events.findLastIndex(e => e.type === 'turn/start')
+    if (lastTurnStart >= 0) {
+      turnEvents = events.slice(lastTurnStart)
+    }
+  }
+
+  let lastAskUserSeq = -1
+  for (const event of turnEvents) {
+    if (event.type === 'tool/call') {
+      const call = event as SessionEvent<'tool/call'>
+      if (call.data.name === 'ask_user_question') {
+        lastAskUserSeq = Math.max(lastAskUserSeq, event.seq)
+      }
+    } else if (CODE_DISPATCH_TYPES.has(event.type as string)) {
+      const data = (event as unknown as { data: CodeDispatchData }).data
+      if (data?.name === 'ask_user_question') {
+        lastAskUserSeq = Math.max(lastAskUserSeq, event.seq)
+      }
+    }
+  }
+
+  if (lastAskUserSeq >= 0) {
+    const hasConsequentialAfter = turnEvents.some(event => {
+      if (event.seq <= lastAskUserSeq) return false
+      if (event.type === 'tool/call') {
+        return isConsequential((event.data as { name: string }).name)
+      }
+      if (CODE_DISPATCH_TYPES.has(event.type as string)) {
+        const data = (event as unknown as { data: CodeDispatchData }).data
+        return data ? isConsequential(data.name) : false
+      }
+      return false
+    })
+    if (!hasConsequentialAfter) {
+      return { paused: true, reason: 'ask_user_question in current turn' }
+    }
+  }
+
+  const taskEvents = events.filter(e => e.seq >= taskStartSeq)
+  let goalPhase: 'active' | 'paused' | 'blocked' | 'complete' | undefined
+  for (const event of taskEvents) {
+    if (event.type === 'tool/call') {
+      const call = event as SessionEvent<'tool/call'>
+      if (call.data.name === 'update_goal') {
+        const args = parseArgumentsObject(call.data.arguments)
+        if (args.action === 'pause') goalPhase = 'paused'
+        else if (args.action === 'blocked') goalPhase = 'blocked'
+        else if (args.action === 'resume') goalPhase = 'active'
+        else if (args.action === 'complete') goalPhase = 'complete'
+      }
+    } else if (CODE_DISPATCH_TYPES.has(event.type as string)) {
+      const data = (event as unknown as { data: CodeDispatchData }).data
+      if (data?.name === 'update_goal') {
+        const args = parseArgumentsObject(data.arguments)
+        if (args.action === 'pause') goalPhase = 'paused'
+        else if (args.action === 'blocked') goalPhase = 'blocked'
+        else if (args.action === 'resume') goalPhase = 'active'
+        else if (args.action === 'complete') goalPhase = 'complete'
+      }
+    }
+  }
+  if (goalPhase === 'paused' || goalPhase === 'blocked') {
+    return { paused: true, reason: 'goal is ' + goalPhase }
+  }
+
+  const assistantMsgs = turnEvents.filter(e => e.type === 'assistant/message')
+  const lastAssistant = assistantMsgs.at(-1)
+  if (lastAssistant && lastAssistant.type === 'assistant/message') {
+    const data = lastAssistant.data as { message?: { content?: readonly { type?: string; text?: unknown }[] } }
+    const content = data.message?.content ?? []
+    const hasToolCalls = content.some(b => b.type === 'tool-call')
+    if (!hasToolCalls) {
+      const text = narrativeText(content)
+      if (text && isAwaitingUserText(text)) {
+        return { paused: true, reason: 'assistant awaiting user instructions' }
+      }
+    }
+  }
+
+  return undefined
+}
+
 export function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVerifyPolicy, sessionId?: string): AutoTaskEvidence {
   const taskStartSeq = latestDirectUserSeq(events)
-  if (taskStartSeq === undefined) return { taskStartSeq: 0, toolCalls: 0, completedToolResults: 0, consequentialToolCalls: 0, hasManualSessionVerification: false, manualVerificationAccepted: false, pendingSubagents: false, eligible: false, reason: 'no-direct-user-task' }
+  if (taskStartSeq === undefined) return { taskStartSeq: 0, toolCalls: 0, completedToolResults: 0, consequentialToolCalls: 0, hasManualSessionVerification: false, manualVerificationAccepted: false, pendingSubagents: false, pendingUserInteraction: false, eligible: false, reason: 'no-direct-user-task' }
 
   const relevant = events.filter(event => event.seq >= taskStartSeq)
   const calls = relevant.filter((event): event is SessionEvent<'tool/call'> => event.type === 'tool/call')
@@ -356,14 +519,17 @@ export function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVer
   })
 
   const pendingSubagents = hasPendingSubagents(events, taskStartSeq)
+  const userPause = inspectUserInteractionPause(events, taskStartSeq)
+  const pendingUserInteraction = userPause !== undefined
 
-  if (policy.mode === 'manual') return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, eligible: false, reason: 'manual-mode' }
-  if (manualVerificationAccepted) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, eligible: false, reason: 'already-verified' }
-  if (pendingSubagents) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents: true, eligible: false, reason: 'pending-subagents' }
-  if (consequentialToolCalls === 0) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, eligible: false, reason: 'no-consequential-work' }
-  if (completedToolResults === 0) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, eligible: false, reason: 'no-completed-evidence' }
-  if (policy.mode === 'smart' && toolCalls < policy.minToolCalls) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, eligible: false, reason: 'insufficient-tool-evidence' }
-  return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, eligible: true, reason: policy.mode + '-eligible' }
+  if (policy.mode === 'manual') return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, eligible: false, reason: 'manual-mode' }
+  if (manualVerificationAccepted) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, eligible: false, reason: 'already-verified' }
+  if (pendingSubagents) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents: true, pendingUserInteraction, eligible: false, reason: 'pending-subagents' }
+  if (pendingUserInteraction) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction: true, eligible: false, reason: 'user-interaction-paused' }
+  if (consequentialToolCalls === 0) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, eligible: false, reason: 'no-consequential-work' }
+  if (completedToolResults === 0) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, eligible: false, reason: 'no-completed-evidence' }
+  if (policy.mode === 'smart' && toolCalls < policy.minToolCalls) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, eligible: false, reason: 'insufficient-tool-evidence' }
+  return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, eligible: true, reason: policy.mode + '-eligible' }
 }
 
 /** One criterion's outcome from a session acceptance (candidate A is the session). */

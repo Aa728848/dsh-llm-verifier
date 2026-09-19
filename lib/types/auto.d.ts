@@ -25,6 +25,7 @@ export interface AutoTaskEvidence {
     manualVerificationAccepted: boolean;
     /** Whether background subagents started during the task remain in flight. */
     pendingSubagents: boolean;
+    pendingUserInteraction: boolean;
     eligible: boolean;
     reason: string;
 }
@@ -51,6 +52,24 @@ export declare function isSubagentSession(agent: {
  * @returns True when at least one background subagent remains unsettled.
  */
 export declare function hasPendingSubagents(events: readonly SessionEvent[], taskStartSeq: number): boolean;
+export declare function isAwaitingUserText(text: string): boolean;
+export interface UserInteractionPause {
+    paused: true;
+    reason: string;
+}
+/**
+ * Whether the agent has paused to ask the user a question, obtain confirmation, or await user instructions.
+ *
+ * During task execution, an agent may legitimately pause to ask the operator a question
+ * (e.g. calling `ask_user_question`, pausing/blocking a goal, or concluding a turn with prose
+ * awaiting user guidance). Gating or steering in this state forces the model to keep executing,
+ * overriding the user interaction boundary and locking the user out of providing guidance.
+ *
+ * Returns undefined when the work has already reached its delivery phase (all todos completed
+ * with verification evidence), because in that state the agent is delivering the task rather than
+ * pausing for input.
+ */
+export declare function inspectUserInteractionPause(events: readonly SessionEvent[], taskStartSeq: number, currentTurn?: number): UserInteractionPause | undefined;
 export declare function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVerifyPolicy, sessionId?: string): AutoTaskEvidence;
 /** One criterion's outcome from a session acceptance (candidate A is the session). */
 export interface AcceptanceCriterion {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
-import { createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, hasPendingSubagents, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, topScoreIndices, type RoutedCandidateRef } from './auto.ts'
+import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, hasPendingSubagents, inspectUserInteractionPause, isAwaitingUserText, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, topScoreIndices, type RoutedCandidateRef } from './auto.ts'
 
 function taskSession() {
   const session = Session.create('session-00000000-0000-4000-8000-000000000009' as never)
@@ -369,6 +369,67 @@ describe('automatic verification policy', () => {
 
     expect(hasPendingSubagents(session.events, 0)).toBe(false)
     expect(analyzeAutoTask(session.events, smart)).toMatchObject({ pendingSubagents: false, eligible: true })
+  })
+
+  it('detects user interaction pause when ask_user_question is called in current turn', () => {
+    const session = taskSession()
+    session.append('turn/start', { turn: 1 })
+    call(session, 'edit', 'e1')
+    session.append('tool/call', { turn: 1, step: 2, callId: 'ask-1' as never, name: 'ask_user_question', arguments: '{"questions":[{"id":"q1","question":"Continue?"}]}' })
+    session.append('tool/result', { turn: 1, step: 2, message: createToolResultMessage({ callId: 'ask-1' as never, content: [{ type: 'text', text: '{"answers":[{"id":"q1","selected":["Yes"]}]}' }], isError: false }) }, { surfaceOp: 'append' })
+
+    const pause = inspectUserInteractionPause(session.events, 0, 1)
+    expect(pause).toEqual({ paused: true, reason: 'ask_user_question in current turn' })
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ pendingUserInteraction: true, eligible: false, reason: 'user-interaction-paused' })
+
+    // If consequential work follows it in the same turn, it is not paused
+    call(session, 'edit', 'e2')
+    expect(inspectUserInteractionPause(session.events, 0, 1)).toBeUndefined()
+  })
+
+  it('detects user interaction pause when goal is paused or blocked', () => {
+    const session = taskSession()
+    session.append('turn/start', { turn: 1 })
+    call(session, 'edit', 'e1')
+    session.append('tool/call', { turn: 1, step: 2, callId: 'g1' as never, name: 'update_goal', arguments: JSON.stringify({ action: 'pause' }) })
+    session.append('tool/result', { turn: 1, step: 2, message: createToolResultMessage({ callId: 'g1' as never, content: [{ type: 'text', text: '{"goal":{"phase":"paused"}}' }], isError: false }) }, { surfaceOp: 'append' })
+
+    const pause = inspectUserInteractionPause(session.events, 0, 1)
+    expect(pause).toEqual({ paused: true, reason: 'goal is paused' })
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ pendingUserInteraction: true, eligible: false, reason: 'user-interaction-paused' })
+  })
+
+  it('detects user interaction pause when assistant message asks a question or awaits user guidance', () => {
+    const session = taskSession()
+    session.append('turn/start', { turn: 1 })
+    call(session, 'edit', 'e1')
+    call(session, 'edit', 'e2')
+    call(session, 'read', 'r1')
+    session.append('assistant/message', {
+      turn: 1,
+      step: 3,
+      message: createAssistantMessage({
+        content: [{ type: 'text', text: '遇到网络配置问题，请问是否切换到备用服务器？' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      }),
+    }, { surfaceOp: 'append' })
+
+    const pause = inspectUserInteractionPause(session.events, 0, 1)
+    expect(pause).toEqual({ paused: true, reason: 'assistant awaiting user instructions' })
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ pendingUserInteraction: true, eligible: false, reason: 'user-interaction-paused' })
+  })
+
+  it('correctly matches and rejects assistant text in isAwaitingUserText', () => {
+    expect(isAwaitingUserText('Please confirm if I should proceed with step 2?')).toBe(true)
+    expect(isAwaitingUserText('Please let me know which database you prefer.')).toBe(true)
+    expect(isAwaitingUserText('Waiting for your instructions.')).toBe(true)
+    expect(isAwaitingUserText('请问您希望如何处理？')).toBe(true)
+    expect(isAwaitingUserText('请告知您的选择。')).toBe(true)
+    expect(isAwaitingUserText('当前已暂停执行，等待用户确认。')).toBe(true)
+
+    expect(isAwaitingUserText('I will now fix the second error in src/auto.ts.')).toBe(false)
+    expect(isAwaitingUserText('All tests passed successfully.')).toBe(false)
+    expect(isAwaitingUserText('已成功创建文件并完成修改。')).toBe(false)
   })
 })
 

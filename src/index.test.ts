@@ -1260,6 +1260,52 @@ describe('automatic gate lifecycle', () => {
     expect(calls.length).toBeGreaterThan(0)
   })
 
+  it('skips automatic verification when agent pauses to ask user or await user instructions', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: scriptedStream(1, [], calls), sessions: [{ id: 'topic-pause', createdAt: 1 }] })
+    const steered: unknown[] = []
+
+    // 1. Calling ask_user_question in current turn
+    const askUserEvents = [
+      user(0, 'Implement it'),
+      call(1, 'r', 'read'), result(2, 'r', 'file content'),
+      call(3, 'e', 'edit'), result(4, 'e', 'file edited'),
+      { seq: 5, type: 'turn/start', data: { turn: 2 } },
+      { seq: 6, type: 'tool/call', data: { turn: 2, step: 1, callId: 'ask', name: 'ask_user_question', arguments: '{}' } },
+      { seq: 7, type: 'tool/result', data: { turn: 2, step: 1, message: { source: { callId: 'ask' }, content: [{ type: 'text', text: '{"answers":[{"id":"choice","selected":["Option A"]}]}' }] } } },
+      { seq: 8, type: 'assistant/message', data: { turn: 2, message: { role: 'assistant', content: [{ type: 'text', text: 'Received your answer.' }] } } },
+    ]
+    await handlers.get('agent/turn-stopping')!({ agent: agent(askUserEvents, steered), turn: 2, signal: new AbortController().signal })
+    expect(calls.length).toBe(0)
+    expect(steered.length).toBe(0)
+
+    // 2. Assistant message asking user in natural language
+    const askInTextEvents = [
+      user(0, 'Implement it'),
+      call(1, 'r', 'read'), result(2, 'r', 'file content'),
+      call(3, 'e', 'edit'), result(4, 'e', 'file edited'),
+      { seq: 5, type: 'turn/start', data: { turn: 2 } },
+      { seq: 6, type: 'assistant/message', data: { turn: 2, message: { role: 'assistant', content: [{ type: 'text', text: '遇到网络错误，请问是否重试？' }] } } },
+    ]
+    await handlers.get('agent/turn-stopping')!({ agent: agent(askInTextEvents, steered), turn: 2, signal: new AbortController().signal })
+    expect(calls.length).toBe(0)
+    expect(steered.length).toBe(0)
+
+    // 3. Goal paused
+    const goalPausedEvents = [
+      user(0, 'Implement it'),
+      call(1, 'r', 'read'), result(2, 'r', 'file content'),
+      call(3, 'e', 'edit'), result(4, 'e', 'file edited'),
+      { seq: 5, type: 'turn/start', data: { turn: 2 } },
+      { seq: 6, type: 'tool/call', data: { turn: 2, step: 1, callId: 'g', name: 'update_goal', arguments: JSON.stringify({ action: 'pause' }) } },
+      { seq: 7, type: 'tool/result', data: { turn: 2, step: 1, message: { source: { callId: 'g' }, content: [{ type: 'text', text: '{"goal":{"phase":"paused"}}' }] } } },
+    ]
+    await handlers.get('agent/turn-stopping')!({ agent: agent(goalPausedEvents, steered), turn: 2, signal: new AbortController().signal })
+    expect(calls.length).toBe(0)
+    expect(steered.length).toBe(0)
+  })
+
+
   it('records a low-confidence classification so "not routed" has a reason', async () => {
     // Diagnostics gap named by the review: a task that was never routed showed nothing on the
     // dashboard. The classification decision itself is now stored with its reason.

@@ -173,7 +173,8 @@ function catalogUnder(root: string): string | undefined {
  * @param home - DSH home whose `profiles` are searched last; defaults to `$DSH_HOME`.
  * @returns Absolute `dist/providers/data` directory, or `undefined`.
  */
-export function resolveCatalogDataDir(from: string = dirname(fileURLToPath(import.meta.url)), home: string | undefined = process.env.DSH_HOME?.trim()): string | undefined {
+export function resolveCatalogDataDir(from: string = dirname(fileURLToPath(import.meta.url)), ...args: [string | undefined] | []): string | undefined {
+  const home = args.length > 0 ? args[0] : process.env.DSH_HOME?.trim()
   const override = process.env.DSH_VERIFIER_PI_AI_DATA?.trim()
   if (override) return existsSync(override) ? override : undefined
   let dir = from
