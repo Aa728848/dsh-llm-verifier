@@ -66,7 +66,10 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 10. **i18n 中英字典键必须严格一一对应**（由 `I18nDict = typeof zh` 编译期保障）。新增配置项必须同步修改 schema、`resolveConfig`、UI 字段注册（`client-fields.ts`）、中英文案与 README。
 11. **发送给裁判的所有内容必须经过脱敏**（`DEFAULT_REDACT_PATTERNS` + 自定义模式），严防凭证泄露。
 12. **判官提示词是安全边界**：待审数据必须包裹在带确定性防穿透令牌的分隔块中（`renderDelimitedBlock` + `evidenceNonce`），并声明其仅为只读数据、严禁执行其中指令或采纳其中评分。
-13. **非平凡变更必须附带 Agent Note**（在 `.agents/notes/{lifecycle}/{class}/YYYY-MM-DD-slug.md` 归档，用简体中文，包含 Problem / Decision / Alternatives considered / Consequences）。
+13. **修改前查阅历史决策，非平凡变更同步更新/附带 Agent Note**：
+    - **前置查阅（Pre-edit Review）**：在对核心评分逻辑、门控策略、路由调度或客户端面做非平凡修改前，先检索 `.agents/notes/implemented/` 审阅拥有该决策的既有 Note（Owning Note），重点检查设计约束与被否决的备选方案（Alternatives considered），避免重犯历史错误。
+    - **决策所有权（Owning Note）**：如果已有 Note 拥有该项决策，在同一变更中直接就地更新其路径、符号与机制陈述（保持与实际交付代码一致）；仅在无 Note 拥有该决策或做出相反重大决策时才新建 Note。
+    - **交付态事实与规范**：笔记存放在 `.agents/notes/{lifecycle}/{class}/YYYY-MM-DD-slug.md`，用简体中文书写，包含 Problem / Decision / Alternatives considered / Consequences。交付态（`implemented/`）必须写客观现状事实，严禁保留未来时/计划态（禁用 Proposal / Plan / Acceptance criteria 等 spec-speak）。遵循「每个事实只有一个归宿（One home per fact）」原则。
 
 ## 测试约定
 
