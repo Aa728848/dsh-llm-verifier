@@ -232,6 +232,25 @@ describe('automatic verification policy', () => {
     expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: true, toolCalls: 3, consequentialToolCalls: 1 })
   })
 
+  it('treats run_code as passive wrapper when it only dispatches passive tools', () => {
+    const session = taskSession()
+    call(session, 'run_code', 'wrap-1')
+    session.append('tool/ptc-dispatch' as never, { rootCallId: 'wrap-1', subCallId: 'p1', name: 'read', arguments: '{}', isError: false, content: [{ type: 'text', text: 'data' }] } as never)
+    session.append('tool/ptc-dispatch' as never, { rootCallId: 'wrap-1', subCallId: 'p2', name: 'grep', arguments: '{}', isError: false, content: [{ type: 'text', text: 'match' }] } as never)
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work', consequentialToolCalls: 0 })
+
+    call(session, 'run_code', 'wrap-2')
+    session.append('tool/ptc-dispatch' as never, { rootCallId: 'wrap-2', subCallId: 'p3', name: 'edit', arguments: '{}', isError: false, content: [{ type: 'text', text: 'done' }] } as never)
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: true, consequentialToolCalls: 1 })
+  })
+
+  it('treats todo_write and present as passive bookkeeping for eligibility', () => {
+    const session = taskSession()
+    call(session, 'todo_write', 't1')
+    call(session, 'present', 'pr1')
+    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work', consequentialToolCalls: 0 })
+  })
+
   it('suppresses eligibility when a background continuable subagent is in flight', () => {
     const session = taskSession()
     call(session, 'read', 'r1')

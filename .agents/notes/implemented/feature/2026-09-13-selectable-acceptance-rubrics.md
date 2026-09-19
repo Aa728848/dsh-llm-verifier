@@ -14,6 +14,12 @@ Status: implemented
 
 1. `core.ts`：`CRITERIA_PRESETS` 提供 `coding` / `debug` / `research` / `ops` / `writing` 五类预设（各 2–4 条窄判据）；
    `coding` 与 `DEFAULT_CRITERIA` **保持同一个对象引用**（测试锁死：改动会同时改变门控松紧与缓存键）；
+   针对现代全功能开发中模型易出现的 Vibe Coding 投机（实现了不接线、单向开关关不掉、写死单行正则糊弄协议解析），
+   在保持 3 项 ID 结构（`specification` / `output_match` / `error_signals`）与零额外调用开销的前提下，将工程交付深度整合升级：
+   - `specification`：融入架构装配审查（新功能必须接线进系统入口，严惩孤立死代码；物理 diff 缺失时从调用上下文评估；小修复与微调按 Minimal Diff 豁免）；
+   - `output_match`：融入全链路与双向状态验证（拒绝自嗨型玩具单测，开关/配置项必须提供开启与关闭的双向往返证据；纯逻辑、无状态或无开关修复豁免双向验证）；
+   - `error_signals`：融入实现健壮性与防硬编码审查（严惩针对测试用例的特判魔数与用于复杂协议解析的简陋单行正则；奖励根因修复并惩罚 YAGNI 过度设计）；
+   同时配套提供 4 项完全体模板 `criteria/software-engineering.md` 供 `custom` 模式开箱即用。
    `parseCriteriaMarkdown` 解析自定义 Markdown 判据文件；`slugCriterionId` / `dedupeCriterionId` 生成并去重 id。
 2. `criteria.ts`：`CriteriaResolver.resolve(preset, file)` —— 预设直取；自定义文件每次重读、内容未变则复用解析结果；
    **文件缺失或解析失败退回 coding 并回报原因**。

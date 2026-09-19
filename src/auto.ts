@@ -38,15 +38,16 @@ export interface AutoTaskEvidence {
 }
 
 const PASSIVE_TOOLS = new Set([
-  'read', 'read_image', 'glob', 'grep', 'web_search', 'ssh_list', 'job_list',
-  'job_output', 'list_agents', 'get_goal', 'skill', 'mcp__codegraph__codegraph_explore',
-  'ask_user_question',
+  'read', 'read_image', 'glob', 'grep', 'web_search', 'web_fetch', 'ssh_list', 'job_list',
+  'job_output', 'list_agents', 'list_subagent_models', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource',
+  'get_goal', 'skill', 'mcp__codegraph__codegraph_explore', 'ask_user_question',
+  'todo_write', 'present', 'run_code',
 ])
 const VERIFIER_TOOLS = new Set([
   'verifier_compare', 'verifier_select', 'verifier_track', 'verifier_best_of_n', 'verifier_current_session',
 ])
 const CONSEQUENTIAL_TOOLS = new Set([
-  'edit', 'write', 'pwsh', 'bash', 'run_code', 'codex_image_generate',
+  'edit', 'write', 'pwsh', 'bash', 'codex_image_generate',
   'ssh_exec', 'ssh_upload', 'ssh_download', 'ssh_tunnel', 'ssh_cluster',
   'job_kill', 'workbench_session_delete', 'create_goal', 'update_goal',
 ])
@@ -132,6 +133,7 @@ function isConsequential(name: string): boolean {
 }
 
 interface CodeDispatchData {
+  rootCallId?: string
   subCallId?: string
   name: string
   arguments?: unknown

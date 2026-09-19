@@ -40,17 +40,17 @@ export const DEFAULT_CRITERIA: Criterion[] = [
   {
     id: 'specification',
     name: 'Specification Adherence',
-    description: 'Re-read the task description and check exact requirements: file paths, output formats, naming, and explicit constraints. Penalize a solution that solves a similar but different problem.',
+    description: 'Check exact task requirements: file paths, formats, naming, and constraints. Evaluate architectural integration proportionally: for new features or modules, inspect workspace diffs and verify they are genuinely wired into the host entry point, router, or registry (penalize un-wired dead code; if physical diffs are unavailable, evaluate integration from the invocation context); for localized bug fixes or minor tweaks, enforce the Minimal Diff principle without requiring extraneous wiring. Penalize solutions that solve a nearby but different problem.',
   },
   {
     id: 'output_match',
     name: 'Output Match',
-    description: 'Find the final verification command and compare its actual stdout/stderr to the required output. Reward only evidence literally visible in observed output; do not trust narration.',
+    description: 'Find the final verification command and inspect actual stdout/stderr. Distinguish real engineering from superficial "vibe coding": reward tangible build/typecheck outputs, integration test runs, and bidirectional state proof (toggle/config features must demonstrate a full lifecycle: both active and inactive/reset states; pure logic, stateless tasks, or simple bugfixes without switches are exempt). Reject self-serving toy unit tests that test only happy-path mocks without real system validation. Reward only evidence literally visible in observed output; do not trust narration.',
   },
   {
     id: 'error_signals',
     name: 'Error Signal Detection',
-    description: 'Scan especially later steps for unresolved errors, tracebacks, non-zero exits, command-not-found, missing files, compilation failures, and test failures. Score only unresolved error evidence.',
+    description: 'Scan especially later steps for unresolved errors, tracebacks, non-zero exits, command-not-found, missing files, compilation failures, and test failures. Additionally penalize brittle implementation shortcuts: flag naive, single-line hardcoded regexes for complex protocol/syntax parsing and cheat heuristics tailored solely to pass test examples. Reward targeted root-cause repairs while penalizing speculative over-engineering (YAGNI). Score only unresolved errors and brittle implementation defects.',
   },
 ]
 
