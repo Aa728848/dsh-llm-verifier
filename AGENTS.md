@@ -51,6 +51,7 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 | `criteria.ts` | 判据解析：内置预设直取，自定义 Markdown 缓存重读，失败安全回退至 coding |
 | `replay.ts` | 离线回放：重放阈值、重放解析器、汇总周期与分臂读数（配套 `scripts/eval-replay.mjs`） |
 | `.agents/notes/` | Agent Notes：非平凡变更的决策日志（格式与纪律见 `.agents/notes/README.md`） |
+| `.agents/skills/` | 维护技能：`dsh-version-upgrade`（DSH 版本升级流程、反复踩到的陷阱、每次升级的要点索引）。发现指针是仓库根的 `.claude/skills` → `../.agents/skills` |
 
 ## 硬性规矩
 
@@ -137,6 +138,8 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 - **设置保存语义**：优先使用 `settings.replace`（整层替换），宿主不支持时退回带 `{reInheritBase: false}` 的 `update`，确保清空覆盖项和恢复默认生效。
 
 ### 7. 宿主版本兼容（0.1.7 对齐）
+
+**升级宿主版本线之前，先读 `.agents/skills/dsh-version-upgrade/SKILL.md`**：那里有本机 harness 的实际路径、逐 tag 对比宿主类型面的命令、验证循环、反复踩到的陷阱，以及每次升级的要点索引。本节只列"看到这些代码不要动"的既定事实。
 
 - **`snapshotEvents()` 是有豁免的调用，不是待清理的遗留**：DSH 0.1.6 废弃了 `eventAt()` / `snapshotEvents()` / `ownEvents()`，并**连包装它们的新别名也一并禁止**——`session.ts` 的 `sessionEvents()` 正是这种包装，仍刻意保留。官方替代品 `SessionController.page()` 只放行 `user/message` 与 `assistant/message`，`tool/call`、`tool/result`、PTC dispatch 这些**证据来源全都取不到**；宿主自己的 `auto-review` 也挂着同样的豁免。迁移方向是改用注册式 Session projection 增量维护证据，决策记录见对应 Agent Note。**不要**因为看到 `@deprecated` 就把它换成 `page()`。
 - **`PreToolDecision` 的 `info` / `cancel` 是有意的跨版本发射**：0.1.6 才引入这两个字段，而插件仍声明支持 0.1.1–0.1.7。`tool-decision.ts` 是唯一适配点：`info` 在旧宿主只读 `reason` 时被忽略；`cancel` 只在**信号确已中止**时发出，因为旧宿主对未知 `kind` 会落到它自己的 `callerCancelled(exec)` 检查，正好是 0.1.6 `cancel` 选中的同一条取消路径。**前提是信号真已中止**，否则会误拒一个活调用。
