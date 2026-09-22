@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
-import { extractSession, sessionEvents } from './session.ts'
+import { extractSession, sessionEvents, toolResultBlocks, toolResultFailed } from './session.ts'
 
 describe('current session extraction', () => {
   it('keeps direct evidence, skips plugin instructions, and redacts secrets', async () => {
     const session = Session.create('session-00000000-0000-4000-8000-000000000001' as never)
     session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Fix task token = abc123 Bearer live-secret' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
-    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'hidden plugin instruction' }], source: { kind: 'plugin', plugin: 'test' } }), { surfaceOp: 'append' })
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'hidden plugin instruction' }], source: { kind: 'llm-verifier' } }), { surfaceOp: 'append' })
     session.append('assistant/message', { turn: 1, step: 1, message: createAssistantMessage({ content: [{ type: 'text', text: 'running checks' }], source: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } }) }, { surfaceOp: 'append' })
     session.append('tool/call', { turn: 1, step: 1, callId: 'call-1' as never, name: 'pwsh', arguments: '{"command":"test"}' })
     session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'call-1' as never, content: [{ type: 'text', text: 'exit 0 password=hunter2' }], isError: false }) }, { surfaceOp: 'append' })
@@ -49,7 +49,7 @@ describe('current session extraction', () => {
   it('resets the problem to a team task that opens a new window', async () => {
     const session = Session.create('session-00000000-0000-4000-8000-00000000000a' as never)
     session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Old task' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
-    const teamSeq = session.events.at(-1)!.seq + 1
+    const teamSeq = session.snapshotEvents().at(-1)!.seq + 1
     session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'New assigned task' }], source: { kind: 'team-message' as never } as never }), { surfaceOp: 'append' })
     const agent = { id: session.id, session } as never
     const result = await extractSession(agent, async () => { throw new Error('no image expected') }, { fromSeq: teamSeq })
@@ -139,5 +139,45 @@ describe('session event accessor', () => {
     expect(sessionEvents({})).toEqual([])
     expect(sessionEvents(undefined)).toEqual([])
     expect(sessionEvents({ events: undefined })).toEqual([])
+  })
+})
+
+describe('tool result shape across host versions', () => {
+  const text = { type: 'text' as const, text: 'output' }
+
+  it('reads the outcome from the message on 0.1.7 and from the nested block before it', () => {
+    // 0.1.7: a tool-role message whose content IS the result, with `isError` on the message.
+    expect(toolResultFailed({ isError: true, content: [text] })).toBe(true)
+    expect(toolResultFailed({ isError: false, content: [text] })).toBe(false)
+    // 0.1.6 and earlier: the same flag on the `tool-result` block that wrapped the result.
+    expect(toolResultFailed({ content: [{ type: 'tool-result', content: [], isError: true } as never] })).toBe(true)
+    // Absent on either shape means the invocation succeeded, not that it failed.
+    expect(toolResultFailed({ content: [text] })).toBe(false)
+    expect(toolResultFailed({ content: [] })).toBe(false)
+  })
+
+  it('unwraps the nested block content and leaves a flat 0.1.7 block alone', () => {
+    const inner = [{ type: 'text' as const, text: 'legacy output' }]
+    expect(toolResultBlocks({ type: 'tool-result', content: inner } as never)).toEqual(inner)
+    // An empty wrapper yields an empty list, which is distinct from "not a wrapper at all".
+    expect(toolResultBlocks({ type: 'tool-result', content: [] } as never)).toEqual([])
+    expect(toolResultBlocks(text)).toBeUndefined()
+  })
+
+  it('renders a pre-0.1.7 nested result as tool-output evidence', async () => {
+    const session = Session.create('session-00000000-0000-4000-8000-00000000000b' as never)
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Legacy host task' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+    session.append('tool/result', {
+      turn: 1,
+      step: 1,
+      message: {
+        id: 'legacy-message',
+        role: 'user',
+        source: { kind: 'tool', callId: 'legacy-call' },
+        content: [{ type: 'tool-result', toolCallId: 'legacy-call', content: [{ type: 'text', text: 'LEGACY-NESTED-OUTPUT' }] }],
+      },
+    } as never, { surfaceOp: 'append' })
+    const result = await extractSession({ id: session.id, session } as never, async () => { throw new Error('no image expected') })
+    expect(result.trace).toContain('LEGACY-NESTED-OUTPUT')
   })
 })

@@ -1,10 +1,10 @@
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
-import type { ModelProviderGroup, SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client';
+import type { Context as ClientContext } from '@deepseek-ai/cordis';
+import type { SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client';
 import { zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage, compact, money, duration, dateTime, type I18nDict, type VerdictSummary, resolveCacheDirOnSave, sameSettingValue, sectionForSave, WORST_CASE_ROUTE_CALLS_PER_JUDGE, WORST_CASE_FINAL_CALLS_PER_JUDGE, WORST_CASE_TASK_PER_JUDGE, WORST_CASE_SESSION_PER_JUDGE, computeJudgeCount, computeWorstCaseBudget, type BudgetWarningState, evaluateBudgetWarning, isVerdictFailed, formatPercentage, formatVerdictDetails } from './client-i18n.ts';
 export type { Values } from './client-fields.ts';
 export { zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage, compact, money, duration, dateTime, type I18nDict, type VerdictSummary, resolveCacheDirOnSave, sameSettingValue, sectionForSave, WORST_CASE_ROUTE_CALLS_PER_JUDGE, WORST_CASE_FINAL_CALLS_PER_JUDGE, WORST_CASE_TASK_PER_JUDGE, WORST_CASE_SESSION_PER_JUDGE, computeJudgeCount, computeWorstCaseBudget, type BudgetWarningState, evaluateBudgetWarning, isVerdictFailed, formatPercentage, formatVerdictDetails, };
 export interface Loaded {
-    groups: readonly ModelProviderGroup[];
+    groups: readonly ModelProviderGroupView[];
     settings: SettingsNamespaceView;
     writable: boolean;
     failures: string[];
@@ -62,12 +62,36 @@ export interface InvocationRecord {
     verdict?: VerdictSummary;
     route?: RouteObservationView;
 }
+/**
+ * Provider/model catalog as this page reads it.
+ *
+ * The host owns this vocabulary, but DSH 0.1.7 stopped re-exporting its `ModelProviderGroup`
+ * through the remotes client barrel, and reaching it now means installing the whole session
+ * controller dependency graph. The page reads exactly the four fields below, so it declares the
+ * part of the wire shape it consumes — the same treatment every other response in this interface
+ * already gets.
+ */
+interface ModelProviderGroupView {
+    id: string;
+    name: string;
+    models: readonly {
+        id: string;
+        name: string;
+        reasoning?: {
+            efforts: readonly {
+                id: string;
+                name: string;
+            }[];
+            defaultEffort?: string;
+        };
+    }[];
+}
 interface VerifierRemote {
     session: {
         modelCatalog(): Promise<{
             ok: boolean;
             value: {
-                groups: readonly ModelProviderGroup[];
+                groups: readonly ModelProviderGroupView[];
                 failures: readonly {
                     id?: string;
                     provider?: string;

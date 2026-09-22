@@ -45,6 +45,36 @@ export interface SessionExtraction {
   omittedCharacters: number
 }
 
+/**
+ * Inner blocks of a pre-0.1.7 nested `tool-result` block.
+ *
+ * DSH 0.1.6 and earlier modelled a tool result as a `tool-result` content block wrapping the
+ * result's own blocks inside the answering message. DSH 0.1.7 deleted that block type: the tool
+ * result is now a tool-role message whose `content` IS those blocks. Both shapes are still read,
+ * because the plugin declares support for hosts on either side of the change.
+ * @param block - one content block, possibly the legacy wrapper.
+ * @returns The wrapped blocks, or undefined when this is not a legacy wrapper.
+ */
+export function toolResultBlocks(block: ContentBlock): readonly ContentBlock[] | undefined {
+  if ((block as { type: string }).type !== 'tool-result') return undefined
+  const inner = (block as unknown as { content?: readonly ContentBlock[] }).content
+  return Array.isArray(inner) ? inner : undefined
+}
+
+/**
+ * Whether one tool result reports a failed invocation.
+ *
+ * DSH 0.1.7 moved the flag from the nested `tool-result` block onto the tool-role message itself
+ * (`isError`); earlier hosts carry it on the block. Both are read so a failure is never scored as
+ * a success on either host.
+ * @param message - the `tool/result` event's message.
+ * @returns True when either host's shape marks the invocation as failed.
+ */
+export function toolResultFailed(message: { isError?: boolean; content: readonly ContentBlock[] }): boolean {
+  if (message.isError === true) return true
+  return message.content.some(block => (block as { isError?: boolean }).isError === true)
+}
+
 function textOf(blocks: readonly ContentBlock[]): string {
   const parts: string[] = []
   for (const block of blocks) {
@@ -52,7 +82,7 @@ function textOf(blocks: readonly ContentBlock[]): string {
     if (blockType === 'text') parts.push((block as Extract<ContentBlock, { type: 'text' }>).text)
     else if (blockType === 'reasoning') parts.push('[Reasoning] ' + (block as Extract<ContentBlock, { type: 'reasoning' }>).text)
     else if (blockType === 'tool-call') parts.push('[Tool Call] ' + (block as Extract<ContentBlock, { type: 'tool-call' }>).name + ' ' + (block as Extract<ContentBlock, { type: 'tool-call' }>).arguments)
-    else if (blockType === 'tool-result') parts.push('[Tool Result] ' + textOf((block as Extract<ContentBlock, { type: 'tool-result' }>).content))
+    else if (blockType === 'tool-result') { const nested = toolResultBlocks(block); if (nested) parts.push('[Tool Result] ' + textOf(nested)) }
     else if (blockType === 'file') {
       const fileData = block as unknown as { path?: string; filename?: string; title?: string }
       parts.push('[File] ' + (fileData.path ?? fileData.filename ?? fileData.title ?? 'attachment'))

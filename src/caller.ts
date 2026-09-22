@@ -1,5 +1,7 @@
 import { BlockAssembler, ReasoningEffortId, createUserMessage, type ContentBlock, type FinishReason, type LlmRuntime } from '@deepseek-ai/dsh-llm'
 import * as LlmModule from '@deepseek-ai/dsh-llm'
+// Supplies the `'llm-verifier'` MessageSourceMap member named by the judge request below.
+import type {} from './message-source.ts'
 
 /**
  * Deep-freeze a call-options graph, leaving any live AbortSignal mutable.
@@ -328,7 +330,7 @@ async function callTextCompletion(config: VerifierClientConfig, prompt: string, 
     }
     content.push({ type: 'image', attachment: await pending as never })
   }
-  const messages = [createUserMessage({ content, source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } })]
+  const messages = [createUserMessage({ content, source: { kind: 'llm-verifier' } })]
   const assembler = new BlockAssembler()
   const options = deepFreeze({
     provider: config.provider,

@@ -89,7 +89,16 @@ pnpm test           # vitest 单元测试
 pnpm run typecheck:local   # 依据 tsconfig.local.json，把 @deepseek-ai/dsh-* 解析到本地 checkout 的 lib/types
 ```
 
-两套类型定义可能不同步：例如 `Session.events` 在 DSH 0.1.5 已被 `snapshotEvents()` 取代，`tool/code-dispatch` 也已改名 `tool/ptc-dispatch`。插件内部的 `sessionEvents()` 同时兼容两种会话形态，两类派发事件都会计入证据，因此 0.1.1 与 0.1.5 宿主都可以运行。
+两套类型定义可能不同步：例如 `Session.events` 在 DSH 0.1.5 已被 `snapshotEvents()` 取代，`tool/code-dispatch` 也已改名 `tool/ptc-dispatch`。插件内部的 `sessionEvents()` 同时兼容两种会话形态，两类派发事件都会计入证据，因此 0.1.1 与 0.1.7 宿主都可以运行。
+
+DSH 0.1.7 又搬动了两处判定地基，两侧形态插件都读：
+
+- **工具结果从内容块变成独立消息**。0.1.6 及以前，一条工具结果是一个 `tool-result` 内容块，真正的输出套在里面、失败标志 `isError` 挂在块上；0.1.7 删除了该块类型，工具结果改为 `role: 'tool'` 的独立消息，`isError` 上移到消息本身。`session.ts` 的 `toolResultBlocks()` / `toolResultFailed()` 是这两个差异的唯一读取点，旧宿主的嵌套输出仍会被渲染成 `[Tool Result]` 证据。
+- **注入消息的来源改为生产者自报**。0.1.7 删除了 `MessageSourceMap` 的统一包装 `{ kind: 'plugin', plugin }`（持久化准入还会直接拒绝该包装），改为每个生产者声明自己的 `kind`。插件在 `src/message-source.ts` 声明并使用 `kind: 'llm-verifier'`；宿主读取旧日志时会把历史包装行改写成 `plugin:<名称>`，那只是历史行的显示名，不影响判定。
+
+客户端面（Web 设置页与看板）另有两处只随新版本线变化：提供 `ctx.slots` 的包是 `@deepseek-ai/dsh-client-ui-renderer`（`@deepseek-ai/dsh-client-runtime` 在 0.1.2 就已删除，插件类型一律取自 `@deepseek-ai/cordis` 的 `Context`）；宿主图标名在 0.1.7 整体由尺寸后缀改为笔画后缀。图标是具名导入、且该模块对客户端 bundle 是 external，一份源码无法同时满足两套名字，因此插件改为按名探测两种拼写、都缺失时渲染空——旧宿主不会因此白屏。
+
+typecheck 门禁按 `package.json` 的 `devDependencies` 解析，本轮已从 `0.1.1-rc.2` 上移到 `0.1.7-alpha.1`：客户端面的图标名同样在 0.1.7 才改名，一份源码只能对齐一侧，宿主面的旧形态兼容由运行时代码与回归测试保证。
 
 其中一处更隐蔽的差异是 `deepFreeze`：0.1.1 的 `@deepseek-ai/dsh-llm` 会重新导出它，0.1.5 已把它移到 `@deepseek-ai/dsh-util-values`。插件因此自带一份等价的兜底实现，并同样**放过 `AbortSignal`**——冻结那个还在重试循环里使用、尚未被订阅的信号，会让传输层首次 `addEventListener`（Node ≥26.5）或超时/取消时的 `controller.abort()`（所有 Node 版本）抛 `Cannot assign to read only property`。
 
@@ -99,7 +108,7 @@ pnpm run typecheck:local   # 依据 tsconfig.local.json，把 @deepseek-ai/dsh-*
 
 发布内容由 `package.json` 的 `files` 字段决定：`lib`（构建产物、source map 与 `lib/types` 类型声明）、`src`、`cordis.patch.yml`、`README.md`。`tsconfig.local.json` 之类的本机文件不会进入 tarball。
 
-`peerDependencies` 中逐个列出的 `^0.1.5-alpha.1`、`^0.1.5-rc.1` 等预发布范围是必需的：按 semver 规则，预发布版本只有在同一 `x.y.z` 段存在带预发布的比较符时才算满足，因此不能简化成 `>=0.1.1-rc.2 <0.2.0`（那样会漏掉 `0.1.2-alpha.*`、`0.1.5-rc.*` 等宿主）。
+`peerDependencies` 中逐个列出的 `^0.1.5-alpha.1`、`^0.1.7-alpha.1` 等预发布范围是必需的：按 semver 规则，预发布版本只有在同一 `x.y.z` 段存在带预发布的比较符时才算满足，因此不能简化成 `>=0.1.1-rc.2 <0.2.0`（那样会漏掉 `0.1.2-alpha.*`、`0.1.5-rc.*`、`0.1.7-alpha.*` 等宿主）。
 
 统计数据有两条传输路径：优先走 `/api/llm-verifier/statistics`（Connection 的 exact Fetch 路由，带 Host/Origin 栅栏与浏览器鉴权），宿主较旧时回落到插件自己的 `/llm-verifier` RPC 通道（同样经过鉴权）。裸的 webServer 路由已被移除。
 

@@ -61,7 +61,7 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 5. **每一次自动 steering 都必须消耗预算**。宿主无轮次预算，无条件 steer 会陷入活锁；额度耗尽后仅能发出一次性通知。
 6. **改动评分缓存身份字段必须升 `cache.ts` 的 `version`**。提示词文本变更自然失效，但 provider/model/effort/maxTokens/repeat 等改动必须升级版本号，避免命中脏缓存。
 7. **评分通道能力必须在运行时探测，严禁按厂商或模型名硬编码假设**；探测失败必须优雅降级。
-8. **兼容两种宿主形态**：`session.snapshotEvents?.()` 与旧的 `session.events`；`tool/ptc-dispatch` 与旧的 `tool/code-dispatch`。
+8. **兼容两种宿主形态**：`session.snapshotEvents?.()` 与旧的 `session.events`；`tool/ptc-dispatch` 与旧的 `tool/code-dispatch`；工具结果的两种形态（0.1.7 的独立 `tool` 角色消息 `isError`，与更早的 `tool-result` 嵌套块 `isError`）统一走 `session.ts` 的 `toolResultBlocks()` / `toolResultFailed()`。
 9. **判官输出解析必须 Fail Closed**：无法解析出合规判决时必须报错，绝不静默给分或静默放行。语义路由分类结果必须是严格 JSON，多余未知字段一律拒绝。
 10. **i18n 中英字典键必须严格一一对应**（由 `I18nDict = typeof zh` 编译期保障）。新增配置项必须同步修改 schema、`resolveConfig`、UI 字段注册（`client-fields.ts`）、中英文案与 README。
 11. **发送给裁判的所有内容必须经过脱敏**（`DEFAULT_REDACT_PATTERNS` + 自定义模式），严防凭证泄露。
@@ -136,11 +136,14 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 - **设置页单一定义源**：默认值唯一存在于 `client-fields.ts` 的 `CONFIG_DEFAULTS`。前端校验仅严格镜像 `resolveConfig` 实际规则；非必填字段（如 `criteriaFile`、`priceProviderOverride` 等）允许为空。
 - **设置保存语义**：优先使用 `settings.replace`（整层替换），宿主不支持时退回带 `{reInheritBase: false}` 的 `update`，确保清空覆盖项和恢复默认生效。
 
-### 7. 宿主版本兼容（0.1.6 对齐）
+### 7. 宿主版本兼容（0.1.7 对齐）
 
 - **`snapshotEvents()` 是有豁免的调用，不是待清理的遗留**：DSH 0.1.6 废弃了 `eventAt()` / `snapshotEvents()` / `ownEvents()`，并**连包装它们的新别名也一并禁止**——`session.ts` 的 `sessionEvents()` 正是这种包装，仍刻意保留。官方替代品 `SessionController.page()` 只放行 `user/message` 与 `assistant/message`，`tool/call`、`tool/result`、PTC dispatch 这些**证据来源全都取不到**；宿主自己的 `auto-review` 也挂着同样的豁免。迁移方向是改用注册式 Session projection 增量维护证据，决策记录见对应 Agent Note。**不要**因为看到 `@deprecated` 就把它换成 `page()`。
-- **`PreToolDecision` 的 `info` / `cancel` 是有意的跨版本发射**：0.1.6 才引入这两个字段，而插件仍声明支持 0.1.1–0.1.6。`tool-decision.ts` 是唯一适配点：`info` 在旧宿主只读 `reason` 时被忽略；`cancel` 只在**信号确已中止**时发出，因为旧宿主对未知 `kind` 会落到它自己的 `callerCancelled(exec)` 检查，正好是 0.1.6 `cancel` 选中的同一条取消路径。**前提是信号真已中止**，否则会误拒一个活调用。
-- **`peerDependencies` 必须覆盖实际运行线**：semver 的 `^0.1.6` **不匹配** `0.1.6-alpha.2` 这类预发布版，新增版本线要照现有写法显式列出预发布形态（`^0.1.6-alpha.1 || ^0.1.6-alpha.2 || ~0.1.6`）。
+- **`PreToolDecision` 的 `info` / `cancel` 是有意的跨版本发射**：0.1.6 才引入这两个字段，而插件仍声明支持 0.1.1–0.1.7。`tool-decision.ts` 是唯一适配点：`info` 在旧宿主只读 `reason` 时被忽略；`cancel` 只在**信号确已中止**时发出，因为旧宿主对未知 `kind` 会落到它自己的 `callerCancelled(exec)` 检查，正好是 0.1.6 `cancel` 选中的同一条取消路径。**前提是信号真已中止**，否则会误拒一个活调用。
+- **工具结果的两种形态必须都读**：0.1.6 及以前，一条工具结果是一个 `tool-result` 内容块，真正的输出块套在里面、失败标志 `isError` 挂在块上；0.1.7 删除了该块类型，工具结果改成 `role: 'tool'` 的独立消息，`isError` 上移到消息本身。`session.ts` 的 `toolResultBlocks()` / `toolResultFailed()` 是这一差异的**唯一**读取点，凡是要读工具结果内容或成败的地方（`router.ts` 的 `blockText` / `narrativeText` / `successful`、`auto.ts` 的子 Agent 结算判定）都必须走它们，**不要**把 `block.type === 'tool-result'` 或 `block.isError` 写回调用点。
+- **注入消息的来源是插件自己声明的 kind**：0.1.7 删除了 `MessageSourceMap` 的统一包装 `{ kind: 'plugin', plugin }`，且持久化准入会直接**拒绝**该包装，改为每个生产者声明自己的 `kind`。插件在 `src/message-source.ts` 里以 `declare module '@deepseek-ai/dsh-llm'` 声明 `'llm-verifier'` 并混入 `ContextFormed`（保留 `form` / `summary`），所有注入点统一用 `kind: 'llm-verifier'`。宿主读取旧日志时会把历史包装行改写成 `plugin:<名称>`——那是**迁移层专用的名字**，新写入不得采用。**不要**退回 `kind: 'user'`：`session.ts` 正是用 `kind === 'user'` 认任务陈述的，退回后插件自己的 steer 文本会被当成用户任务。
+- **客户端面跟随 `ctx.slots` 的提供者**：`ctx.slots` 由 `@deepseek-ai/dsh-client-ui-renderer/client` 声明（`@deepseek-ai/dsh-client-runtime` 在 0.1.2 就已删除，`client.tsx` 早先可从它导入的 `ClientContext` 是死类型）。客户端插件一律 `import type { Context as ClientContext } from '@deepseek-ai/cordis'`，并显式 `import type {} from` 所需服务的声明包（renderer / ui-settings / ui-conversation / ui-slots），否则 `ctx.slots` 这类成员根本不存在。宿主图标名在 0.1.7 整体由尺寸后缀改为笔画后缀（`IconDataOutline16` → `IconDataOutlineRegular`），且该模块对客户端 bundle 是 external，因此**不得**用具名导入取图标：`client.tsx` 顶部按名探测两种拼写、都缺失时渲染空——React 遇到 `undefined` 作为组件类型会直接抛错，会让整个设置页白屏。
+- **`peerDependencies` 必须覆盖实际运行线**：semver 的 `^0.1.7` **不匹配** `0.1.7-alpha.1` 这类预发布版，新增版本线要照现有写法显式列出预发布形态（当前各包以 `… || ^0.1.6-alpha.1 || ^0.1.6-alpha.2 || ~0.1.6 || ^0.1.7-alpha.1` 收尾）。
 
 ## 宿主契约速查（`../deepseek-harness`）
 
@@ -150,7 +153,11 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 | 轮次预算机制 | 宿主无内置轮次预算，插件必须自行控制 steering 预算 |
 | `tools/pre-execute` | 返回 `{kind: 'deny', reason}` 实施阻断拦截 |
 | `Agent.id` | 强制等于 session id |
-| `session.snapshotEvents()` | 优先于旧版 `session.events` 兼容读取事件快照 |
+| `session.snapshotEvents()` | 优先于旧版 `session.events` 兼容读取事件快照；0.1.7 仍保留该方法 |
+| 工具结果形态 | 0.1.7 为 `role: 'tool'` 消息（`isError` 在消息上），更早为嵌套 `tool-result` 块（`isError` 在块上） |
+| 注入消息来源 | 生产者自报 `MessageSourceMap` 键；0.1.7 起禁用 `{kind:'plugin'}` 包装 |
+| 客户端 `ctx.slots` | 由 `@deepseek-ai/dsh-client-ui-renderer/client` 声明，`Context` 取自 `@deepseek-ai/cordis` |
+| `dsh.client.inject` | 仅供排序/清单参考（"informational"），不构成硬依赖校验 |
 | 子会话识别 | 依赖 `parentSession` 或 `origin: 'subagent'` |
 | 设置读写语义 | ⚠️ `update` 为增量合并，`replace` 为整层替换（清除覆盖需用 replace） |
 | `llm/stream` 拦截 | waterfall 形式 `(options, next) => AsyncIterable<StreamChunk>` |

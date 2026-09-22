@@ -1,9 +1,27 @@
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type { ModelProviderGroup, SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
+// Type-only: the registry behind `ctx.slots` is a service of this package, so its `Context`
+// declaration has to be in this program for the registrations below to be type-checked at all.
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-import { Button, IconDataOutline16, IconRefreshOutline16, StateDot, type StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, StateDot, type StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
+import * as uiPrimitives from '@deepseek-ai/dsh-client-ui-primitives'
+
+/**
+ * Icons, resolved by name across the two vocabularies this plugin spans.
+ *
+ * DSH 0.1.7 renamed the whole host icon set from a size suffix to a stroke suffix
+ * (`IconDataOutline16` → `IconDataOutlineRegular`). The icon module is external to this bundle, so
+ * a named import of either spelling is `undefined` on a host on the other side of the rename — and
+ * React throws on an undefined element type, which would take the entire settings page down
+ * instead of dropping one glyph. Probing the namespace at runtime keeps one bundle working on
+ * either line; a name that neither line defines renders nothing.
+ */
+const hostIcons = uiPrimitives as unknown as Record<string, React.ComponentType<{ size?: number }> | undefined>
+const IconData = hostIcons.IconDataOutlineRegular ?? hostIcons.IconDataOutline16 ?? (() => null)
+const IconRefresh = hostIcons.IconRefreshOutlineRegular ?? hostIcons.IconRefreshOutline16 ?? (() => null)
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage,
@@ -64,7 +82,7 @@ const NS = 'llm-verifier'
 interface DecisionCallView { label: string; channel: string; prompt: string; output: string; score?: number }
 interface DecisionRecordView { id: string; toolName: string; phase: string; provider: string; model: string; startedAt: number; calls: DecisionCallView[] }
 
-export interface Loaded { groups: readonly ModelProviderGroup[]; settings: SettingsNamespaceView; writable: boolean; failures: string[] }
+export interface Loaded { groups: readonly ModelProviderGroupView[]; settings: SettingsNamespaceView; writable: boolean; failures: string[] }
 export interface RunStats { calls: number; attempts: number; retries: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningTokens: number; cacheHits: number; cacheMisses: number; estimatedCostUsd: number; topLogprobScores: number; explicitTagScores: number; usageIncomplete?: boolean; channelFallbacks?: number }
 /** S05-A routing-cycle observation, as persisted on the record (all fields optional/lenient). */
 export interface RouteObservationView { cycleId: string; trigger: string; stage: string; destination: string; attempt?: number; reservedCalls?: number; skipReason?: string; canceled?: boolean; usageIncomplete?: boolean; evidenceKept?: number; evidenceOmitted?: number; evidenceChars?: number; replayed?: string; generatedCalls?: number; judgeCalls?: number; sameCandidate?: boolean; alternativeAugmented?: boolean; alternativeModel?: string }
@@ -74,11 +92,29 @@ interface ToolStatistics { toolName: string; invocations: number; successes: num
 interface ModelStatistics { provider: string; model: string; invocations: number; calls: number; tokens: number; estimatedCostUsd: number }
 interface Totals extends RunStats { invocations: number; successes: number; failures: number; successRate: number; averageDurationMs: number; tokens: number; cacheHitRate: number; prefixCacheHitRate: number }
 interface StatisticsOverview { generatedAt: number; fromMs: number; toMs: number; sessionId?: string; totals: Totals; daily: DailyStatistics[]; tools: ToolStatistics[]; models: ModelStatistics[]; recent: InvocationRecord[] }
+/**
+ * Provider/model catalog as this page reads it.
+ *
+ * The host owns this vocabulary, but DSH 0.1.7 stopped re-exporting its `ModelProviderGroup`
+ * through the remotes client barrel, and reaching it now means installing the whole session
+ * controller dependency graph. The page reads exactly the four fields below, so it declares the
+ * part of the wire shape it consumes — the same treatment every other response in this interface
+ * already gets.
+ */
+interface ModelProviderGroupView {
+  id: string
+  name: string
+  models: readonly {
+    id: string
+    name: string
+    reasoning?: { efforts: readonly { id: string; name: string }[]; defaultEffort?: string }
+  }[]
+}
 interface VerifierRemote {
   session: {
     modelCatalog(): Promise<{
       ok: boolean
-      value: { groups: readonly ModelProviderGroup[]; failures: readonly { id?: string; provider?: string; name?: string; message: string }[] }
+      value: { groups: readonly ModelProviderGroupView[]; failures: readonly { id?: string; provider?: string; name?: string; message: string }[] }
       error: { message: string }
     }>
   }
@@ -818,7 +854,7 @@ export function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: 
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ display: 'grid', placeItems: 'center', width: 34, height: 34, borderRadius: 10, background: 'color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent)', color: 'var(--dsw-alias-state-business-primary)' }}>
-              <IconDataOutline16 size={18} />
+              <IconData size={18} />
             </span>
             <h2 style={{ margin: 0, fontSize: 23 }}>{isGlobal ? t['global.panelTitle'] : t['stats.pageTitle']}</h2>
           </div>
@@ -830,7 +866,7 @@ export function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: 
           </div>
           {Boolean(sessionId) && <button aria-pressed={sessionOnly} onClick={() => setSessionOnly(value => !value)} style={{ border: '1px solid var(--dsw-alias-border-l3)', borderRadius: 9, padding: '7px 11px', cursor: 'pointer', color: sessionOnly ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-label-primary)', background: sessionOnly ? 'color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent)' : 'var(--dsw-alias-interactive-bg-hover)' }}>{sessionOnly ? t['stats.currentSession'] : t['stats.allSessions']}</button>}
           <button type="button" disabled={probe?.busy === true} onClick={() => void runProbe()} style={{ border: '1px solid var(--dsw-alias-border-l3)', borderRadius: 9, padding: '7px 11px', cursor: 'pointer', color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-interactive-bg-hover)' }}>{probe?.busy === true ? t['probe.running'] : t['probe.button']}</button>
-          <button title={t['stats.refresh']} onClick={() => setRefresh(value => value + 1)} style={{ display: 'grid', placeItems: 'center', width: 34, height: 34, borderRadius: 9, border: '1px solid var(--dsw-alias-border-l3)', color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-interactive-bg-hover)', cursor: 'pointer' }}><IconRefreshOutline16 size={16} /></button>
+          <button title={t['stats.refresh']} onClick={() => setRefresh(value => value + 1)} style={{ display: 'grid', placeItems: 'center', width: 34, height: 34, borderRadius: 9, border: '1px solid var(--dsw-alias-border-l3)', color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-interactive-bg-hover)', cursor: 'pointer' }}><IconRefresh size={16} /></button>
         </div>
       </header>
       {error && <div style={{ ...dashboardCard, padding: 18, borderColor: 'var(--dsw-alias-state-error-primary)', color: 'var(--dsw-alias-state-error-primary)' }}>{error}<div style={{ ...muted, marginTop: 6 }}>{t['stats.hostRestartHint']}</div></div>}
@@ -992,7 +1028,7 @@ export function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: 
 }
 
 export function VerifierSidebarIcon({ size, active }: { size: number; active?: boolean }) {
-  return <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: size, height: size, color: active ? 'var(--dsw-alias-state-business-primary)' : 'currentColor' }}><IconDataOutline16 size={Math.min(18, size)} /></span>
+  return <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: size, height: size, color: active ? 'var(--dsw-alias-state-business-primary)' : 'currentColor' }}><IconData size={Math.min(18, size)} /></span>
 }
 
 export function GlobalVerifierDashboard({ rpc }: { rpc: any }) {
@@ -1205,6 +1241,9 @@ export function apply(ctx: ClientContext): void {
         priority: 'extension',
         title: () => (detectLanguage() === 'zh' ? zh['slot.statistics'] : en['slot.statistics']),
         guide: [{
+          // The host keys each guide cell by this id and hands it to the owner as `entryId`, so an
+          // entry without one renders as `undefined` — a stable literal keeps the cell identified.
+          id: VERIFIER_TAB_ID,
           order: 45,
           title: () => (detectLanguage() === 'zh' ? zh['guide.verifier.title'] : en['guide.verifier.title']),
           description: () => (detectLanguage() === 'zh' ? zh['guide.verifier.desc'] : en['guide.verifier.desc']),

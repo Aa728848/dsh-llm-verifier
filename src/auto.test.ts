@@ -65,9 +65,9 @@ describe('automatic verification policy', () => {
     const session = taskSession()
     call(session, 'read', 'one')
     call(session, 'grep', 'two')
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work' })
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work' })
     call(session, 'edit', 'three')
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: true, toolCalls: 3, consequentialToolCalls: 1 })
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ eligible: true, toolCalls: 3, consequentialToolCalls: 1 })
   })
 
   it('does not count a failed consequential call paired with an unrelated success', () => {
@@ -75,13 +75,13 @@ describe('automatic verification policy', () => {
     session.append('tool/call', { turn: 1, step: 1, callId: 'bad' as never, name: 'edit', arguments: '{}' })
     session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'bad' as never, content: [{ type: 'text', text: 'failed' }], isError: true }), error: { name: 'Error', code: 'FAILED' } }, { surfaceOp: 'append' })
     call(session, 'read', 'good')
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ consequentialToolCalls: 0, eligible: false, reason: 'no-consequential-work' })
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ consequentialToolCalls: 0, eligible: false, reason: 'no-consequential-work' })
   })
 
   it('strict mode accepts one completed consequential call', () => {
     const session = taskSession()
     call(session, 'ssh_exec', 'one')
-    expect(analyzeAutoTask(session.events, { ...smart, mode: 'strict' })).toMatchObject({ eligible: true, reason: 'strict-eligible' })
+    expect(analyzeAutoTask(session.snapshotEvents(), { ...smart, mode: 'strict' })).toMatchObject({ eligible: true, reason: 'strict-eligible' })
   })
 
   it('suppresses the gate only for a passing manual verification that is still current', () => {
@@ -89,13 +89,13 @@ describe('automatic verification policy', () => {
     const accepted = taskSession()
     call(accepted, 'edit', 'one'); call(accepted, 'pwsh', 'two'); call(accepted, 'read', 'three')
     sessionVerify(accepted, 'four', verdict(0.81))
-    expect(analyzeAutoTask(accepted.events, smart)).toMatchObject({ eligible: false, reason: 'already-verified', hasManualSessionVerification: true, manualVerificationAccepted: true })
+    expect(analyzeAutoTask(accepted.snapshotEvents(), smart)).toMatchObject({ eligible: false, reason: 'already-verified', hasManualSessionVerification: true, manualVerificationAccepted: true })
 
     // A FAILING verdict must not disarm the gate (the old behaviour let it through).
     const failing = taskSession()
     call(failing, 'edit', 'one'); call(failing, 'pwsh', 'two'); call(failing, 'read', 'three')
     sessionVerify(failing, 'four', verdict(0.2, 'B'))
-    expect(analyzeAutoTask(failing.events, smart)).toMatchObject({ eligible: true, hasManualSessionVerification: true, manualVerificationAccepted: false })
+    expect(analyzeAutoTask(failing.snapshotEvents(), smart)).toMatchObject({ eligible: true, hasManualSessionVerification: true, manualVerificationAccepted: false })
 
     // A pass whose MEAN clears the threshold but whose breakdown has a failed
     // requirement does not count: the automatic gate keeps the same floor, so the
@@ -103,31 +103,31 @@ describe('automatic verification policy', () => {
     const failedCriterion = taskSession()
     call(failedCriterion, 'edit', 'one'); call(failedCriterion, 'pwsh', 'two'); call(failedCriterion, 'read', 'three')
     sessionVerify(failedCriterion, 'four', JSON.stringify({ sessionId: 's', score: 0.7, baselineScore: 0, winner: 'A', fromSeq: 0, toSeq: 9, criteria: [{ id: 'specification', score: 1 }, { id: 'error_signals', score: 0 }] }))
-    expect(analyzeAutoTask(failedCriterion.events, smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false, eligible: true })
+    expect(analyzeAutoTask(failedCriterion.snapshotEvents(), smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false, eligible: true })
     // A breakdown that clears every criterion still counts.
     const cleanCriteria = taskSession()
     call(cleanCriteria, 'edit', 'one'); call(cleanCriteria, 'pwsh', 'two'); call(cleanCriteria, 'read', 'three')
     sessionVerify(cleanCriteria, 'four', JSON.stringify({ sessionId: 's', score: 0.7, baselineScore: 0, winner: 'A', fromSeq: 0, toSeq: 9, criteria: [{ id: 'specification', score: 0.65 }, { id: 'error_signals', score: 0.9 }] }))
-    expect(analyzeAutoTask(cleanCriteria.events, smart)).toMatchObject({ manualVerificationAccepted: true, eligible: false, reason: 'already-verified' })
+    expect(analyzeAutoTask(cleanCriteria.snapshotEvents(), smart)).toMatchObject({ manualVerificationAccepted: true, eligible: false, reason: 'already-verified' })
 
     // A pass below the configured threshold does not count either.
     const belowThreshold = taskSession()
     call(belowThreshold, 'edit', 'one'); call(belowThreshold, 'pwsh', 'two'); call(belowThreshold, 'read', 'three')
     sessionVerify(belowThreshold, 'four', verdict(0.5))
-    expect(analyzeAutoTask(belowThreshold.events, smart)).toMatchObject({ eligible: true, manualVerificationAccepted: false })
+    expect(analyzeAutoTask(belowThreshold.snapshotEvents(), smart)).toMatchObject({ eligible: true, manualVerificationAccepted: false })
 
     // A pass followed by more consequential work is stale.
     const stale = taskSession()
     call(stale, 'edit', 'one'); call(stale, 'pwsh', 'two'); call(stale, 'read', 'three')
     sessionVerify(stale, 'four', verdict(0.9))
     call(stale, 'edit', 'five')
-    expect(analyzeAutoTask(stale.events, smart)).toMatchObject({ eligible: true, manualVerificationAccepted: false })
+    expect(analyzeAutoTask(stale.snapshotEvents(), smart)).toMatchObject({ eligible: true, manualVerificationAccepted: false })
 
     // An unreadable result is never a pass.
     const unreadable = taskSession()
     call(unreadable, 'edit', 'one'); call(unreadable, 'pwsh', 'two'); call(unreadable, 'read', 'three')
     call(unreadable, 'verifier_current_session', 'four')
-    expect(analyzeAutoTask(unreadable.events, smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false })
+    expect(analyzeAutoTask(unreadable.snapshotEvents(), smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false })
   })
 
   it('fails closed on a manual verdict that does not cover the current task', () => {
@@ -137,26 +137,26 @@ describe('automatic verification policy', () => {
     const legacyShape = taskSession()
     call(legacyShape, 'edit', 'one'); call(legacyShape, 'pwsh', 'two'); call(legacyShape, 'read', 'three')
     sessionVerify(legacyShape, 'four', JSON.stringify({ sessionId: 's', score: 0.9, winner: 'A', fromSeq: 0, toSeq: 9, criteria: [{ id: 'a', scoreA: 1 }, { id: 'b', scoreA: 1 }] }))
-    expect(analyzeAutoTask(legacyShape.events, smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false })
+    expect(analyzeAutoTask(legacyShape.snapshotEvents(), smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false })
 
     // Same for a verdict that reports no criteria at all.
     const noCriteria = taskSession()
     call(noCriteria, 'edit', 'one'); call(noCriteria, 'pwsh', 'two'); call(noCriteria, 'read', 'three')
     sessionVerify(noCriteria, 'four', verdict(0.9, 'A', { criteria: [] }))
-    expect(analyzeAutoTask(noCriteria.events, smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false })
+    expect(analyzeAutoTask(noCriteria.snapshotEvents(), smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false })
 
     // A verdict from a different session never discharges this one's gate.
     const otherSession = taskSession()
     call(otherSession, 'edit', 'one'); call(otherSession, 'pwsh', 'two'); call(otherSession, 'read', 'three')
     sessionVerify(otherSession, 'four', verdict(0.9))
-    expect(analyzeAutoTask(otherSession.events, smart, 'a-different-session')).toMatchObject({ manualVerificationAccepted: false })
+    expect(analyzeAutoTask(otherSession.snapshotEvents(), smart, 'a-different-session')).toMatchObject({ manualVerificationAccepted: false })
   })
 
   it('accepts a verdict exactly at the threshold but rejects one whose reviewed interval is stale', () => {
     const boundary = taskSession()
     call(boundary, 'edit', 'one'); call(boundary, 'pwsh', 'two'); call(boundary, 'read', 'three')
     sessionVerify(boundary, 'four', verdict(0.65, 'A', { criteria: [{ id: 'specification', score: 0.65 }] }))
-    expect(analyzeAutoTask(boundary.events, smart)).toMatchObject({ manualVerificationAccepted: true, eligible: false, reason: 'already-verified' })
+    expect(analyzeAutoTask(boundary.snapshotEvents(), smart)).toMatchObject({ manualVerificationAccepted: true, eligible: false, reason: 'already-verified' })
 
     // The verdict reviewed only up to seq 2, but the pwsh result at seq 4 is consequential
     // work that happened after it: judging staleness by the verdict's OWN receipt expected
@@ -164,14 +164,14 @@ describe('automatic verification policy', () => {
     const staleInterval = taskSession()
     call(staleInterval, 'edit', 'one'); call(staleInterval, 'pwsh', 'two'); call(staleInterval, 'read', 'three')
     sessionVerify(staleInterval, 'four', verdict(0.9, 'A', { toSeq: 2 }))
-    expect(analyzeAutoTask(staleInterval.events, smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false, eligible: true })
+    expect(analyzeAutoTask(staleInterval.snapshotEvents(), smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false, eligible: true })
 
     // Covering that same work (toSeq 4) is accepted: the read result that follows is
     // passive, so it does not make the verdict stale.
     const covered = taskSession()
     call(covered, 'edit', 'one'); call(covered, 'pwsh', 'two'); call(covered, 'read', 'three')
     sessionVerify(covered, 'four', verdict(0.9, 'A', { toSeq: 4 }))
-    expect(analyzeAutoTask(covered.events, smart)).toMatchObject({ manualVerificationAccepted: true })
+    expect(analyzeAutoTask(covered.snapshotEvents(), smart)).toMatchObject({ manualVerificationAccepted: true })
 
     // An operation that completes WHILE the verification runs also invalidates it.
     const during = taskSession()
@@ -179,7 +179,7 @@ describe('automatic verification policy', () => {
     during.append('tool/call', { turn: 1, step: 1, callId: 'verifier' as never, name: 'verifier_current_session', arguments: '{}' })
     call(during, 'pwsh', 'three')
     during.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'verifier' as never, content: [{ type: 'text', text: verdict(0.9, 'A', { toSeq: 4 }) }], isError: false }) }, { surfaceOp: 'append' })
-    expect(analyzeAutoTask(during.events, smart)).toMatchObject({ manualVerificationAccepted: false, eligible: true })
+    expect(analyzeAutoTask(during.snapshotEvents(), smart)).toMatchObject({ manualVerificationAccepted: false, eligible: true })
   })
 
   it('treats a FAILED post-pass command as new work that invalidates the pass', () => {
@@ -191,14 +191,14 @@ describe('automatic verification policy', () => {
     // Collecting only successful results was the hole.
     value.append('tool/call', { turn: 1, step: 1, callId: 'five' as never, name: 'pwsh', arguments: '{}' })
     value.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'five' as never, content: [{ type: 'text', text: 'FAIL 1 test failed', isError: true }], isError: true }) }, { surfaceOp: 'append' })
-    expect(analyzeAutoTask(value.events, smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false, eligible: true })
+    expect(analyzeAutoTask(value.snapshotEvents(), smart)).toMatchObject({ hasManualSessionVerification: true, manualVerificationAccepted: false, eligible: true })
   })
 
   it('treats a team message as the task boundary for teammate sessions', () => {
     const session = Session.create('session-00000000-0000-4000-8000-000000000010' as never)
     session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Implement the assigned team task' }], source: { kind: 'team-message' } as never }), { surfaceOp: 'append' })
     call(session, 'edit', 'one'); call(session, 'pwsh', 'two'); call(session, 'read', 'three')
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: true, consequentialToolCalls: 2 })
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ eligible: true, consequentialToolCalls: 2 })
   })
 
   it('recognizes delegated child sessions that must not be gated by default', () => {
@@ -218,18 +218,18 @@ describe('automatic verification policy', () => {
     const session = taskSession()
     session.append('tool/code-dispatch', { subCallId: 'c1' as never, name: 'read', arguments: '{}', isError: false, content: [{ type: 'text', text: 'data' }] })
     session.append('tool/code-dispatch', { subCallId: 'c2' as never, name: 'grep', arguments: '{}', isError: false, content: [{ type: 'text', text: 'match' }] })
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work' })
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work' })
     session.append('tool/code-dispatch', { subCallId: 'c3' as never, name: 'edit', arguments: '{}', isError: false, content: [{ type: 'text', text: 'done' }] })
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: true, toolCalls: 3, consequentialToolCalls: 1 })
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ eligible: true, toolCalls: 3, consequentialToolCalls: 1 })
   })
 
   it('counts DSH 0.1.5 tool/ptc-dispatch events the same way', () => {
     const session = taskSession()
     session.append('tool/ptc-dispatch' as never, { subCallId: 'p1', name: 'read', arguments: '{}', isError: false, content: [{ type: 'text', text: 'data' }] } as never)
     session.append('tool/ptc-dispatch' as never, { subCallId: 'p2', name: 'grep', arguments: '{}', isError: false, content: [{ type: 'text', text: 'match' }] } as never)
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work' })
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work' })
     session.append('tool/ptc-dispatch' as never, { subCallId: 'p3', name: 'edit', arguments: '{}', isError: false, content: [{ type: 'text', text: 'done' }] } as never)
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: true, toolCalls: 3, consequentialToolCalls: 1 })
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ eligible: true, toolCalls: 3, consequentialToolCalls: 1 })
   })
 
   it('treats run_code as passive wrapper when it only dispatches passive tools', () => {
@@ -237,18 +237,18 @@ describe('automatic verification policy', () => {
     call(session, 'run_code', 'wrap-1')
     session.append('tool/ptc-dispatch' as never, { rootCallId: 'wrap-1', subCallId: 'p1', name: 'read', arguments: '{}', isError: false, content: [{ type: 'text', text: 'data' }] } as never)
     session.append('tool/ptc-dispatch' as never, { rootCallId: 'wrap-1', subCallId: 'p2', name: 'grep', arguments: '{}', isError: false, content: [{ type: 'text', text: 'match' }] } as never)
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work', consequentialToolCalls: 0 })
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work', consequentialToolCalls: 0 })
 
     call(session, 'run_code', 'wrap-2')
     session.append('tool/ptc-dispatch' as never, { rootCallId: 'wrap-2', subCallId: 'p3', name: 'edit', arguments: '{}', isError: false, content: [{ type: 'text', text: 'done' }] } as never)
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: true, consequentialToolCalls: 1 })
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ eligible: true, consequentialToolCalls: 1 })
   })
 
   it('treats todo_write and present as passive bookkeeping for eligibility', () => {
     const session = taskSession()
     call(session, 'todo_write', 't1')
     call(session, 'present', 'pr1')
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work', consequentialToolCalls: 0 })
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work', consequentialToolCalls: 0 })
   })
 
   it('suppresses eligibility when a background continuable subagent is in flight', () => {
@@ -258,8 +258,8 @@ describe('automatic verification policy', () => {
     session.append('tool/call', { turn: 1, step: 1, callId: 'sub-1' as never, name: 'subagent', arguments: '{"prompt":"investigate"}' })
     session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'sub-1' as never, content: [{ type: 'text', text: 'started subagent 6a7dd90d-fa00-4c8c-9c0d-f2d3d5053a8f' }], isError: false }) }, { surfaceOp: 'append' })
 
-    expect(hasPendingSubagents(session.events, 0)).toBe(true)
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(true)
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({
       pendingSubagents: true,
       eligible: false,
       reason: 'pending-subagents',
@@ -271,8 +271,8 @@ describe('automatic verification policy', () => {
       source: { kind: 'subagent-settled', senderSessionId: '6a7dd90d-fa00-4c8c-9c0d-f2d3d5053a8f' } as never,
     }), { surfaceOp: 'append' })
 
-    expect(hasPendingSubagents(session.events, 0)).toBe(false)
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(false)
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({
       pendingSubagents: false,
       eligible: true,
       reason: 'smart-eligible',
@@ -286,8 +286,8 @@ describe('automatic verification policy', () => {
     session.append('tool/call', { turn: 1, step: 1, callId: 'sub-job' as never, name: 'subagent', arguments: '{"prompt":"investigate"}' })
     session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'sub-job' as never, content: [{ type: 'text', text: 'started background subagent job subagent-1' }], isError: false }) }, { surfaceOp: 'append' })
 
-    expect(hasPendingSubagents(session.events, 0)).toBe(true)
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(true)
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({
       pendingSubagents: true,
       eligible: false,
       reason: 'pending-subagents',
@@ -296,11 +296,11 @@ describe('automatic verification policy', () => {
     // Settle via tool-jobs notice
     session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'background job subagent-1 (subagent: investigate) finished [status: completed, exit code: 0]. Read its output with job_output.' }],
-      source: { kind: 'plugin', plugin: 'tool-jobs' } as never,
+      source: { kind: 'tool-jobs' } as never,
     }), { surfaceOp: 'append' })
 
-    expect(hasPendingSubagents(session.events, 0)).toBe(false)
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(false)
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({
       pendingSubagents: false,
       eligible: true,
     })
@@ -312,8 +312,8 @@ describe('automatic verification policy', () => {
     session.append('tool/ptc-dispatch' as never, { subCallId: 'p2', name: 'edit', arguments: '{}', isError: false, content: [{ type: 'text', text: 'done' }] } as never)
     session.append('tool/ptc-dispatch' as never, { subCallId: 'p3', name: 'subagent', arguments: '{}', isError: false, content: [{ type: 'text', text: 'started subagent child-abc' }] } as never)
 
-    expect(hasPendingSubagents(session.events, 0)).toBe(true)
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(true)
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({
       pendingSubagents: true,
       eligible: false,
       reason: 'pending-subagents',
@@ -324,8 +324,8 @@ describe('automatic verification policy', () => {
       source: { kind: 'subagent-settled', senderSessionId: 'child-abc' } as never,
     }), { surfaceOp: 'append' })
 
-    expect(hasPendingSubagents(session.events, 0)).toBe(false)
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(false)
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({
       pendingSubagents: false,
       eligible: true,
     })
@@ -338,8 +338,8 @@ describe('automatic verification policy', () => {
     session.append('tool/call', { turn: 1, step: 1, callId: 'fg' as never, name: 'subagent', arguments: '{"run_in_background":false}' })
     session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'fg' as never, content: [{ type: 'text', text: 'Synchronous analysis completed directly.' }], isError: false }) }, { surfaceOp: 'append' })
 
-    expect(hasPendingSubagents(session.events, 0)).toBe(false)
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(false)
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({
       pendingSubagents: false,
       eligible: true,
     })
@@ -352,12 +352,12 @@ describe('automatic verification policy', () => {
     session.append('tool/call', { turn: 1, step: 1, callId: 'sub-2' as never, name: 'subagent', arguments: '{}' })
     session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'sub-2' as never, content: [{ type: 'text', text: 'started subagent target-agent-1' }], isError: false }) }, { surfaceOp: 'append' })
 
-    expect(hasPendingSubagents(session.events, 0)).toBe(true)
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(true)
 
     session.append('tool/call', { turn: 1, step: 2, callId: 'intr' as never, name: 'interrupt_agent', arguments: JSON.stringify({ target: 'target-agent-1' }) })
     session.append('tool/result', { turn: 1, step: 2, message: createToolResultMessage({ callId: 'intr' as never, content: [{ type: 'text', text: 'interrupted' }], isError: false }) }, { surfaceOp: 'append' })
 
-    expect(hasPendingSubagents(session.events, 0)).toBe(false)
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(false)
   })
 
   it('keeps pending true if only one of multiple subagents settled', () => {
@@ -369,7 +369,7 @@ describe('automatic verification policy', () => {
     session.append('tool/call', { turn: 1, step: 1, callId: 'sub-b' as never, name: 'subagent', arguments: '{}' })
     session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'sub-b' as never, content: [{ type: 'text', text: 'started subagent agent-beta' }], isError: false }) }, { surfaceOp: 'append' })
 
-    expect(hasPendingSubagents(session.events, 0)).toBe(true)
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(true)
 
     // Settle only alpha
     session.append('user/message', createUserMessage({
@@ -377,8 +377,8 @@ describe('automatic verification policy', () => {
       source: { kind: 'subagent-settled', senderSessionId: 'agent-alpha' } as never,
     }), { surfaceOp: 'append' })
 
-    expect(hasPendingSubagents(session.events, 0)).toBe(true)
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ pendingSubagents: true, eligible: false })
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(true)
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ pendingSubagents: true, eligible: false })
 
     // Settle beta
     session.append('user/message', createUserMessage({
@@ -386,8 +386,8 @@ describe('automatic verification policy', () => {
       source: { kind: 'subagent-settled', senderSessionId: 'agent-beta' } as never,
     }), { surfaceOp: 'append' })
 
-    expect(hasPendingSubagents(session.events, 0)).toBe(false)
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ pendingSubagents: false, eligible: true })
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(false)
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ pendingSubagents: false, eligible: true })
   })
 
   it('detects user interaction pause when ask_user_question is called in current turn', () => {
@@ -397,13 +397,13 @@ describe('automatic verification policy', () => {
     session.append('tool/call', { turn: 1, step: 2, callId: 'ask-1' as never, name: 'ask_user_question', arguments: '{"questions":[{"id":"q1","question":"Continue?"}]}' })
     session.append('tool/result', { turn: 1, step: 2, message: createToolResultMessage({ callId: 'ask-1' as never, content: [{ type: 'text', text: '{"answers":[{"id":"q1","selected":["Yes"]}]}' }], isError: false }) }, { surfaceOp: 'append' })
 
-    const pause = inspectUserInteractionPause(session.events, 0, 1)
+    const pause = inspectUserInteractionPause(session.snapshotEvents(), 0, 1)
     expect(pause).toEqual({ paused: true, reason: 'ask_user_question in current turn' })
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ pendingUserInteraction: true, eligible: false, reason: 'user-interaction-paused' })
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ pendingUserInteraction: true, eligible: false, reason: 'user-interaction-paused' })
 
     // If consequential work follows it in the same turn, it is not paused
     call(session, 'edit', 'e2')
-    expect(inspectUserInteractionPause(session.events, 0, 1)).toBeUndefined()
+    expect(inspectUserInteractionPause(session.snapshotEvents(), 0, 1)).toBeUndefined()
   })
 
   it('detects user interaction pause when goal is paused or blocked', () => {
@@ -413,9 +413,9 @@ describe('automatic verification policy', () => {
     session.append('tool/call', { turn: 1, step: 2, callId: 'g1' as never, name: 'update_goal', arguments: JSON.stringify({ action: 'pause' }) })
     session.append('tool/result', { turn: 1, step: 2, message: createToolResultMessage({ callId: 'g1' as never, content: [{ type: 'text', text: '{"goal":{"phase":"paused"}}' }], isError: false }) }, { surfaceOp: 'append' })
 
-    const pause = inspectUserInteractionPause(session.events, 0, 1)
+    const pause = inspectUserInteractionPause(session.snapshotEvents(), 0, 1)
     expect(pause).toEqual({ paused: true, reason: 'goal is paused' })
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ pendingUserInteraction: true, eligible: false, reason: 'user-interaction-paused' })
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ pendingUserInteraction: true, eligible: false, reason: 'user-interaction-paused' })
   })
 
   it('detects user interaction pause when assistant message asks a question or awaits user guidance', () => {
@@ -433,9 +433,9 @@ describe('automatic verification policy', () => {
       }),
     }, { surfaceOp: 'append' })
 
-    const pause = inspectUserInteractionPause(session.events, 0, 1)
+    const pause = inspectUserInteractionPause(session.snapshotEvents(), 0, 1)
     expect(pause).toEqual({ paused: true, reason: 'assistant awaiting user instructions' })
-    expect(analyzeAutoTask(session.events, smart)).toMatchObject({ pendingUserInteraction: true, eligible: false, reason: 'user-interaction-paused' })
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ pendingUserInteraction: true, eligible: false, reason: 'user-interaction-paused' })
   })
 
   it('correctly matches and rejects assistant text in isAwaitingUserText', () => {

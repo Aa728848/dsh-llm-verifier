@@ -3,7 +3,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { stableHash } from './cache.ts'
 import { evidenceNonce, renderDelimitedBlock, type ReviewStage } from './core.ts'
 import type { AutoVerifyMode } from './auto.ts'
-import { sanitizeVerifierText, sessionEvents } from './session.ts'
+import { sanitizeVerifierText, sessionEvents, toolResultBlocks, toolResultFailed } from './session.ts'
 
 /**
  * Cycle ids must be unique across plugin reloads too.
@@ -214,7 +214,7 @@ export function latestDirectUserSeq(events: readonly SessionEvent[]): number | u
 
 function blockText(blocks: readonly ContentBlock[]): string {
   const parts: string[] = []
-  const visit = (items: readonly ContentBlock[]) => { for (const block of items) { if (block.type === 'text' || block.type === 'reasoning') parts.push(block.text); else if (block.type === 'tool-result') visit(block.content) } }
+  const visit = (items: readonly ContentBlock[]) => { for (const block of items) { if (block.type === 'text' || block.type === 'reasoning') parts.push(block.text); else { const nested = toolResultBlocks(block); if (nested) visit(nested) } } }
   visit(blocks)
   return parts.join('\n').trim()
 }
@@ -231,13 +231,13 @@ function blockText(blocks: readonly ContentBlock[]): string {
  */
 function narrativeText(blocks: readonly ContentBlock[]): string {
   const parts: string[] = []
-  const visit = (items: readonly ContentBlock[]) => { for (const block of items) { if (block.type === 'text') parts.push(block.text); else if (block.type === 'tool-result') visit(block.content) } }
+  const visit = (items: readonly ContentBlock[]) => { for (const block of items) { if (block.type === 'text') parts.push(block.text); else { const nested = toolResultBlocks(block); if (nested) visit(nested) } } }
   visit(blocks)
   return parts.join('\n').trim()
 }
 
 function successful(event: SessionEvent<'tool/result'>): boolean {
-  return event.data.error === undefined && event.data.message.content.every(block => block.isError !== true)
+  return event.data.error === undefined && !toolResultFailed(event.data.message)
 }
 
 function strictJson(text: string): unknown {

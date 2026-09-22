@@ -3,7 +3,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 // other direction) rather than duplicated, because a drift here silently disables gating.
 import { inspectDeliveryPhase, latestDirectUserSeq } from './router.ts'
 import { renderDiagnostics, type Diagnostic, type ReviewStage } from './core.ts'
-import { sanitizeVerifierText } from './session.ts'
+import { sanitizeVerifierText, toolResultFailed } from './session.ts'
 
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict'
 
@@ -182,7 +182,7 @@ export function hasPendingSubagents(events: readonly SessionEvent[], taskStartSe
     if (event.type === 'tool/result') {
       const call = calls.get(String(event.data.message.source.callId))
       if (call && SUBAGENT_TOOLS.has(call.data.name) && event.data.error === undefined) {
-        if (event.data.message.content.every(b => b.isError !== true)) {
+        if (!toolResultFailed(event.data.message)) {
           const text = blockText(event.data.message.content)
           const contMatch = text.match(CONTINUABLE_SUBAGENT_START)
           const jobMatch = text.match(BACKGROUND_SUBAGENT_JOB_START)
@@ -463,7 +463,7 @@ export function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVer
     if (event.type !== 'tool/result') continue
     allResults.set(String(event.data.message.source.callId), event)
     if (event.data.error !== undefined) continue
-    if (!event.data.message.content.every(block => block.isError !== true)) continue
+    if (toolResultFailed(event.data.message)) continue
     results.set(String(event.data.message.source.callId), event)
   }
   const pairedCalls = calls.filter(event => results.has(String(event.data.callId)))

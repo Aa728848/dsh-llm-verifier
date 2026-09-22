@@ -9,7 +9,7 @@ describe('team-gate', () => {
     session.append('team/task' as never, { task: { id: 'task-2', revision: 1, subject: 'Update docs', status: 'pending' } } as never)
     session.append('team/task' as never, { task: { id: 'task-1', revision: 2, subject: 'Write unit tests', description: 'Ensure 100% coverage', status: 'completed' } } as never)
 
-    const inspection = inspectTeamTasks(session.events, 0)
+    const inspection = inspectTeamTasks(session.snapshotEvents(), 0)
     expect(inspection.hasRecentCompletedTask).toBe(true)
     expect(inspection.latestCompletedTask?.id).toBe('task-1')
     expect(inspection.latestCompletedTask?.status).toBe('completed')
@@ -27,7 +27,7 @@ describe('team-gate', () => {
     session.append('team/task' as never, { task: { id: 'task-a', revision: 2, subject: 'A', status: 'in_progress' } } as never)
     session.append('team/task' as never, { task: { id: 'task-a', revision: 3, subject: 'A', status: 'completed' } } as never)
 
-    const inspection = inspectTeamTasks(session.events, 0)
+    const inspection = inspectTeamTasks(session.snapshotEvents(), 0)
     expect(inspection.completedTasks.map(entry => entry.task.id)).toEqual(['task-b', 'task-a'])
     expect(inspection.completedTasks.map(entry => entry.seq)).toEqual([2, 4])
     // A reopened task is verified once, at its newest completion.
@@ -39,16 +39,16 @@ describe('team-gate', () => {
     const session = Session.create('session-team-ghost' as never)
     session.append('team/task' as never, { task: { id: 'task-x', revision: 1, subject: 'X', status: 'completed' } } as never)
     session.append('team/task' as never, { task: { id: 'task-x', revision: 2, subject: 'X', status: 'in_progress' } } as never)
-    const reopened = inspectTeamTasks(session.events, 0)
+    const reopened = inspectTeamTasks(session.snapshotEvents(), 0)
     expect(reopened.completedTasks).toEqual([])
     expect(reopened.latestCompletedTask).toBeUndefined()
     expect(reopened.hasRecentCompletedTask).toBe(false)
 
     session.append('team/task' as never, { task: { id: 'task-x', revision: 3, subject: 'X', status: 'deleted' } } as never)
-    expect(inspectTeamTasks(session.events, 0).completedTasks).toEqual([])
+    expect(inspectTeamTasks(session.snapshotEvents(), 0).completedTasks).toEqual([])
 
     session.append('team/task' as never, { task: { id: 'task-x', revision: 4, subject: 'X', status: 'completed' } } as never)
-    expect(inspectTeamTasks(session.events, 0).completedTasks.map(entry => entry.seq)).toEqual([3])
+    expect(inspectTeamTasks(session.snapshotEvents(), 0).completedTasks.map(entry => entry.seq)).toEqual([3])
   })
 
   it('filters deleted tasks from active tasks', () => {
@@ -57,7 +57,7 @@ describe('team-gate', () => {
     session.append('team/task' as never, { task: { id: 'task-2', revision: 1, subject: 'Task B', status: 'pending' } } as never)
     session.append('team/task' as never, { task: { id: 'task-2', revision: 2, subject: 'Task B', status: 'deleted' } } as never)
 
-    const inspection = inspectTeamTasks(session.events, 0)
+    const inspection = inspectTeamTasks(session.snapshotEvents(), 0)
     expect(inspection.activeTasks).toHaveLength(1)
     expect(inspection.activeTasks[0]?.id).toBe('task-1')
     expect(inspection.hasRecentCompletedTask).toBe(false)
@@ -70,7 +70,7 @@ describe('team-gate', () => {
     // seq 0 is task-1 completed
     session.append('team/task' as never, { task: { id: 'task-2', revision: 1, subject: 'Next step', status: 'in_progress' } } as never)
 
-    const inspection = inspectTeamTasks(session.events, 1)
+    const inspection = inspectTeamTasks(session.snapshotEvents(), 1)
     expect(inspection.hasRecentCompletedTask).toBe(false)
     expect(inspection.latestCompletedTask).toBeUndefined()
     expect(inspection.completedTasks).toEqual([])

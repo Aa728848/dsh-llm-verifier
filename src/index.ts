@@ -2,6 +2,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+// Supplies the `'llm-verifier'` MessageSourceMap member that the injected messages below name.
+import type {} from './message-source.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
@@ -787,7 +789,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const withScope = (detail: string, scope: string | undefined): string => scope === undefined
     ? detail
     : sanitizeVerifierText(detail + '\nCandidate group scope: ' + scope, MAX_ROUTE_FEEDBACK_CHARS)
-  const routeFeedback = (decision: RouteDecision, detail: string) => createUserMessage({ content: [{ type: 'text' as const, text: sanitizeVerifierText('[Automatic verifier routing: ' + decision.kind + ']\n' + detail + '\nUse this independent result to continue the actual task. Do not merely restate the ranking or progress score; implement, correct, and verify the required work.', MAX_ROUTE_FEEDBACK_CHARS) }], source: { kind: 'plugin' as const, plugin: 'dsh-llm-verifier', form: 'notice' as const, summary: 'Automatic verifier routed ' + decision.kind } })
+  const routeFeedback = (decision: RouteDecision, detail: string) => createUserMessage({ content: [{ type: 'text' as const, text: sanitizeVerifierText('[Automatic verifier routing: ' + decision.kind + ']\n' + detail + '\nUse this independent result to continue the actual task. Do not merely restate the ranking or progress score; implement, correct, and verify the required work.', MAX_ROUTE_FEEDBACK_CHARS) }], source: { kind: 'llm-verifier' as const, form: 'notice' as const, summary: 'Automatic verifier routed ' + decision.kind } })
 
   /**
    * Early candidate review for the `agent/pre-step` entry (S02).
@@ -1430,14 +1432,14 @@ export function apply(ctx: Context, config: Config = {}): void {
               type: 'text',
               text: '[Automatic Verifier Team Task Gate]\nTask "' + task.subject + '" (#' + task.id + ') verification scored ' + (verdict.score * 100).toFixed(1) + '% (Threshold: ' + (selected.autoVerifyThreshold * 100).toFixed(0) + '%).\n' + verdict.feedback + '\nProvide verified execution evidence or resolve remaining issues before completing the task.'
             }],
-            source: { kind: 'plugin', plugin: 'dsh-llm-verifier', form: 'notice', summary: 'Team Task Gate Feedback' }
+            source: { kind: 'llm-verifier', form: 'notice', summary: 'Team Task Gate Feedback' }
           }))
           return
         } catch (error) {
           autoRouter.fail(agent, taskReservation, selected.autoVerifyMode === 'strict')
           ctx.logger.warn('llm-verifier team task verification failed: ' + (error instanceof Error ? error.message : String(error)))
           if (selected.autoVerifyMode === 'strict' && !signal.aborted) {
-            agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic Verifier Team Task Gate]\nTask verification failed: ' + (error instanceof Error ? error.message : String(error)) }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+            agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic Verifier Team Task Gate]\nTask verification failed: ' + (error instanceof Error ? error.message : String(error)) }], source: { kind: 'llm-verifier' } }))
             return
           }
           continue
@@ -1519,7 +1521,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (failed) {
           await recordSkippedRoute(agent, 'none', 'semantic', 'evidence-unreadable', { cycleId: failed.id, trigger: 'turn-stopping', stage: 'skipped', destination: 'none', attempt: failed.attempt, reservedCalls: failed.expectedCalls, skipReason: 'evidence-unreadable', canceled: false })
           autoRouter.fail(agent, failed, selected.autoVerifyMode === 'strict')
-          if (selected.autoVerifyMode === 'strict' && !signal.aborted) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier routing]\nStrict semantic routing could not read the evidence: ' + message + '\nThe failure is recorded; the mandatory final acceptance still runs.' }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+          if (selected.autoVerifyMode === 'strict' && !signal.aborted) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier routing]\nStrict semantic routing could not read the evidence: ' + message + '\nThe failure is recorded; the mandatory final acceptance still runs.' }], source: { kind: 'llm-verifier' } }))
         }
       } else {
         const fingerprint = stableHash({ phase: 'semantic', model: selected.provider + '/' + selected.model, prompt: view.prompt })
@@ -1552,7 +1554,7 @@ export function apply(ctx: Context, config: Config = {}): void {
               // the mandatory final acceptance still runs at this boundary. The reservation is
               // already spent, so a retry is bounded by the route budget, not a loop.
               autoRouter.fail(agent, reservation, true)
-              if (!signal.aborted) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier routing]\nStrict semantic routing was rejected: the classifier cited evidence outside the rendered view. The rejection is recorded; continue only with work that can be verified.' }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+              if (!signal.aborted) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier routing]\nStrict semantic routing was rejected: the classifier cited evidence outside the rendered view. The rejection is recorded; continue only with work that can be verified.' }], source: { kind: 'llm-verifier' } }))
             } else {
               autoRouter.commit(agent, reservation)
             }
@@ -1593,7 +1595,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         } catch (error) {
           autoRouter.fail(agent, reservation, selected.autoVerifyMode === 'strict')
           ctx.logger.warn('llm-verifier automatic classification failed: ' + (error instanceof Error ? error.message : String(error)))
-          if (selected.autoVerifyMode === 'strict' && !signal.aborted) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier routing]\nStrict route classification failed: ' + (error instanceof Error ? error.message : String(error)) + '\nDo not conclude until directly relevant verification succeeds.' }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+          if (selected.autoVerifyMode === 'strict' && !signal.aborted) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier routing]\nStrict route classification failed: ' + (error instanceof Error ? error.message : String(error)) + '\nDo not conclude until directly relevant verification succeeds.' }], source: { kind: 'llm-verifier' } }))
           return
         }
       }
@@ -1623,7 +1625,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         const skipReason = exhausted ? 'budget-exhausted' : alreadyRan ? 'already-routed' : 'verifier-in-flight'
         await recordSkippedRoute(agent, decision.kind, decision.source, skipReason, { cycleId: nextCycleId(), trigger: 'turn-stopping', stage: 'skipped', destination: decision.kind, skipReason })
         if (exhausted && selected.autoVerifyMode === 'strict' && autoRouter.claimExhaustedNotice(agent)) {
-          agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier routing]\nA routed ' + decision.kind + ' check was skipped because the task/session model-call budget is exhausted. Do not conclude until directly relevant verification succeeds.' }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+          agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier routing]\nA routed ' + decision.kind + ' check was skipped because the task/session model-call budget is exhausted. Do not conclude until directly relevant verification succeeds.' }], source: { kind: 'llm-verifier' } }))
           return
         }
       }
@@ -1723,7 +1725,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         } catch (error) {
           autoRouter.fail(agent, reservation, selected.autoVerifyMode === 'strict')
           ctx.logger.warn('llm-verifier automatic route failed: ' + (error instanceof Error ? error.message : String(error)))
-          if (selected.autoVerifyMode === 'strict' && !signal.aborted) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier routing]\nStrict routed verification failed: ' + (error instanceof Error ? error.message : String(error)) + '\nDo not conclude until it succeeds.' }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+          if (selected.autoVerifyMode === 'strict' && !signal.aborted) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier routing]\nStrict routed verification failed: ' + (error instanceof Error ? error.message : String(error)) + '\nDo not conclude until it succeeds.' }], source: { kind: 'llm-verifier' } }))
           return
         }
       }
@@ -1738,7 +1740,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         // Budget-exhausted states can never be cleared, so steering every stop
         // boundary would keep the turn open indefinitely. Notify once, then let
         // the turn close with a warning instead of spinning.
-        if (autoRouter.claimExhaustedNotice(agent)) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier gate]\nStrict verification remains blocked. Produce new evidence or run a directly relevant verifier.' }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+        if (autoRouter.claimExhaustedNotice(agent)) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier gate]\nStrict verification remains blocked. Produce new evidence or run a directly relevant verifier.' }], source: { kind: 'llm-verifier' } }))
         else ctx.logger.warn('llm-verifier strict verification remains blocked but the notice was already delivered for this task; closing the turn')
       }
       return
@@ -1753,7 +1755,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       // Same one-shot rule: a spent budget never grants another reservation, so
       // an unconditional steer here would livelock the turn.
       if (selected.autoVerifyMode === 'strict' && (forcedFromSeq !== undefined || autoRouter.strictBlocked(agent))) {
-        if (autoRouter.claimExhaustedNotice(agent)) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier gate]\nStrict final verification is required but its safety budget is exhausted or another verifier is active. Do not conclude; request operator review.' }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+        if (autoRouter.claimExhaustedNotice(agent)) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier gate]\nStrict final verification is required but its safety budget is exhausted or another verifier is active. Do not conclude; request operator review.' }], source: { kind: 'llm-verifier' } }))
         else ctx.logger.warn('llm-verifier strict final verification remains unavailable (budget exhausted or another verifier active); closing the turn')
       }
       return
@@ -1776,7 +1778,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         autoRouter.fail(agent, finalReservation, selected.autoVerifyMode === 'strict')
         // S04: the failure names the criteria that failed AND the interval the judge actually
         // read, and says so explicitly when it reported no breakdown or the bound omitted evidence.
-        agent.steer(createUserMessage({ content: [{ type: 'text', text: sanitizeVerifierText(automaticFeedback(result.score, result.baselineScore, result.winner, selected.autoVerifyThreshold, failed, { sessionId: result.sessionId, fromSeq: result.fromSeq, toSeq: result.toSeq, omittedCharacters: result.omittedCharacters }, result.criteria.length, result.diagnostics), MAX_ROUTE_FEEDBACK_CHARS) }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+        agent.steer(createUserMessage({ content: [{ type: 'text', text: sanitizeVerifierText(automaticFeedback(result.score, result.baselineScore, result.winner, selected.autoVerifyThreshold, failed, { sessionId: result.sessionId, fromSeq: result.fromSeq, toSeq: result.toSeq, omittedCharacters: result.omittedCharacters }, result.criteria.length, result.diagnostics), MAX_ROUTE_FEEDBACK_CHARS) }], source: { kind: 'llm-verifier' } }))
       }
     } catch (error) {
       autoRouter.fail(agent, finalReservation, selected.autoVerifyMode === 'strict')
@@ -1785,7 +1787,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       // A failed gate must leave a row: zero statistics reads as "nothing was ever attempted"
       // and hides a broken evidence read behind a silent turn close.
       await recordSkippedRoute(agent, 'final', 'final', 'failed', { cycleId: finalReservation.id, trigger: 'turn-stopping', stage: 'skipped', destination: 'final', attempt: finalReservation.attempt, reservedCalls: finalReservation.expectedCalls, skipReason: 'failed', canceled: false })
-      if (selected.autoVerifyMode === 'strict' && !signal.aborted) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier gate]\nStrict final verification failed: ' + finalMessage + '\nDo not conclude until verification succeeds.' }], source: { kind: 'plugin', plugin: 'dsh-llm-verifier' } }))
+      if (selected.autoVerifyMode === 'strict' && !signal.aborted) agent.steer(createUserMessage({ content: [{ type: 'text', text: '[Automatic verifier gate]\nStrict final verification failed: ' + finalMessage + '\nDo not conclude until verification succeeds.' }], source: { kind: 'llm-verifier' } }))
     }
   })
 

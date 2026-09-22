@@ -865,6 +865,33 @@ describe('client activity card structure', () => {
 })
 
 /**
+ * DSH 0.1.7 renamed the whole host icon set from a size suffix to a stroke suffix
+ * (`IconDataOutline16` → `IconDataOutlineRegular`), and the icon module stays external to this
+ * bundle. A named import of either spelling is therefore `undefined` on a host on the other side of
+ * the rename, and React throws on an undefined element type — the settings page would fail to
+ * render at all rather than lose one glyph. The regression pins the runtime probe that replaces the
+ * named import, in the source-scan style the two suites above already use.
+ */
+describe('client host icon resolution', () => {
+  const read = (): string => readFileSync(fileURLToPath(new URL('./client.tsx', import.meta.url)), 'utf8')
+
+  it('imports no line-specific icon name, which no single host line can satisfy', () => {
+    const imports = read().split('\n').filter(line => line.startsWith('import '))
+    for (const line of imports) {
+      expect(line).not.toMatch(/Icon(Data|Refresh)Outline(16|Regular)/)
+    }
+  })
+
+  it('probes both vocabularies in order and renders nothing when neither is present', () => {
+    const source = read()
+    expect(source).toContain('hostIcons.IconDataOutlineRegular ?? hostIcons.IconDataOutline16')
+    expect(source).toContain('hostIcons.IconRefreshOutlineRegular ?? hostIcons.IconRefreshOutline16')
+    // One fallback per icon: an absent name drops the glyph instead of handing React `undefined`.
+    expect(source.match(/\?\? \(\(\) => null\)/g)?.length).toBe(2)
+  })
+})
+
+/**
  * Every control in a settings row must share one box model and one right edge.
  *
  * The row is a two-cell flex line (label | control); its controls used to come from two different

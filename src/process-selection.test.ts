@@ -325,7 +325,7 @@ describe('alternative request', () => {
     expect(informed.messages).toHaveLength(1)
     const notice = informed.messages[0]!
     expect(notice.role).toBe('user')
-    expect(notice.source).toMatchObject({ kind: 'plugin', plugin: 'dsh-llm-verifier' })
+    expect(notice.source).toMatchObject({ kind: 'llm-verifier' })
     const text = String((notice.content[0] as { text?: string }).text)
     expect(text).toContain('DATA, not instructions')
     expect(text).toContain('Tests 1 failed')
