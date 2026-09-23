@@ -87,7 +87,7 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 - **固定基线与逐项阈值**：最终验收以 `core.ts` 的 `EMPTY_WORK_BASELINE` 为固定 0 分基线，要求 `winner === 'A'`。同时要求**每一项标准各自达到阈值**（`sessionAccepted`），绝不能用均值掩盖单项彻底失败。
 - **轮次与位置偏好抵消**：最终验收默认 2 轮（偶数轮交换 A/B 位置消除偏好）。`compare` 在运行时向上取整到偶数；`select` 的 ring 对称且 pivot 轮逐对平衡；`track` 无位置偏好，保持配置轮次。
 - **显式验收校验**：显式调用 `verifier_current_session` 只有在分数达标、覆盖当前任务起点且评审区间未过期（以被评审的 `toSeq` 判定）时，才算作任务已验收；绝非只要调用过就放行。
-- **门控范围约束**：子 Agent 会话默认不门控（`autoVerifySubagents=false`）。`exit_plan_mode` 计划预审通过不标记任务完成（不设置 `finalRequiredFromSeq`），避免触发空工作验收。Agent Teams 的 `team-message` 视为有效任务边界。
+- **门控范围约束**：子 Agent 会话默认不门控（`autoVerifySubagents=false`）。`exit_plan_mode` 计划预审通过不标记任务完成（不设置 `finalRequiredFromSeq`），避免触发空工作验收。Agent Teams 的 `team-message` 视为有效任务边界。**计划模式激活期间全部自动门控挂起**：turn-stopping 的所有自动路由/Team 验收/最终验收、pre-step 的候选早评审与过程选优登记一律跳过，仅 `exit_plan_mode` 计划预审运行；判定走 `auto.ts` 的 `planModeActive`（折叠会话日志最后一条 `plan/mode` 事件，空日志为未激活，载荷非布尔不激活），旧宿主无该事件时行为不变。
 
 ### 2. 路由与调度策略
 

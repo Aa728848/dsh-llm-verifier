@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, hasPendingSubagents, inspectUserInteractionPause, isAwaitingUserText, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, topScoreIndices, type RoutedCandidateRef } from './auto.ts'
+import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, hasPendingSubagents, inspectUserInteractionPause, isAwaitingUserText, isSubagentSession, planModeActive, selectRouteFeedbackDetail, sessionAccepted, topScoreIndices, type RoutedCandidateRef } from './auto.ts'
 
 function taskSession() {
   const session = Session.create('session-00000000-0000-4000-8000-000000000009' as never)
@@ -436,6 +436,47 @@ describe('automatic verification policy', () => {
     const pause = inspectUserInteractionPause(session.snapshotEvents(), 0, 1)
     expect(pause).toEqual({ paused: true, reason: 'assistant awaiting user instructions' })
     expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ pendingUserInteraction: true, eligible: false, reason: 'user-interaction-paused' })
+  })
+
+  it('suppresses the gate while plan mode is active and resumes it on exit', () => {
+    const session = taskSession()
+    call(session, 'edit', 'one'); call(session, 'pwsh', 'two'); call(session, 'read', 'three')
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ planMode: false, eligible: true })
+
+    session.append('plan/mode', { active: true })
+    // Consequential work already exists, yet a planning session must never be gated or
+    // steered: the verdict could only demand the execution the human has not approved yet.
+    expect(planModeActive(session.snapshotEvents())).toBe(true)
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ planMode: true, eligible: false, reason: 'plan-mode-active' })
+    // Research during planning keeps the suppression.
+    call(session, 'grep', 'four')
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ planMode: true, eligible: false, reason: 'plan-mode-active' })
+
+    // Approval exits plan mode; the gate sees the earlier work again.
+    session.append('plan/mode', { active: false })
+    expect(planModeActive(session.snapshotEvents())).toBe(false)
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ planMode: false, eligible: true })
+  })
+
+  it('folds plan/mode events like the host projection: empty log inactive, last event wins', () => {
+    const session = taskSession()
+    expect(planModeActive(session.snapshotEvents())).toBe(false)
+    session.append('plan/mode', { active: true })
+    session.append('plan/mode', { active: false })
+    expect(planModeActive(session.snapshotEvents())).toBe(false)
+    session.append('plan/mode', { active: true })
+    expect(planModeActive(session.snapshotEvents())).toBe(true)
+    // A malformed or non-boolean payload never activates the suppression (fail open).
+    expect(planModeActive([{ seq: 9, type: 'plan/mode', time: 0, data: {} } as never])).toBe(false)
+    expect(planModeActive([{ seq: 9, type: 'plan/mode', time: 0, data: { active: 'yes' } } as never])).toBe(false)
+  })
+
+  it('suppresses even when plan mode was entered before the current task statement', () => {
+    const session = Session.create('session-00000000-0000-4000-8000-00000000000a' as never)
+    session.append('plan/mode', { active: true })
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Implement and test the feature' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+    call(session, 'edit', 'one'); call(session, 'pwsh', 'two'); call(session, 'read', 'three')
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ planMode: true, eligible: false, reason: 'plan-mode-active' })
   })
 
   it('correctly matches and rejects assistant text in isAwaitingUserText', () => {

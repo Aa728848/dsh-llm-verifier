@@ -26,6 +26,8 @@ export interface AutoTaskEvidence {
     /** Whether background subagents started during the task remain in flight. */
     pendingSubagents: boolean;
     pendingUserInteraction: boolean;
+    /** Plan mode is active: the agent may only research and propose, never be pushed to execute. */
+    planMode: boolean;
     eligible: boolean;
     reason: string;
 }
@@ -70,6 +72,20 @@ export interface UserInteractionPause {
  * pausing for input.
  */
 export declare function inspectUserInteractionPause(events: readonly SessionEvent[], taskStartSeq: number, currentTurn?: number): UserInteractionPause | undefined;
+/**
+ * Whether the session is currently in plan mode.
+ *
+ * The host logs one `plan/mode` event per committed transition and folds the log as
+ * "empty log → inactive, last event wins" (its own projection does exactly this). Hosts
+ * without plan mode never log the event, so nothing changes there. While planning, the
+ * agent is expected to research and PROPOSE: any automatic route or acceptance verdict at
+ * the turn-stopping boundary can only fail against the missing implementation and steer
+ * "actually implement it" — commanding execution the human has not approved yet. The
+ * `exit_plan_mode` pre-review is the one gate that still runs in this state.
+ * @param events - Session event log (the whole log is folded; the mode may predate the task).
+ * @returns True when the newest `plan/mode` event activated plan mode.
+ */
+export declare function planModeActive(events: readonly SessionEvent[]): boolean;
 export declare function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVerifyPolicy, sessionId?: string): AutoTaskEvidence;
 /** One criterion's outcome from a session acceptance (candidate A is the session). */
 export interface AcceptanceCriterion {

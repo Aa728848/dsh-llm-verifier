@@ -1306,6 +1306,30 @@ describe('automatic gate lifecycle', () => {
   })
 
 
+  it('skips every automatic route and the final gate while plan mode is active', async () => {
+    // The reported bug: a planning session was judged against the missing implementation and
+    // steered to "actually implement the change" before the human approved the plan.
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: scriptedStream(1, [], calls), sessions: [{ id: 'topic-plan', createdAt: 1 }] })
+    const steered: unknown[] = []
+    const planningEvents = [
+      user(0, 'Implement it'),
+      call(1, 'e', 'edit'), result(2, 'e', 'file edited'),
+      { seq: 3, type: 'plan/mode', data: { active: true } },
+      call(4, 'r', 'read'), result(5, 'r', 'file content'),
+      call(6, 'g', 'grep'), result(7, 'g', 'matches'),
+    ]
+    await handlers.get('agent/turn-stopping')!({ agent: agent(planningEvents, steered), signal: new AbortController().signal })
+    // No judge call, no routing record, no steering: the turn simply closes for plan review.
+    expect(calls.length).toBe(0)
+    expect(steered.length).toBe(0)
+
+    // Plan approved (plan/mode inactive): the same boundary gates the earlier work again.
+    const approvedEvents = [...planningEvents, { seq: 8, type: 'plan/mode', data: { active: false } }]
+    await handlers.get('agent/turn-stopping')!({ agent: agent(approvedEvents, steered), signal: new AbortController().signal })
+    expect(calls.length).toBeGreaterThan(0)
+  })
+
   it('records a low-confidence classification so "not routed" has a reason', async () => {
     // Diagnostics gap named by the review: a task that was never routed showed nothing on the
     // dashboard. The classification decision itself is now stored with its reason.
@@ -1801,6 +1825,16 @@ describe('early candidate review through agent/pre-step', () => {
     expect(JSON.stringify(decision.messages)).toContain('Automatic verifier routing: compare')
     // The judge ran before the next request: 3 criteria x 2 swapped rounds.
     expect(judgeCalls(calls)).toHaveLength(6)
+  })
+
+  it('does not inject into a step while plan mode is active', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: reviewStream(calls), sessions: [{ id: 'agent-pre', createdAt: 1 }] })
+    const events = [...workflowEvents([candidate('1', 'candidate one'), candidate('2', 'candidate two')]), { type: 'plan/mode', seq: 3, data: { active: true } }]
+    const base = { kind: 'enter' as const, messages: [] }
+    const decision = await handlers.get('agent/pre-step')!({ agent: agent(events), messages: [], turn: 1, step: 2, signal: signal() }, async () => base)
+    expect(decision).toBe(base)
+    expect(calls).toHaveLength(0)
   })
 
   it('does not re-buy the same pair at the following stop boundary', async () => {

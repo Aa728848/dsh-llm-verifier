@@ -15,7 +15,7 @@ import { VerifierEngine, mergeRunStats, normalizeCriteria, partialStats, type Ju
 import { loadVerifierImages } from './images.ts'
 import { extractSession, sanitizeVerifierText, sessionEvents, type SessionExtraction } from './session.ts'
 import { CriteriaResolver, type ResolvedCriteria } from './criteria.ts'
-import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, inspectUserInteractionPause, isSubagentSession, selectRouteFeedbackDetail, sessionAccepted, MAX_ROUTE_FEEDBACK_CHARS, type AcceptanceCriterion, type RoutedCandidateRef } from './auto.ts'
+import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, inspectUserInteractionPause, isSubagentSession, planModeActive, selectRouteFeedbackDetail, sessionAccepted, MAX_ROUTE_FEEDBACK_CHARS, type AcceptanceCriterion, type RoutedCandidateRef } from './auto.ts'
 import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, inspectRecoverySignal, latestDirectUserSeq, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type CandidateArtifact, type Reservation, type RouteDecision, type RoutedAgent, type RoutedVerifierKind, type SemanticRouteView } from './router.ts'
 import { VerifierActivities, createActivityObserver, type ActivityView } from './verifier-activity.ts'
 import { ProcessCycleStore, ProcessSelector, resolveProcessFile, type ProcessCycleReport } from './process-selection.ts'
@@ -1337,6 +1337,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (!selected.enabled || selected.autoVerifyMode !== 'smart') return decision
     if (payload.signal.aborted) return decision
     if (!selected.autoVerifySubagents && isSubagentSession(payload.agent)) return decision
+    // Planning is the operator's review boundary: injecting candidate feedback or buying a
+    // process-selection cycle here would push the agent to execute a plan the human has not
+    // approved yet.
+    if (planModeActive(sessionEvents(payload.agent.session))) return decision
     // A step carrying a fresh direct or team task belongs to the operator, not to us.
     const carriesTask = payload.messages.some(message => {
       const kind = (message as { source?: { kind?: unknown } }).source?.kind
@@ -1378,6 +1382,17 @@ export function apply(ctx: Context, config: Config = {}): void {
     const subagentsPending = evidence.pendingSubagents || await hasLiveActiveSubagents(ctx, agent, signal)
     const userPause = inspectUserInteractionPause(snapshot, evidence.taskStartSeq, turn)
     const userInteractionPending = evidence.pendingUserInteraction || userPause !== undefined
+
+    // Plan mode is the operator's review boundary: the agent is supposed to research and
+    // PROPOSE, so no automatic route, team gate or final acceptance may run here — a verdict
+    // could only fail against the missing implementation and steer "actually implement it",
+    // commanding execution the human has not approved yet. The exit_plan_mode pre-review is
+    // the one gate that still runs while planning, so this boundary resumes once the mode is
+    // exited (plan/mode active → inactive) and real work exists.
+    if (evidence.planMode) {
+      ctx.logger.info?.('llm-verifier automatic session verification skipped: plan mode is active')
+      return
+    }
 
     // A manual `verifier_current_session` that covered the whole task and passed is the
     // strongest acceptance signal available; it discharges the mandatory final gate

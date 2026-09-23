@@ -33,6 +33,8 @@ export interface AutoTaskEvidence {
   /** Whether background subagents started during the task remain in flight. */
   pendingSubagents: boolean
   pendingUserInteraction: boolean
+  /** Plan mode is active: the agent may only research and propose, never be pushed to execute. */
+  planMode: boolean
   eligible: boolean
   reason: string
 }
@@ -448,9 +450,31 @@ export function inspectUserInteractionPause(
   return undefined
 }
 
+/**
+ * Whether the session is currently in plan mode.
+ *
+ * The host logs one `plan/mode` event per committed transition and folds the log as
+ * "empty log → inactive, last event wins" (its own projection does exactly this). Hosts
+ * without plan mode never log the event, so nothing changes there. While planning, the
+ * agent is expected to research and PROPOSE: any automatic route or acceptance verdict at
+ * the turn-stopping boundary can only fail against the missing implementation and steer
+ * "actually implement it" — commanding execution the human has not approved yet. The
+ * `exit_plan_mode` pre-review is the one gate that still runs in this state.
+ * @param events - Session event log (the whole log is folded; the mode may predate the task).
+ * @returns True when the newest `plan/mode` event activated plan mode.
+ */
+export function planModeActive(events: readonly SessionEvent[]): boolean {
+  let active = false
+  for (const event of events) {
+    if ((event.type as string) !== 'plan/mode') continue
+    active = (event as unknown as { data?: { active?: unknown } }).data?.active === true
+  }
+  return active
+}
+
 export function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVerifyPolicy, sessionId?: string): AutoTaskEvidence {
   const taskStartSeq = latestDirectUserSeq(events)
-  if (taskStartSeq === undefined) return { taskStartSeq: 0, toolCalls: 0, completedToolResults: 0, consequentialToolCalls: 0, hasManualSessionVerification: false, manualVerificationAccepted: false, pendingSubagents: false, pendingUserInteraction: false, eligible: false, reason: 'no-direct-user-task' }
+  if (taskStartSeq === undefined) return { taskStartSeq: 0, toolCalls: 0, completedToolResults: 0, consequentialToolCalls: 0, hasManualSessionVerification: false, manualVerificationAccepted: false, pendingSubagents: false, pendingUserInteraction: false, planMode: planModeActive(events), eligible: false, reason: 'no-direct-user-task' }
 
   const relevant = events.filter(event => event.seq >= taskStartSeq)
   const calls = relevant.filter((event): event is SessionEvent<'tool/call'> => event.type === 'tool/call')
@@ -523,15 +547,20 @@ export function analyzeAutoTask(events: readonly SessionEvent[], policy: AutoVer
   const pendingSubagents = hasPendingSubagents(events, taskStartSeq)
   const userPause = inspectUserInteractionPause(events, taskStartSeq)
   const pendingUserInteraction = userPause !== undefined
+  const planMode = planModeActive(events)
 
-  if (policy.mode === 'manual') return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, eligible: false, reason: 'manual-mode' }
-  if (manualVerificationAccepted) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, eligible: false, reason: 'already-verified' }
-  if (pendingSubagents) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents: true, pendingUserInteraction, eligible: false, reason: 'pending-subagents' }
-  if (pendingUserInteraction) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction: true, eligible: false, reason: 'user-interaction-paused' }
-  if (consequentialToolCalls === 0) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, eligible: false, reason: 'no-consequential-work' }
-  if (completedToolResults === 0) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, eligible: false, reason: 'no-completed-evidence' }
-  if (policy.mode === 'smart' && toolCalls < policy.minToolCalls) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, eligible: false, reason: 'insufficient-tool-evidence' }
-  return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, eligible: true, reason: policy.mode + '-eligible' }
+  if (policy.mode === 'manual') return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, planMode, eligible: false, reason: 'manual-mode' }
+  // Planning is the operator's review boundary, checked before every other suppression: an
+  // acceptance verdict here could only fail against the missing implementation and command
+  // execution the human has not approved yet.
+  if (planMode) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, planMode: true, eligible: false, reason: 'plan-mode-active' }
+  if (manualVerificationAccepted) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, planMode, eligible: false, reason: 'already-verified' }
+  if (pendingSubagents) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents: true, pendingUserInteraction, planMode, eligible: false, reason: 'pending-subagents' }
+  if (pendingUserInteraction) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction: true, planMode, eligible: false, reason: 'user-interaction-paused' }
+  if (consequentialToolCalls === 0) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, planMode, eligible: false, reason: 'no-consequential-work' }
+  if (completedToolResults === 0) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, planMode, eligible: false, reason: 'no-completed-evidence' }
+  if (policy.mode === 'smart' && toolCalls < policy.minToolCalls) return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, planMode, eligible: false, reason: 'insufficient-tool-evidence' }
+  return { taskStartSeq, toolCalls, completedToolResults, consequentialToolCalls, hasManualSessionVerification, manualVerificationAccepted, pendingSubagents, pendingUserInteraction, planMode, eligible: true, reason: policy.mode + '-eligible' }
 }
 
 /** One criterion's outcome from a session acceptance (candidate A is the session). */
