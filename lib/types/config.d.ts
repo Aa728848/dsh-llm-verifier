@@ -238,6 +238,22 @@ export interface ResolvedConfig {
     priceProviderOverride: string;
     judges: ResolvedJudge[];
 }
+/**
+ * Recursively unwrap a volatile configuration container or reference into a plain value.
+ *
+ * DSH 0.1.7 wraps volatile-marked schemas in cosmokit Volatile references (`{ get(): T }`).
+ * Resolving safely unwraps these references, ensuring callers receive plain config objects
+ * without breaking when running under older hosts or direct test invocations.
+ */
+export declare function unwrapVolatileConfig<T>(value: T): T;
+/**
+ * Mark a Schemastery schema as volatile so DSH 0.1.7+ projects its fields into SettingsForms.
+ *
+ * Compatible with both `@deepseek-ai/schemastery` (which provides `.volatile()`) and community
+ * `schemastery` (where `.extra('volatile', true)` or direct `meta.volatile = true` attaches the
+ * metadata).
+ */
+export declare function markVolatile<T extends z>(schema: T): T;
 export declare const JudgeConfig: z<JudgeConfig>;
 export declare const Config: z<Config>;
 export declare function resolveConfig(config?: Config): ResolvedConfig;

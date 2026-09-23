@@ -266,6 +266,38 @@ export interface ResolvedConfig {
   judges: ResolvedJudge[]
 }
 
+/**
+ * Recursively unwrap a volatile configuration container or reference into a plain value.
+ *
+ * DSH 0.1.7 wraps volatile-marked schemas in cosmokit Volatile references (`{ get(): T }`).
+ * Resolving safely unwraps these references, ensuring callers receive plain config objects
+ * without breaking when running under older hosts or direct test invocations.
+ */
+export function unwrapVolatileConfig<T>(value: T): T {
+  if (value && typeof value === 'object' && 'get' in value && typeof (value as { get?: unknown }).get === 'function') {
+    return unwrapVolatileConfig((value as { get(): unknown }).get() as T)
+  }
+  return value
+}
+
+/**
+ * Mark a Schemastery schema as volatile so DSH 0.1.7+ projects its fields into SettingsForms.
+ *
+ * Compatible with both `@deepseek-ai/schemastery` (which provides `.volatile()`) and community
+ * `schemastery` (where `.extra('volatile', true)` or direct `meta.volatile = true` attaches the
+ * metadata).
+ */
+export function markVolatile<T extends z>(schema: T): T {
+  if (typeof (schema as { volatile?: unknown }).volatile === 'function') {
+    return (schema as unknown as { volatile(): T }).volatile()
+  }
+  const result = typeof schema.extra === 'function' ? (schema.extra('volatile', true) as T) : schema
+  if (result && result.meta) {
+    result.meta.volatile = true
+  }
+  return result
+}
+
 export const JudgeConfig: z<JudgeConfig> = z.object({
   provider: z.string(),
   model: z.string(),
@@ -274,7 +306,7 @@ export const JudgeConfig: z<JudgeConfig> = z.object({
   label: z.string(),
 })
 
-export const Config: z<Config> = z.object({
+export const Config: z<Config> = markVolatile(z.object({
   enabled: z.boolean().default(true),
   autoVerifyMode: z.union(['manual', 'smart', 'strict']).default('smart'),
   autoVerifyThreshold: z.number().min(0).max(1).default(0.65),
@@ -332,7 +364,7 @@ export const Config: z<Config> = z.object({
     maxTokens: z.number().step(1).min(1),
     label: z.string(),
   })).default([]),
-})
+}))
 
 function resolveJudgeLabel(
   rawLabel: string | undefined,
@@ -360,6 +392,7 @@ function resolveJudgeLabel(
 }
 
 export function resolveConfig(config: Config = {}): ResolvedConfig {
+  config = unwrapVolatileConfig(config)
   const provider = (config.provider ?? 'deepseek-official').trim()
   const model = (config.model ?? 'deepseek-flash').trim()
   if (!provider) throw new Error('llm-verifier: provider must be non-empty')
@@ -549,7 +582,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
 }
 
 export function installVerifierSettings(ctx: Context, entry: ResolvedConfig, onChange: () => void): () => ResolvedConfig {
-  let source = () => entry
+  let source: () => Config | ResolvedConfig = () => entry
   const ns = VERIFIER_SETTINGS_NAMESPACE
   ctx.inject(['settings'], (sctx: Context & { settings?: any }) => {
     if (!sctx.settings) return
@@ -571,6 +604,15 @@ export function installVerifierSettings(ctx: Context, entry: ResolvedConfig, onC
       })
       onChange()
       scope.watch(() => {
+        onChange()
+      })
+    } else {
+      // DSH 0.1.7+: settings projections are driven by the entry's volatile Config schema.
+      if (typeof sctx.settings.configure === 'function') {
+        sctx.effect(() => sctx.settings.configure({ auto: false }, ctx.fiber))
+      }
+      source = () => unwrapVolatileConfig(((ctx.fiber as { config?: unknown } | undefined)?.config as Config) ?? entry)
+      ;(ctx as any).on?.('loader/volatile-update', () => {
         onChange()
       })
     }

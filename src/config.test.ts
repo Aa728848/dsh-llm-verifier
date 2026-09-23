@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AUTO_PROCESS_SELECTION_MODES, Config, MAX_EXTRA_JUDGES, normalizeAutoProcessSelection, resolveConfig } from './config.ts'
+import { AUTO_PROCESS_SELECTION_MODES, Config, MAX_EXTRA_JUDGES, normalizeAutoProcessSelection, resolveConfig, unwrapVolatileConfig } from './config.ts'
 import { serializeExtraJudges, type ExtraJudgeDraft } from './client-judges.ts'
 
 describe('config - judges ensemble resolution', () => {
@@ -582,5 +582,35 @@ describe('config - automatic verification repeats and budget', () => {
     // pair instead of doubling the rounds) + 6 for the final acceptance per judge.
     expect(resolveConfig({}).autoMaxModelCallsPerTask).toBe(96)
     expect(resolveConfig({}).autoMaxModelCallsPerSession).toBe(240)
+  })
+})
+
+describe('config - volatile schema and reference unwrapping', () => {
+  it('marks Config with meta.volatile = true for DSH 0.1.7+ settings projection', () => {
+    expect((Config as any).meta?.volatile).toBe(true)
+  })
+
+  it('unwraps nested volatile reference containers', () => {
+    const raw = { provider: 'custom-provider', model: 'custom-model' }
+    const volatileWrapper = {
+      get: () => ({
+        get: () => raw,
+      }),
+    }
+    expect(unwrapVolatileConfig(volatileWrapper)).toBe(raw)
+  })
+
+  it('resolves volatile-wrapped config objects seamlessly', () => {
+    const volatileConfig = {
+      get: () => ({
+        provider: 'openai',
+        model: 'gpt-4o',
+        temperature: 0.5,
+      }),
+    }
+    const resolved = resolveConfig(volatileConfig as any)
+    expect(resolved.provider).toBe('openai')
+    expect(resolved.model).toBe('gpt-4o')
+    expect(resolved.temperature).toBe(0.5)
   })
 })
