@@ -50,17 +50,44 @@ async function credential(ctx: Context, name: string | undefined): Promise<strin
   return (await provider?.resolve(credentialRef(name)))?.value
 }
 
+/**
+ * Read one host settings namespace as a plain object.
+ *
+ * DSH 0.1.1-0.1.6 answered this with `settings.get(ns)` on the register-based seam.
+ * DSH 0.1.7 replaced that seam with `SettingsForms`, which has no `get` method at
+ * all: the only public read is `describe()`, whose descriptors carry each
+ * namespace's projected live value. Probing both keeps the direct logprob route
+ * working across the whole supported line, and a seam that throws degrades to the
+ * explicit-tag channel instead of failing the verification outright.
+ * @param ctx - Plugin context carrying the optional settings service.
+ * @param ns - Host namespace id, e.g. `llm-deepseek`.
+ * @returns The namespace value, or `undefined` when it cannot be read.
+ */
+function settingsNamespace(ctx: Context, ns: string): Record<string, unknown> | undefined {
+  const settings = ctx.get('settings') as unknown as { get?: unknown; describe?: unknown } | undefined
+  if (!settings) return undefined
+  try {
+    if (typeof settings.get === 'function') return object((settings.get as (ns: string) => unknown)(ns))
+    if (typeof settings.describe !== 'function') return undefined
+    const rows: unknown = (settings.describe as () => unknown)()
+    if (!Array.isArray(rows)) return undefined
+    const row = rows.map(object).find(candidate => candidate?.ns === ns)
+    return object(row?.value)
+  } catch {
+    return undefined
+  }
+}
+
 export async function resolveTopLogprobRoute(ctx: Context, provider: string): Promise<TopLogprobRoute | undefined> {
-  const settings = ctx.get('settings')
   if (provider === 'deepseek-official') {
-    const value = settings ? object(settings.get('llm-deepseek' as never)) ?? {} : {}
+    const value = settingsNamespace(ctx, 'llm-deepseek') ?? {}
     const apiKeyEnv = text(value.apiKeyEnv) ?? 'DEEPSEEK_API_KEY'
     const apiKey = await credential(ctx, apiKeyEnv)
     if (!apiKey) return undefined
     return { baseURL: text(value.baseURL) ?? 'https://api.deepseek.com', apiKey, deepSeekThinking: true }
   }
-  if (!settings) return undefined
-  const root = object(settings.get('llm-pi-ai' as never))
+  const root = settingsNamespace(ctx, 'llm-pi-ai')
+  if (root === undefined) return undefined
   const profiles = object(root?.providers)
   const profile = object(profiles?.[provider])
   // Only explicitly OpenAI-compatible profiles are safe to serialize directly.

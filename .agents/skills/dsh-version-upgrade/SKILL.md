@@ -73,6 +73,7 @@ npm view @deepseek-ai/dsh-tools versions --json | tr -d '\n '
 - **客户端 bundle 的宿主模块是 external**。宿主端整体改名的具名导入（如整套图标名）在另一侧宿主上就是 `undefined`；React 遇到 `undefined` 作为组件类型会**抛错**，会让整个页面白屏而不是少一个图标。跨版本改写要对这类名字做运行时探测 + 优雅降级。
 - **测试可能跑在旧宿主类型上**。`Session.events` 早就被 `snapshotEvents()` 取代，但测试直接读 `session.events` 时不会报错，只是**全部断言失效**（`undefined.length`）。升级后要检查测试有没有依赖已删除的宿主成员。
 - **预发布版本的 semver**：`^0.1.7` **不匹配** `0.1.7-alpha.1`。新增版本线必须显式列预发布形态（照现有写法追加 `|| ^0.1.7-alpha.1`）。
+- **宿主服务的方法会整批消失，而 `any` 让类型检查看不见**。0.1.7 把 `settings` 的注册式接缝换成 `SettingsForms` 后，`get(ns)` 被删除（原型上只剩 `configure` / `describe`），调用点抛 `settings.get is not a function` 并从路由解析一路穿透到验收崩溃。插件读宿主服务的每一处都要**按能力探测**（`typeof x.get === 'function'` 再退化到新 API）并包 `try/catch` 降级；同时回宿主源码/`git show <tag>:<file>` 核对服务名与方法集，别信 `as any`。
 - **harness 的 `lib/types` 是构建产物**。本地 checkout `git pull` 之后源码变了、产物没重建，`typecheck:local` 会对着旧类型报绿——护栏比对源码 mtime 就是为了这个。
 - **`lib/` 里的旧 chunk 文件名**：`build` 会先清空 `lib/`，产物文件名带 hash，所以升级后 `git status` 里必然出现成对的新增/删除；这是正常的，不要手工保留旧文件。
 

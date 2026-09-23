@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { CAPABILITY_TTL_MS, TopLogprobCapabilityCache, callTopLogprobs, resolveCapabilityFile } from './top-logprobs.ts'
+import { CAPABILITY_TTL_MS, TopLogprobCapabilityCache, callTopLogprobs, resolveCapabilityFile, resolveTopLogprobRoute } from './top-logprobs.ts'
 
 describe('TopLogprobCapabilityCache persistence', () => {
   it('round-trips marks across instances through the capability file', async () => {
@@ -186,3 +186,67 @@ describe('callTopLogprobs temperature', () => {
     expect(capturedBody.temperature).toBe(0.7)
   })
 })
+
+describe('resolveTopLogprobRoute settings seam', () => {
+  const credentials = { resolve: async () => ({ value: 'secret' }) }
+  const route = async (settings: unknown) => resolveTopLogprobRoute(
+    { get: (name: string) => name === 'credentials' ? credentials : name === 'settings' ? settings : undefined } as never,
+    'deepseek-official',
+  )
+
+  it('reads a namespace through the 0.1.1-0.1.6 register seam', async () => {
+    const seen: string[] = []
+    const resolved = await route({ get: (ns: string) => { seen.push(ns); return { baseURL: 'https://legacy.example/v1', apiKeyEnv: 'MY_KEY' } } })
+    expect(seen).toEqual(['llm-deepseek'])
+    expect(resolved).toEqual({ baseURL: 'https://legacy.example/v1', apiKey: 'secret', deepSeekThinking: true })
+  })
+
+  // DSH 0.1.7 replaced the register seam with SettingsForms, whose prototype has no
+  // get() at all. Calling it threw 'settings.get is not a function' and killed the
+  // whole verification; the descriptor's projected value is the public read.
+  it('reads a namespace through the 0.1.7 SettingsForms seam, which has no get()', async () => {
+    const forms = {
+      describe: () => [{
+        ns: 'llm-deepseek', revision: 0, applies: 'live',
+        value: { baseURL: 'https://forms.example/v1', apiKeyEnv: 'FORM_KEY' },
+      }],
+    }
+    expect(typeof (forms as { get?: unknown }).get).toBe('undefined')
+    const resolved = await route(forms)
+    expect(resolved).toEqual({ baseURL: 'https://forms.example/v1', apiKey: 'secret', deepSeekThinking: true })
+  })
+
+  // The pre-existing contract for the official channel: an unreadable namespace is
+  // not an error, it falls back to the declared default endpoint. What must never
+  // happen is the seam throwing out of the route resolver and killing verification.
+  it('degrades to the default official endpoint instead of throwing when the seam is unusable', async () => {
+    const fallback = { baseURL: 'https://api.deepseek.com', apiKey: 'secret', deepSeekThinking: true }
+    // Absent service, a seam that throws, and a seam answering something unreadable.
+    await expect(route(undefined)).resolves.toEqual(fallback)
+    await expect(route({ describe: () => { throw new Error('boom') } })).resolves.toEqual(fallback)
+    await expect(route({ describe: () => ({ nope: true }) })).resolves.toEqual(fallback)
+    await expect(route({ describe: () => [] })).resolves.toEqual(fallback)
+    await expect(route({ describe: () => [{ ns: 'llm-deepseek' }] })).resolves.toEqual(fallback)
+  })
+
+  // The pi-ai channel is the one that must stand down when its namespace is
+  // unreadable: there is no safe default provider profile to invent.
+  it('selects the matching descriptor and stands down when pi-ai has no usable profile', async () => {
+    const piRoute = async (settings: unknown) => resolveTopLogprobRoute(
+      { get: (name: string) => name === 'credentials' ? credentials : name === 'settings' ? settings : undefined } as never,
+      'custom-provider',
+    )
+    await expect(piRoute({ describe: () => [
+      { ns: 'llm-deepseek', value: { baseURL: 'https://not-me.example/v1' } },
+    ] })).resolves.toBeUndefined()
+    await expect(piRoute({ describe: () => [{ ns: 'llm-pi-ai' }] })).resolves.toBeUndefined()
+    // Only an explicitly OpenAI-compatible profile is safe to serialize directly.
+    await expect(piRoute({ describe: () => [
+      { ns: 'llm-pi-ai', value: { providers: { 'custom-provider': { api: 'anthropic', baseURL: 'https://x.example' } } } },
+    ] })).resolves.toBeUndefined()
+    await expect(piRoute({ describe: () => [
+      { ns: 'llm-pi-ai', value: { providers: { 'custom-provider': { api: 'openai-completions', baseURL: 'https://ok.example/v1', apiKeyEnv: 'PROVIDER_KEY' } } } },
+    ] })).resolves.toEqual({ baseURL: 'https://ok.example/v1', apiKey: 'secret', deepSeekThinking: false })
+  })
+})
+
