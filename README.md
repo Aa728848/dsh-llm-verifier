@@ -98,7 +98,7 @@ DSH 0.1.7 又搬动了两处判定地基，两侧形态插件都读：
 
 客户端面（Web 设置页与看板）另有两处只随新版本线变化：提供 `ctx.slots` 的包是 `@deepseek-ai/dsh-client-ui-renderer`（`@deepseek-ai/dsh-client-runtime` 在 0.1.2 就已删除，插件类型一律取自 `@deepseek-ai/cordis` 的 `Context`）；宿主图标名在 0.1.7 整体由尺寸后缀改为笔画后缀。图标是具名导入、且该模块对客户端 bundle 是 external，一份源码无法同时满足两套名字，因此插件改为按名探测两种拼写、都缺失时渲染空——旧宿主不会因此白屏。
 
-typecheck 门禁按 `package.json` 的 `devDependencies` 解析，本轮已从 `0.1.1-rc.2` 上移到 `0.1.7-alpha.1`：客户端面的图标名同样在 0.1.7 才改名，一份源码只能对齐一侧，宿主面的旧形态兼容由运行时代码与回归测试保证。
+typecheck 门禁按 `package.json` 的 `devDependencies` 解析，已随宿主推进到 `0.1.7-rc.1`（此前从 `0.1.1-rc.2` 上移到 `0.1.7-alpha.1`）：客户端面的图标名在 0.1.7 才改名，一份源码只能对齐一侧，宿主面的旧形态兼容由运行时代码与回归测试保证。从 `0.1.7-alpha.1` 到 `0.1.7-rc.1` 的宿主改动对本插件消费的所有宿主面**全是加法**（`tools/pre-execute` 侧只新增可选 `projectContent`，`dsh-session` / `dsh-llm` / `dsh-settings` / `dsh-agent` / `dsh-credentials` / 客户端槽位与图标包源码零改动），因此这一步只换版本线，不动插件代码。
 
 其中一处更隐蔽的差异是 `deepFreeze`：0.1.1 的 `@deepseek-ai/dsh-llm` 会重新导出它，0.1.5 已把它移到 `@deepseek-ai/dsh-util-values`。插件因此自带一份等价的兜底实现，并同样**放过 `AbortSignal`**——冻结那个还在重试循环里使用、尚未被订阅的信号，会让传输层首次 `addEventListener`（Node ≥26.5）或超时/取消时的 `controller.abort()`（所有 Node 版本）抛 `Cannot assign to read only property`。
 
@@ -108,7 +108,7 @@ typecheck 门禁按 `package.json` 的 `devDependencies` 解析，本轮已从 `
 
 发布内容由 `package.json` 的 `files` 字段决定：`lib`（构建产物、source map 与 `lib/types` 类型声明）、`src`、`cordis.patch.yml`、`README.md`。`tsconfig.local.json` 之类的本机文件不会进入 tarball。
 
-`peerDependencies` 中逐个列出的 `^0.1.5-alpha.1`、`^0.1.7-alpha.1` 等预发布范围是必需的：按 semver 规则，预发布版本只有在同一 `x.y.z` 段存在带预发布的比较符时才算满足，因此不能简化成 `>=0.1.1-rc.2 <0.2.0`（那样会漏掉 `0.1.2-alpha.*`、`0.1.5-rc.*`、`0.1.7-alpha.*` 等宿主）。
+`peerDependencies` 中逐个列出的 `^0.1.5-alpha.1`、`^0.1.7-alpha.1`、`^0.1.7-rc.1` 等预发布范围是必需的，而且从 DSH 0.1.7-rc.1 起**由宿主强制执行**：按 semver 规则，预发布版本只有在同一 `x.y.z` 段存在带预发布的比较符时才算满足，因此不能简化成 `>=0.1.1-rc.2 <0.2.0`（那样会漏掉 `0.1.2-alpha.*`、`0.1.5-rc.*`、`0.1.7-alpha.*` 等宿主）。宿主启动 profile 时对每一个 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 条目跑 `semver.satisfies(运行版本, 范围, { includePrerelease: true })`，**任何一条不满足**就把该插件行停用（bundle 层直接跳过整个 bundle），并在 stderr 写出原因。所以缺少某条宿主版本线的后果不是"少个功能"，而是**插件整体不加载**；应急可用 `dsh plugin allow-version` 为该插件的精确版本做一次性豁免。当前声明覆盖到 `0.1.7-rc.1`，与本机 `dsh --version` 报告的运行版本一致。
 
 统计数据有两条传输路径：优先走 `/api/llm-verifier/statistics`（Connection 的 exact Fetch 路由，带 Host/Origin 栅栏与浏览器鉴权），宿主较旧时回落到插件自己的 `/llm-verifier` RPC 通道（同样经过鉴权）。裸的 webServer 路由已被移除。
 
