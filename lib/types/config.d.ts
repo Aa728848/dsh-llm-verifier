@@ -246,12 +246,44 @@ export interface ResolvedConfig {
  * without breaking when running under older hosts or direct test invocations.
  */
 export declare function unwrapVolatileConfig<T>(value: T): T;
+/** A stable reference to one immutable configuration snapshot. */
+export interface VolatileConfigRef<T> {
+    /** @returns the current immutable snapshot, including `undefined` for an absent value. */
+    get(): T;
+}
+/** Whether a value implements the shared cosmokit volatile reference protocol. */
+export declare function isVolatileConfigRef(value: unknown): value is VolatileConfigRef<unknown>;
+/**
+ * Create a stable reference holding an immutable copy of the supplied data.
+ *
+ * The returned object is frozen and exposes only `get()` plus the shared write symbol, so the
+ * owning runtime (the host Loader) is the only writer.
+ * @param value - validated config data produced by the schema itself.
+ * @returns a reference whose snapshot is replaced only through the volatile protocol.
+ */
+export declare function createVolatileConfigRef<T>(value: T): VolatileConfigRef<T>;
+/**
+ * Make a schema's successful parses return a volatile reference.
+ *
+ * A volatile-marked schema must not only set `meta.volatile` (which is all the community
+ * `schemastery` builder can express): the host Loader identifies live configuration by walking
+ * `fiber.config` for cosmokit references, so a schema that returns a plain object is treated as
+ * having no live fields. The entry then takes the volatile-only update path, finds zero references,
+ * and silently drops every saved value.
+ *
+ * The shadow is installed on the instance, leaving the community prototype untouched, and is
+ * idempotent: a schema already handling the protocol is returned unchanged.
+ * @param schema - schema to extend with the volatile reference protocol.
+ * @returns the same schema, now returning references from `~standard.validate`.
+ */
+export declare function installVolatileRefProtocol<T extends z>(schema: T): T;
 /**
  * Mark a Schemastery schema as volatile so DSH 0.1.7+ projects its fields into SettingsForms.
  *
- * Compatible with both `@deepseek-ai/schemastery` (which provides `.volatile()`) and community
- * `schemastery` (where `.extra('volatile', true)` or direct `meta.volatile = true` attaches the
- * metadata).
+ * Sets the `volatile` metadata that drives `volatileForm` / `isVolatilePath`, then installs the
+ * volatile reference protocol so the host Loader can actually commit live values into the running
+ * fiber. Compatible with both `@deepseek-ai/schemastery` (which provides `.volatile()`) and
+ * community `schemastery` (where `.extra('volatile', true)` attaches the metadata alone).
  */
 export declare function markVolatile<T extends z>(schema: T): T;
 export declare const JudgeConfig: z<JudgeConfig>;

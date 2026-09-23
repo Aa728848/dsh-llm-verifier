@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { AUTO_PROCESS_SELECTION_MODES, Config, MAX_EXTRA_JUDGES, normalizeAutoProcessSelection, resolveConfig, unwrapVolatileConfig } from './config.ts'
+import { AUTO_PROCESS_SELECTION_MODES, Config, isVolatileConfigRef, markVolatile, MAX_EXTRA_JUDGES, normalizeAutoProcessSelection, resolveConfig, unwrapVolatileConfig } from './config.ts'
+
+/** The cross-copy identity cosmokit publishes for the volatile write hook. */
+const VOLATILE_WRITE = Symbol.for('cosmokit.volatile.write')
+
+/** Paths of the volatile references the host Loader would collect from a parsed config. */
+function volatilePaths(value: unknown, path: string[] = []): string[][] {
+  if (isVolatileConfigRef(value)) return [path]
+  if (value === null || typeof value !== 'object') return []
+  return Object.entries(value).flatMap(([key, child]) => volatilePaths(child, [...path, key]))
+}
 import { serializeExtraJudges, type ExtraJudgeDraft } from './client-judges.ts'
 
 describe('config - judges ensemble resolution', () => {
@@ -588,6 +598,72 @@ describe('config - automatic verification repeats and budget', () => {
 describe('config - volatile schema and reference unwrapping', () => {
   it('marks Config with meta.volatile = true for DSH 0.1.7+ settings projection', () => {
     expect((Config as any).meta?.volatile).toBe(true)
+    expect((Config as any)['~standard'].vendor).toBe('schemastery')
+  })
+
+  it('returns a cosmokit volatile reference from validate, not a plain object', () => {
+    // The community `schemastery` builder has no `.volatile()`, so `meta.volatile` alone left
+    // `fiber.config` a plain object. The host Loader then found zero references to commit into and
+    // silently dropped every saved value (the settings page snapped back to defaults).
+    const result = (Config as any)['~standard'].validate({ autoVerifyMode: 'strict', autoMaxModelCallsPerTask: 60 }) as { value: unknown }
+    expect(isVolatileConfigRef(result.value)).toBe(true)
+    expect(typeof (result.value as { get(): unknown }).get).toBe('function')
+    expect((result.value as { get(): Record<string, unknown> }).get()).toMatchObject({
+      autoVerifyMode: 'strict',
+      autoMaxModelCallsPerTask: 60,
+      provider: 'deepseek-official',
+    })
+  })
+
+  it('publishes exactly one root-level reference for the loader to collect', () => {
+    // The loader walks the parsed config with `volatileEntries` and stops at the first reference, so a
+    // ROOT reference yields exactly `[{ path: [], ref }]`. A nested one would instead need a path
+    // lookup during the commit, and the module lookup would not resolve.
+    const value = (Config as any)['~standard'].validate({ autoVerifyMode: 'strict' })!.value as Record<PropertyKey, unknown>
+    expect(isVolatileConfigRef(value)).toBe(true)
+    // The walk returns at the root, so the snapshot's own fields are never treated as config nodes.
+    expect(volatilePaths(value)).toEqual([[]])
+    // Read side only: `get` is enumerable exactly as cosmokit's own reference exposes it, while the
+    // write hook is a non-enumerable symbol so it never leaks into JSON or form projection.
+    expect(Object.keys(value)).toEqual(['get'])
+    expect(Object.getOwnPropertyDescriptor(value, VOLATILE_WRITE)?.enumerable).toBe(false)
+  })
+
+  it('keeps a rejected parse a rejection instead of wrapping it into a reference', () => {
+    const result = (Config as any)['~standard'].validate({ autoVerifyMode: 'not-a-mode' }) as { issues?: unknown; value?: unknown }
+    expect(Array.isArray(result.issues)).toBe(true)
+    expect(result.value).toBeUndefined()
+  })
+
+  it('commits a later snapshot through the shared write symbol, observable on the held reference', () => {
+    // This is the exact loop the host Loader runs in `_commitVolatile`: parse the new raw config,
+    // then push its snapshot into the reference the running fiber already holds. The fiber keeps the
+    // SAME object identity, which is what makes `ctx.fiber.config` a live settings source.
+    const held = (Config as any)['~standard'].validate({ autoVerifyMode: 'strict', autoMaxModelCallsPerTask: 60 })!.value as any
+    const next = (Config as any)['~standard'].validate({ autoVerifyMode: 'manual', autoMaxModelCallsPerTask: 123 })!.value as any
+    expect(isVolatileConfigRef(held) && isVolatileConfigRef(next)).toBe(true)
+    expect(held.get().autoVerifyMode).toBe('strict')
+
+    held[VOLATILE_WRITE](next.get())
+
+    expect(isVolatileConfigRef(held)).toBe(true)
+    expect(held.get()).toMatchObject({ autoVerifyMode: 'manual', autoMaxModelCallsPerTask: 123 })
+    expect(resolveConfig(unwrapVolatileConfig(held)).autoVerifyMode).toBe('manual')
+    expect(resolveConfig(unwrapVolatileConfig(held)).autoMaxModelCallsPerTask).toBe(123)
+  })
+
+  it('freezes snapshots and exposes only the read side', () => {
+    const value = (Config as any)['~standard'].validate({})!.value as any
+    expect(Object.isFrozen(value)).toBe(true)
+    expect(Object.isFrozen(value.get())).toBe(true)
+    expect(() => { value.get().autoVerifyMode = 'manual' }).toThrow()
+  })
+
+  it('leaves markVolatile idempotent and does not re-enter .volatile()', () => {
+    // Host `@deepseek-ai/schemastery` throws `volatile schema is already wrapped` on a second call.
+    const once = markVolatile(Config as any)
+    expect(once).toBe(Config)
+    expect(isVolatileConfigRef((once as any)['~standard'].validate({})!.value)).toBe(true)
   })
 
   it('unwraps nested volatile reference containers', () => {
