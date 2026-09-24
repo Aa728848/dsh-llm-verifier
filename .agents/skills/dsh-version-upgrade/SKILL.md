@@ -30,7 +30,7 @@ npm view @deepseek-ai/dsh-tools dist-tags --json
 npm view @deepseek-ai/dsh-tools versions --json | tr -d '\n '
 ```
 
-**关键判断**：若 `git describe --tags` 正好等于 npm 的 `next`/`alpha` 标签那一版（例如都是 `dsh-v0.1.7-rc.1`），那么 `package.json` 锁定的 npm 版本与本机 checkout 是**同一套公开 API**——`pnpm run typecheck` 已经验过本地源码对应的类型，不必再去搭 `typecheck:local`。只有本地 checkout **跑在已发布版本之前**时，才必须接通本地类型检查（见 §4）。
+**关键判断**：若 `git describe --tags` 正好等于 npm 的 `next`/`alpha` 标签那一版（例如都是 `dsh-v0.1.7-rc.2`），那么 `package.json` 锁定的 npm 版本与本机 checkout 是**同一套公开 API**——`pnpm run typecheck` 已经验过本地源码对应的类型，不必再去搭 `typecheck:local`。只有本地 checkout **跑在已发布版本之前**时，才必须接通本地类型检查（见 §4）。
 
 ## 1. 本插件消费的宿主面
 
@@ -73,7 +73,7 @@ npm view @deepseek-ai/dsh-tools versions --json | tr -d '\n '
 - **客户端 bundle 的宿主模块是 external**。宿主端整体改名的具名导入（如整套图标名）在另一侧宿主上就是 `undefined`；React 遇到 `undefined` 作为组件类型会**抛错**，会让整个页面白屏而不是少一个图标。跨版本改写要对这类名字做运行时探测 + 优雅降级。
 - **测试可能跑在旧宿主类型上**。`Session.events` 早就被 `snapshotEvents()` 取代，但测试直接读 `session.events` 时不会报错，只是**全部断言失效**（`undefined.length`）。升级后要检查测试有没有依赖已删除的宿主成员。
 - **宿主服务的方法会整批消失，而 `any` 让类型检查看不见**。0.1.7 把 `settings` 的注册式接缝换成 `SettingsForms` 后，`get(ns)` 被删除（原型上只剩 `configure` / `describe`），调用点抛 `settings.get is not a function` 并从路由解析一路穿透到验收崩溃。插件读宿主服务的每一处都要**按能力探测**（`typeof x.get === 'function'` 再退化到新 API）并包 `try/catch` 降级；同时回宿主源码/`git show <tag>:<file>` 核对服务名与方法集，别信 `as any`。
-- **预发布版本的 semver，以及 0.1.7-rc.1 起宿主对它的强制执行**：`^0.1.7` **不匹配** `0.1.7-alpha.1`。新增版本线必须显式列预发布形态（照现有写法追加 `|| ^0.1.7-alpha.2 || ^0.1.7-rc.1`）。更要紧的是：`packages/boot/app-boot/src/plugin-compatibility.ts` 的 `evaluatePluginCompatibility()` 现在对每个 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 条目跑 `semver.satisfies(运行版本, 范围, { includePrerelease: true })`（运行版本取 **app-boot 自己的 `package.json`**，不是 CLI 的），不满足的行直接标 `disabled`，bundle 层则在 `profile.ts` 里整个跳过并打 stderr。所以**漏一条版本线 = 插件在 profile 里根本不加载**，不是降级；用户只能靠 `dsh plugin allow-version` 写 profile 目录下的 `compatibility.json` 做精确版本豁免。`@deepseek-ai/cordis` 不在检查范围内。自己复核范围是否覆盖运行版本时，注意要用 `includePrerelease: true`（否则会得出与宿主相反的结论）。
+- **预发布版本的 semver，以及 0.1.7-rc.1 起宿主对它的强制执行**：`^0.1.7` **不匹配** `0.1.7-alpha.1`。新增版本线必须显式列预发布形态（照现有写法追加 `|| ^0.1.7-alpha.2 || ^0.1.7-rc.1 || ^0.1.7-rc.2`）。注意同一 `x.y.z` 段内只要列过该段预发布（`^0.1.7-rc.1`），同段后续预发布（`0.1.7-rc.2`）本来就被覆盖，**再显式补一条不是修门禁，而是把"这一线已验过"写进声明**。更要紧的是：`packages/boot/app-boot/src/plugin-compatibility.ts` 的 `evaluatePluginCompatibility()` 现在对每个 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 条目跑 `semver.satisfies(运行版本, 范围, { includePrerelease: true })`（运行版本取 **app-boot 自己的 `package.json`**，不是 CLI 的），不满足的行直接标 `disabled`，bundle 层则在 `profile.ts` 里整个跳过并打 stderr。所以**漏一条版本线 = 插件在 profile 里根本不加载**，不是降级；用户只能靠 `dsh plugin allow-version` 写 profile 目录下的 `compatibility.json` 做精确版本豁免。`@deepseek-ai/cordis` 不在检查范围内。自己复核范围是否覆盖运行版本时，注意要用 `includePrerelease: true`（否则会得出与宿主相反的结论）。
 - **harness 的 `lib/types` 是构建产物**。本地 checkout `git pull` 之后源码变了、产物没重建，`typecheck:local` 会对着旧类型报绿——护栏比对源码 mtime 就是为了这个。
 - **harness 的 `lib/`（运行时产物）同样会滞后，而本机全局 `dsh` 正是链到它**。`C:\Users\A\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\*` 全是指向 checkout `packages/**` 的 symlink，`main` 指向各自的 `lib/`。因此"`dsh --version` 已经是新版"**不等于**"新版代码在跑"：`package.json` 的版本号随 `git pull` 立即变，而 `lib/` 要重建跟上。核对办法是比对 mtime（`find packages/boot/app-boot/src -newer packages/boot/app-boot/lib/index.js`）并确认新符号真的出现在 `lib/` 里。这是 harness 侧的构建状态，**不要**在本仓库的升级里顺手重建 harness——报告给用户。
 - **`lib/` 里的旧 chunk 文件名**：`build` 会先清空 `lib/`，产物文件名带 hash，所以升级后 `git status` 里必然出现成对的新增/删除；这是正常的，不要手工保留旧文件。
@@ -105,6 +105,15 @@ node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc -b tsconfig.cli
 
 最新在上。每条只写"这一版动了什么、我们怎么应对"，深层理由链到 Agent Note。
 
+### 2026-09-25 → DSH `dsh-v0.1.7-rc.2`
+
+- **只换版本线，不动插件代码**：本版落地的「动态工具更新」（`request/header.tools`、工具名变化时追加 `developer/message`，内容为 `tool-addition` / `tool-removal` 块、请求带 `toolHistory`）对本插件全是新增可选面（`GenerateOptions.toolHistory?` / `ToolUpdate` / `Session.toolHistory()` / `PreToolDecision.ask.displayReason?`），工具结果的两种形态与 `MessageSourceMap` 都没变。
+- **新事件与块类型刻意不读**：`developer/message`、`role: 'developer'` 与两个新块类型在插件的 `if/else` 分发里自然落空（无 `assertNever`）——它们是宿主侧登记动作，不是工作证据；`auto.ts` 的 `stale()` 只统计有结果的工具调用与 PTC 派发，中途追加的这类消息不会让已完成的验收过期。
+- **DeepSeek provider 拆包而命名空间不变**：`dsh-llm-deepseek` 拆成 `…-api-key` / `…-account`，但 profile 条目 id 仍是 `llm-deepseek`，设置命名空间里的 `baseURL` / `apiKeyEnv` 都没变，直连 logprobs 通道照常；新 provider `deepseek-account` 走账号令牌，直连通道按设计降级到显式标签。
+- **peer 门禁其实不需要改**：`^0.1.7-rc.1` 已满足 `0.1.7-rc.2`（同段预发布递增，`includePrerelease: true` 下成立），不加也不会被停用；本次追加 rc.2 只是把"已验过这一线"写进声明，并把 `devDependencies` 上移让门禁真的验到它。
+- **复核用的坑**：`git diff --stat` 加 `tail` 会截掉按路径排序的前半段，本轮差点据此漏掉 `llm-deepseek` 的整套拆包。
+- 决策全文：`.agents/notes/implemented/architecture/2026-09-22-dsh-0.1.7-alignment.md`（原地更新）
+
 ### 2026-09-23 → DSH `dsh-v0.1.7-rc.1`
 
 - **本版对插件消费的宿主面全是加法**：`dsh-session` / `dsh-llm` / `dsh-settings` / `dsh-agent` / `dsh-credentials` / `dsh-client-ui-renderer` / `dsh-client-ui-slots` / `dsh-client-ui-settings` / `dsh-client-connection` 源码零改动；`packages/core/tools` 只新增可选 `projectContent`，`ui-primitives` 只加图标与组件，`locale` 只加词条。**结论：只换版本线，不动插件代码。**
@@ -123,7 +132,7 @@ node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc -b tsconfig.cli
 
 ## 6. 已知待决（不要当成 bug 顺手"修"掉）
 
-- **门禁 pin 现锁新线**（`0.1.7-rc.1`）。代价：0.1.1–0.1.6 的**宿主面**不再被自动化类型检查，只靠运行时双形态读取 + 回归测试保证；**客户端面**其余部分只在 0.1.7 类型下受检。想锁回最低基线，需要先把宿主图标换成插件自有的内联 SVG。
+- **门禁 pin 现锁新线**（`0.1.7-rc.2`）。代价：0.1.1–0.1.6 的**宿主面**不再被自动化类型检查，只靠运行时双形态读取 + 回归测试保证；**客户端面**其余部分只在 0.1.7 类型下受检。想锁回最低基线，需要先把宿主图标换成插件自有的内联 SVG。
 - **本机 `typecheck:local` 未接通**（§4 的 junction 没建）。这是有意的：本地 checkout 与 npm `next`/`alpha` 同版时它不带来额外覆盖。
-- **本机 harness checkout 的 `lib/` 比源码旧**：`packages/boot/app-boot/lib/` 是 2026-09-23 16:32 的产物，早于该目录里 rc.1 的源码（`plugin-compatibility.ts` 等），且 `packages/boot/app-boot/node_modules/semver` 未安装。也就是说**全局 `dsh` 报 `0.1.7-rc.1`，但跑的 app-boot 代码还不是 rc.1**，新的 peer 强制在用户机器上尚未生效。这是 harness 侧的构建状态，需重建 harness 才消解；不属于本仓库的升级动作。
+- **本机 harness checkout 的 `lib/` 比源码旧**：`packages/boot/app-boot/lib/index.js` 是 2026-09-23 22:53 的产物，比该目录里 7 个 rc.2 源码文件旧（产物里有 `skippedBundles`，而 rc.2 新增的 `reportSkippedBundles` 不存在、rc.2 已删除的 `skippedProfileBundles` 还在）；`packages/core/session` / `packages/llm/llm` / `packages/core/tools` 的 `lib/` 同样落后（rc.2 的 `toolUpdate` / `projectToolUpdates` 都不在产物里）。也就是说**全局 `dsh` 已报 `0.1.7-rc.2`（版本号随 `git pull` 立刻变），跑的却是 rc.1 期的构建产物**——"`dsh --version` 是新版"不等于新版代码在跑。核对办法是 `find <pkg>/src -newer <pkg>/lib/index.js` 并抽查一个新符号是否真的出现在 `lib/` 里。注意 peer 强制本身在 rc.1 期代码里就已存在，且运行版本取 `app-boot` 自己的 `package.json`（已是 rc.2），所以门禁照常判定，并不是"尚未生效"。这是 harness 侧的构建状态，需重建 harness 才消解；不属于本仓库的升级动作。
 - **`lib/types/message-source.d.ts` 是孤立产物**：`message-source.ts` 只含类型层声明，运行时被 tree-shake，因此没有对应的 `lib/message-source.js`；包对外的 `lib/types/index.d.ts` 也不引用它，属正常。
