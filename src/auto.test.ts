@@ -491,6 +491,48 @@ describe('automatic verification policy', () => {
     expect(isAwaitingUserText('All tests passed successfully.')).toBe(false)
     expect(isAwaitingUserText('已成功创建文件并完成修改。')).toBe(false)
   })
+
+  // The incident these pin: the agent ended its turn with "要我直接改这处提示词吗？我的建议是补三句：…"
+  // — a permission offer, not a delivery report — and the boundary read it as a finished turn and
+  // injected "[Automatic verifier gate] …" demanding more work while the operator was mid-answer.
+  // The trailing sentence moves the question mark away from the end, so nothing in the old list matched.
+  it('detects permission offers whose question mark is not the final character', () => {
+    expect(isAwaitingUserText('要我直接改这处提示词吗？我的建议是补三句：① 兜底只对当次派发失败的那个任务生效。')).toBe(true)
+    expect(isAwaitingUserText('要我继续推进到 G/H 验收完成吗？另外提醒一句：真实订阅端到端仍未验证。')).toBe(true)
+    expect(isAwaitingUserText('要我现在写文档，还是你先跑真实冒烟？')).toBe(true)
+    expect(isAwaitingUserText('需要我把这份架构说明也写进 README 吗？目前 README 讲的是"怎么用"。')).toBe(true)
+    // A conditional or negated mention of the same words is a statement, not a permission offer.
+    expect(isAwaitingUserText('结论：不需要我改任何代码，测试已经全绿，改动清单如下。')).toBe(false)
+    expect(isAwaitingUserText('如果你希望我改这处提示词，落点是两个必须同步修改的副本。')).toBe(false)
+    expect(isAwaitingUserText('Want me to run the regression suite? It takes about a minute.')).toBe(true)
+
+    // The same shapes in a DELIVERY REPORT must stay reports: every turn-final message of 20
+    // recorded sessions was replayed against this detector and each of these lines came from one.
+    expect(isAwaitingUserText('两个任务写作用域不重叠（一个动 routes/token-store/index/client，一个只动 model-catalog + 其测试），可安全并行。等它们回报后我逐项核验。')).toBe(false)
+    expect(isAwaitingUserText('建议你按顺序做一次真实验证：登录 → 确认令牌刷新并落盘 → 一轮含工具的对话。若发现问题，0.8.5 可退回带 GLM 线路的版本。')).toBe(false)
+    expect(isAwaitingUserText('所以结论是：请求现在携带了缓存标记，但**未向真实端点发过任何请求**。')).toBe(false)
+    expect(isAwaitingUserText('Five files touched, all inside the allowed set. Two caveats I could not evidence locally and flagged to the parent.')).toBe(false)
+    expect(isAwaitingUserText('变更范围：5 个文件、88 增 4 删，全部在 presets/dispatch/ 与 src/host/agent-preset.ts。')).toBe(false)
+  })
+
+  it('suppresses the gate for a permission offer that carries no tool call', () => {
+    const session = taskSession()
+    session.append('turn/start', { turn: 1 })
+    call(session, 'edit', 'e1')
+    call(session, 'pwsh', 'p1')
+    call(session, 'read', 'r1')
+    session.append('assistant/message', {
+      turn: 1,
+      step: 3,
+      message: createAssistantMessage({
+        content: [{ type: 'text', text: '要我来完成这个干净构建 + 打包对比 + 发布吗？' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      }),
+    }, { surfaceOp: 'append' })
+
+    expect(inspectUserInteractionPause(session.snapshotEvents(), 0, 1)).toEqual({ paused: true, reason: 'assistant awaiting user instructions' })
+    expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ pendingUserInteraction: true, eligible: false, reason: 'user-interaction-paused' })
+  })
 })
 
 /**

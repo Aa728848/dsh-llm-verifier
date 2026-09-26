@@ -1896,6 +1896,43 @@ describe('early candidate review through agent/pre-step', () => {
     expect(calls).toHaveLength(0)
   })
 
+
+  it('stays out of the operator\'s step while the agent is paused for user interaction', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: reviewStream(calls), sessions: [{ id: 'agent-pre', createdAt: 1 }] })
+    // The candidate envelope is real and unprocessed, so without the interaction boundary this step
+    // WOULD be rewritten — exactly what happened on a live permission offer ("要我…吗？"), where the
+    // plugin spent judge calls scoring candidates on a request that carried nothing but the operator's
+    // reply. The pause is recorded in the turn that follows the old ones, i.e. the turn this step
+    // belongs to, and the whole task still counts as eligible work.
+    const events = [
+      ...workflowEvents([candidate('1', 'candidate one'), candidate('2', 'candidate two')]),
+      { type: 'turn/start', seq: 3, data: { turn: 2 } },
+      { type: 'assistant/message', seq: 4, data: { turn: 2, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '要我直接改这处提示词吗？我的建议是补三句：兜底只对当次派发失败的那个任务生效。' }] } } },
+    ]
+    const base = { kind: 'enter' as const, messages: [] }
+    const decision = await handlers.get('agent/pre-step')!({ agent: agent(events), messages: [], turn: 2, step: 2, signal: signal() }, async () => base)
+    expect(decision).toBe(base)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('resumes pre-step routing once the operator replies in a LATER turn', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const { handlers } = assemble(JUDGE, { stream: reviewStream(calls), sessions: [{ id: 'agent-pre', createdAt: 1 }] })
+    // The same pause, but the step being assembled belongs to the NEXT turn: the operator has answered,
+    // so the boundary must not keep suppressing judge work for the rest of the session.
+    const events = [
+      ...workflowEvents([candidate('1', 'candidate one'), candidate('2', 'candidate two')]),
+      { type: 'turn/start', seq: 3, data: { turn: 2 } },
+      { type: 'assistant/message', seq: 4, data: { turn: 2, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '要我直接改这处提示词吗？' }] } } },
+      { type: 'turn/end', seq: 5, data: { turn: 2, reason: { kind: 'completed' } } },
+      { type: 'turn/start', seq: 6, data: { turn: 3 } },
+    ]
+    const decision = await handlers.get('agent/pre-step')!({ agent: agent(events), messages: [], turn: 3, step: 2, signal: signal() }, nextEnter())
+    expect(decision.messages).toHaveLength(1)
+    expect(judgeCalls(calls).length).toBeGreaterThan(0)
+  })
+
   it('skips child sessions unless they are gated and stays out of strict mode', async () => {
     const calls: Array<Record<string, unknown>> = []
     const { handlers } = assemble(JUDGE, { stream: scriptedStream(1, [], calls), sessions: [{ id: 'agent-pre', createdAt: 1 }] })

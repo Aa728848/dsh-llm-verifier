@@ -1341,6 +1341,14 @@ export function apply(ctx: Context, config: Config = {}): void {
     // process-selection cycle here would push the agent to execute a plan the human has not
     // approved yet.
     if (planModeActive(sessionEvents(payload.agent.session))) return decision
+    // The operator's interaction boundary, the same one the stop boundary honours. Arriving here
+    // with the task already paused (a permission offer, an answered `ask_user_question`, a paused
+    // goal, or prose asking for guidance) means this step exists only to deliver the NEXT user
+    // message: injecting candidate feedback or buying a P06 cycle would spend judge calls to steer
+    // an agent that is waiting for a human, on requests that carry nothing but the operator's reply.
+    // `payload.turn` is this step's own turn, so a pause left in an earlier turn no longer suppresses
+    // work the operator has since re-authorised.
+    if (inspectUserInteractionPause(sessionEvents(payload.agent.session), latestDirectUserSeq(sessionEvents(payload.agent.session)) ?? 0, payload.turn) !== undefined) return decision
     // A step carrying a fresh direct or team task belongs to the operator, not to us.
     const carriesTask = payload.messages.some(message => {
       const kind = (message as { source?: { kind?: unknown } }).source?.kind

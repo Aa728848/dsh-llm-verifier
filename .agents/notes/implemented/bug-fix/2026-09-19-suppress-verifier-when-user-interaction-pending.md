@@ -19,10 +19,12 @@ Status: implemented
    - 探测当前回合内是否调用了 `ask_user_question` 工具（支持原生 `tool/call` 与 PTC `tool/ptc-dispatch` / `tool/code-dispatch`），且该调用后当前回合未发生后续实质性工具调用；
    - 探测当前任务内是否存在未恢复的 `update_goal` 暂停或阻塞（`action: 'pause'` / `'blocked'`）；
    - 探测当前回合末尾的 `assistant/message`（排除带活跃 `tool-call` 的消息），提取其可见纯文本（通过 `narrativeText` 排除私有思维链），识别中英文明确询问用户、请求确认、等待指示或暂停执行的句式与问号结尾模式。
+   - **许可征询句式（`需要/要不要/要我…？`、`want|like me to…?`、`等你决定/拍板/回复/确认`）是实践中最常见的暂停**：模型往往先提问、再继续补充论证，问号因此落在消息中部而非结尾，只扫结尾的问号模式与固定句式都会漏判。`USER_QUESTION_PATTERNS` 因此对整条消息匹配这些句式。该规则在 20 个已记录会话的全部回合末消息（44 条无工具调用的消息）上回放验证：原模式命中 8 条，补入后命中 13 条——找回 5 处真实暂停，且没有把任何一条交付报告误判为暂停。
 2. **门禁与路由抑制闭环**：
    - `analyzeAutoTask` 返回 `pendingUserInteraction: true` 与 `eligible: false`（原因标识为 `user-interaction-paused`）；
    - `src/index.ts` 的 `agent/turn-stopping` 在入口处检查 `userInteractionPending`：一旦检测到 Agent 正处于等待用户交互状态，记录日志并立即 `return`，完全跳过 Team Task 验收、结构化进度路由、语义路由与最终验收门禁；
    - 在 `deliveryReady`、`preferFinal` 及回退分支中同步将 `userInteractionPending` 列为前置排他条件；
+   - **`agent/pre-step` 走同一道边界**：S02 候选早评审与 P06 过程选优登记在做任何工作前先调用 `inspectUserInteractionPause`。该入口的暂停窗口绑定`payload.turn`（即宿主传入的当前回合号），因此上一回合遗留的暂停不会继续抑制操作者已经答复后的新工作；
    - 回合自然关闭，保留弹出的选项窗口与助理消息，静待用户回复或触发下一轮交互。
 
 ## Alternatives considered
