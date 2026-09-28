@@ -105,6 +105,15 @@ node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc -b tsconfig.cli
 
 最新在上。每条只写"这一版动了什么、我们怎么应对"，深层理由链到 Agent Note。
 
+### 2026-09-28 → DSH `dsh-v0.2.0-rc.1`
+
+- **跨 minor 新线，peer 门禁必须补**：`0.2.0-rc.1` 不被任何 `^0.1.7-*` 范围覆盖，8 条 `@deepseek-ai/dsh*` peer 各追加 `|| ^0.2.0-rc.1`，`devDependencies` 整体上移；cordis 不在门禁内、vendor 源码零改动，不动。
+- **插件消费面全是加法，源码零改动**：`core/tools` / `core/agent` / `llm/llm` / `settings` / `credentials` / `attachment` / 客户端槽位与图标包源码零改动；`dsh-session` 只新增导出 `ToolCallRecovery`；`ui-conversation` 提交契约新增可选 `source` 参数与 `MessageSubmission`；`ui-primitives` 只新增 `pointerModality` 导出；`api/remotes` 只多挂一个 productAnalytics remote。`tsc` 零错误、739 测试全绿。
+- **唯一行为变化在宿主侧，且恰好落在既有读取上**：step 抛错时 agent-loop 用 `ToolCallRecovery` 补写合成的失败 `tool/result`（`role: 'tool'` 消息、消息级 `isError: true`、`error.code` 为 `TOOL_NOT_STARTED` / `TOOL_OUTCOME_UNKNOWN`）——正是 0.1.7 形态，`toolResultFailed()` 原样读出失败、路由不把合成结果当观测证据。有意不加 `error.code` 特判分支。
+- **本机 checkout == npm `next`**：`pnpm run typecheck` 即验到 0.2.0 公开 API，无需 `typecheck:local`。
+- **复核命令的坑**：`sed` 的 BRE 里 `\|` 是 alternation 不是字面竖线——本轮用 `sed 's/ \|\| \^0\.1\.7…/…/'` 改 peer 范围时把 `package.json` 每个字符间都插入了替换串，靠 `git checkout --` 恢复后改用精确替换。批量改版本线用编辑器的精确字符串替换，别用 sed 正则。
+- 决策全文：`.agents/notes/implemented/architecture/2026-09-22-dsh-0.1.7-alignment.md`（原地更新）
+
 ### 2026-09-25 → DSH `dsh-v0.1.7-rc.2`
 
 - **只换版本线，不动插件代码**：本版落地的「动态工具更新」（`request/header.tools`、工具名变化时追加 `developer/message`，内容为 `tool-addition` / `tool-removal` 块、请求带 `toolHistory`）对本插件全是新增可选面（`GenerateOptions.toolHistory?` / `ToolUpdate` / `Session.toolHistory()` / `PreToolDecision.ask.displayReason?`），工具结果的两种形态与 `MessageSourceMap` 都没变。
@@ -132,7 +141,7 @@ node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc -b tsconfig.cli
 
 ## 6. 已知待决（不要当成 bug 顺手"修"掉）
 
-- **门禁 pin 现锁新线**（`0.1.7-rc.2`）。代价：0.1.1–0.1.6 的**宿主面**不再被自动化类型检查，只靠运行时双形态读取 + 回归测试保证；**客户端面**其余部分只在 0.1.7 类型下受检。想锁回最低基线，需要先把宿主图标换成插件自有的内联 SVG。
+- **门禁 pin 现锁新线**（`0.2.0-rc.1`）。代价：0.1.1–0.1.6 的**宿主面**不再被自动化类型检查，只靠运行时双形态读取 + 回归测试保证；**客户端面**其余部分只在 0.2.0 类型下受检。想锁回最低基线，需要先把宿主图标换成插件自有的内联 SVG。
 - **本机 `typecheck:local` 未接通**（§4 的 junction 没建）。这是有意的：本地 checkout 与 npm `next`/`alpha` 同版时它不带来额外覆盖。
-- **本机 harness checkout 的 `lib/` 比源码旧**：`packages/boot/app-boot/lib/index.js` 是 2026-09-23 22:53 的产物，比该目录里 7 个 rc.2 源码文件旧（产物里有 `skippedBundles`，而 rc.2 新增的 `reportSkippedBundles` 不存在、rc.2 已删除的 `skippedProfileBundles` 还在）；`packages/core/session` / `packages/llm/llm` / `packages/core/tools` 的 `lib/` 同样落后（rc.2 的 `toolUpdate` / `projectToolUpdates` 都不在产物里）。也就是说**全局 `dsh` 已报 `0.1.7-rc.2`（版本号随 `git pull` 立刻变），跑的却是 rc.1 期的构建产物**——"`dsh --version` 是新版"不等于新版代码在跑。核对办法是 `find <pkg>/src -newer <pkg>/lib/index.js` 并抽查一个新符号是否真的出现在 `lib/` 里。注意 peer 强制本身在 rc.1 期代码里就已存在，且运行版本取 `app-boot` 自己的 `package.json`（已是 rc.2），所以门禁照常判定，并不是"尚未生效"。这是 harness 侧的构建状态，需重建 harness 才消解；不属于本仓库的升级动作。
+- **本机 harness checkout 的 `lib/` 比源码旧**：`packages/boot/app-boot/lib/index.js` 是 2026-09-25 00:50 的产物（rc.2 期），比 0.2.0-rc.1 的源码旧；`packages/core/session/lib` 里也没有 0.2.0 新增的 `ToolCallRecovery`。也就是说**全局 `dsh` 已报 `0.2.0-rc.1`（版本号随 `git pull` 立刻变），跑的却是 rc.2 期的构建产物**——"`dsh --version` 是新版"不等于新版代码在跑。核对办法是 `find <pkg>/src -newer <pkg>/lib/index.js` 并抽查一个新符号是否真的出现在 `lib/` 里。注意 peer 强制本身在 rc.1 期代码里就已存在，且运行版本取 `app-boot` 自己的 `package.json`（已是 0.2.0-rc.1），所以门禁照常判定，并不是"尚未生效"。这是 harness 侧的构建状态，需重建 harness 才消解；不属于本仓库的升级动作。
 - **`lib/types/message-source.d.ts` 是孤立产物**：`message-source.ts` 只含类型层声明，运行时被 tree-shake，因此没有对应的 `lib/message-source.js`；包对外的 `lib/types/index.d.ts` 也不引用它，属正常。
