@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { apply } from './index.ts'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
@@ -10,7 +10,13 @@ import { PROPOSAL_CRITERIA } from './core.ts'
 
 const tempDirs: string[] = []
 function tempDir(): string { const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-assembly-')); tempDirs.push(dir); return dir }
-afterEach(() => { for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
+beforeEach(() => {
+  vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('network disabled in test') }))
+})
+afterEach(() => {
+  vi.unstubAllGlobals()
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
 
 /**
  * Assembly-level contract for the four registered tools.
