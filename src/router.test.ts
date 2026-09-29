@@ -1059,6 +1059,20 @@ describe('transactional router state', () => {
     // Without the team-message boundary the router state is undefined and this is refused.
     expect(router.reserve(agent, 'team_task', 'task-1', 1, policy)).toBeDefined()
   })
+  it('ignores user-question-reply and schedule messages when resolving task boundaries', () => {
+    const value = Session.create('session-00000000-0000-4000-8000-000000000079' as never)
+    value.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Real user task' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+    const userTaskSeq = value.snapshotEvents().at(-1)!.seq
+    value.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: '{"answer_to_pending_question":true}' }],
+      source: { kind: 'user-question-reply', callId: 'call-1', outcome: 'answered' } as never,
+    }), { surfaceOp: 'append' })
+    value.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'This is a scheduled message from the user\n[SCHEDULE REMINDER]' }],
+      source: { kind: 'schedule' } as never,
+    }), { surfaceOp: 'append' })
+    expect(latestDirectUserSeq(value.snapshotEvents())).toBe(userTaskSeq)
+  })
   it('releases in-flight state after failure and strict remains blocked', () => {
     const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
     const first = router.reserve(agent, 'compare', 'route-a', 4, { ...policy, mode: 'strict' })!

@@ -56,6 +56,24 @@ describe('current session extraction', () => {
     expect(result.problem).toBe('New assigned task')
   })
 
+  it('ignores user-question-reply and schedule messages as task statements', async () => {
+    const session = Session.create('session-00000000-0000-4000-8000-00000000000b' as never)
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Original task' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: '{"answer_to_pending_question":true}' }],
+      source: { kind: 'user-question-reply', callId: 'call-1', outcome: 'answered' } as never,
+    }), { surfaceOp: 'append' })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'This is a scheduled message from the user\n[SCHEDULE REMINDER]' }],
+      source: { kind: 'schedule' } as never,
+    }), { surfaceOp: 'append' })
+    const agent = { id: session.id, session } as never
+    const result = await extractSession(agent, async () => { throw new Error('no image expected') })
+    expect(result.problem).toBe('Original task')
+    expect(result.trace).not.toContain('answer_to_pending_question')
+    expect(result.trace).not.toContain('SCHEDULE REMINDER')
+  })
+
   it('extracts PTC mode tool/code-dispatch events and redacts content', async () => {
     const session = Session.create('session-00000000-0000-4000-8000-000000000002' as never)
     session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Run PTC task' }], source: { kind: 'user' } }), { surfaceOp: 'append' })

@@ -105,6 +105,14 @@ node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc -b tsconfig.cli
 
 最新在上。每条只写"这一版动了什么、我们怎么应对"，深层理由链到 Agent Note。
 
+### 2026-09-29 → DSH `dsh-v0.2.0-rc.2`
+
+- **对齐 rc.2 预发布线，peer 声明写实**：8 条 `@deepseek-ai/dsh*` peer 各追加 `|| ^0.2.0-rc.2`，`devDependencies` 整体上移至 `^0.2.0-rc.2`。
+- **宿主消费面全是加法与向前兼容，源码零改动**：宿主新增前台超时提问的迟到回答（通过 `agent.steer` 注入，`source.kind: 'user-question-reply'`）与定时提醒（`source.kind: 'schedule'`），`session.ts` 与 `router.ts` 的任务边界判定维持只认 `user` 与 `team-message`，天然将两者排除在任务陈述与任务边界外；`api/remotes` 挂载 `userQuestionsRemote`，`ui-primitives` 导出 `MenuGroup`，对插件无破坏性改动。`tsc` 零错误、741 测试全绿。
+- **补回归测试**：在 `session.test.ts` 与 `router.test.ts` 分别钉住 `extractSession` 与 `latestDirectUserSeq` 对 `user-question-reply` 和 `schedule` 消息的边界排除。
+- **本机 checkout == npm `next`**：`pnpm run typecheck` 即验到 0.2.0-rc.2 公开 API，无需 `typecheck:local`。
+- 决策全文：`.agents/notes/implemented/architecture/2026-09-22-dsh-0.1.7-alignment.md`（原地更新）
+
 ### 2026-09-28 → DSH `dsh-v0.2.0-rc.1`
 
 - **跨 minor 新线，peer 门禁必须补**：`0.2.0-rc.1` 不被任何 `^0.1.7-*` 范围覆盖，8 条 `@deepseek-ai/dsh*` peer 各追加 `|| ^0.2.0-rc.1`，`devDependencies` 整体上移；cordis 不在门禁内、vendor 源码零改动，不动。
@@ -141,7 +149,7 @@ node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc -b tsconfig.cli
 
 ## 6. 已知待决（不要当成 bug 顺手"修"掉）
 
-- **门禁 pin 现锁新线**（`0.2.0-rc.1`）。代价：0.1.1–0.1.6 的**宿主面**不再被自动化类型检查，只靠运行时双形态读取 + 回归测试保证；**客户端面**其余部分只在 0.2.0 类型下受检。想锁回最低基线，需要先把宿主图标换成插件自有的内联 SVG。
+- **门禁 pin 现锁新线**（`0.2.0-rc.2`）。代价：0.1.1–0.1.6 的**宿主面**不再被自动化类型检查，只靠运行时双形态读取 + 回归测试保证；**客户端面**其余部分只在 0.2.0 类型下受检。想锁回最低基线，需要先把宿主图标换成插件自有的内联 SVG。
 - **本机 `typecheck:local` 未接通**（§4 的 junction 没建）。这是有意的：本地 checkout 与 npm `next`/`alpha` 同版时它不带来额外覆盖。
-- **本机 harness checkout 的 `lib/` 比源码旧**：`packages/boot/app-boot/lib/index.js` 是 2026-09-25 00:50 的产物（rc.2 期），比 0.2.0-rc.1 的源码旧；`packages/core/session/lib` 里也没有 0.2.0 新增的 `ToolCallRecovery`。也就是说**全局 `dsh` 已报 `0.2.0-rc.1`（版本号随 `git pull` 立刻变），跑的却是 rc.2 期的构建产物**——"`dsh --version` 是新版"不等于新版代码在跑。核对办法是 `find <pkg>/src -newer <pkg>/lib/index.js` 并抽查一个新符号是否真的出现在 `lib/` 里。注意 peer 强制本身在 rc.1 期代码里就已存在，且运行版本取 `app-boot` 自己的 `package.json`（已是 0.2.0-rc.1），所以门禁照常判定，并不是"尚未生效"。这是 harness 侧的构建状态，需重建 harness 才消解；不属于本仓库的升级动作。
+- **本机 harness checkout 的 `lib/` 比源码旧**：`packages/boot/app-boot/lib/index.js` 是 2026-09-29 01:19 的产物，比 0.2.0-rc.2 的源码（2026-09-29 22:02）稍旧；也就是说**全局 `dsh` 已报 `0.2.0-rc.2`（版本号随 `git pull` 立刻变），跑的却是构建稍旧的产物**——"`dsh --version` 是新版"不等于新版代码在跑。核对办法是比对 mtime 并抽查新符号。注意 peer 强制本身在 rc.1 期代码里就已存在，且运行版本取 `app-boot` 自己的 `package.json`（已是 0.2.0-rc.2），所以门禁照常判定，并不是"尚未生效"。这是 harness 侧的构建状态，需重建 harness 才消解；不属于本仓库的升级动作。
 - **`lib/types/message-source.d.ts` 是孤立产物**：`message-source.ts` 只含类型层声明，运行时被 tree-shake，因此没有对应的 `lib/message-source.js`；包对外的 `lib/types/index.d.ts` 也不引用它，属正常。
