@@ -10,7 +10,8 @@ import { Button, StateDot, type StateDotState } from '@deepseek-ai/dsh-client-ui
 import * as uiPrimitives from '@deepseek-ai/dsh-client-ui-primitives'
 
 /**
- * Icons, resolved by name across the two vocabularies this plugin spans.
+ * The one glyph still borrowed from the host, resolved by name across the two vocabularies this
+ * plugin spans.
  *
  * DSH 0.1.7 renamed the whole host icon set from a size suffix to a stroke suffix
  * (`IconDataOutline16` → `IconDataOutlineRegular`). The icon module is external to this bundle, so
@@ -18,11 +19,13 @@ import * as uiPrimitives from '@deepseek-ai/dsh-client-ui-primitives'
  * React throws on an undefined element type, which would take the entire settings page down
  * instead of dropping one glyph. Probing the namespace at runtime keeps one bundle working on
  * either line; a name that neither line defines renders nothing.
+ *
+ * The statistics mark is deliberately NOT in this list: every host glyph paints on `currentColor`,
+ * so as a guide entry it rendered grey-on-navy. `VerifierSidebarIcon` paints its own brand ramp.
  */
 const hostIcons = uiPrimitives as unknown as Record<string, React.ComponentType<{ size?: number }> | undefined>
-const IconData = hostIcons.IconDataOutlineRegular ?? hostIcons.IconDataOutline16 ?? (() => null)
 const IconRefresh = hostIcons.IconRefreshOutlineRegular ?? hostIcons.IconRefreshOutline16 ?? (() => null)
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage,
   compact, money, duration, dateTime, type I18nDict,
@@ -853,8 +856,8 @@ export function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: 
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ display: 'grid', placeItems: 'center', width: 34, height: 34, borderRadius: 10, background: 'color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent)', color: 'var(--dsw-alias-state-business-primary)' }}>
-              <IconData size={18} />
+            <span style={{ display: 'grid', placeItems: 'center', width: 34, height: 34 }}>
+              <VerifierSidebarIcon size={26} />
             </span>
             <h2 style={{ margin: 0, fontSize: 23 }}>{isGlobal ? t['global.panelTitle'] : t['stats.pageTitle']}</h2>
           </div>
@@ -1027,8 +1030,43 @@ export function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: 
   </main>
 }
 
-export function VerifierSidebarIcon({ size, active }: { size: number; active?: boolean }) {
-  return <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: size, height: size, color: active ? 'var(--dsw-alias-state-business-primary)' : 'currentColor' }}><IconData size={Math.min(18, size)} /></span>
+/**
+ * The statistics mark: a brand-gradient tile carrying the verifier's shield-and-check.
+ *
+ * The host's glyph vocabulary is monochrome by contract (every icon draws on
+ * `currentColor`, and the guide capsule pins that ink to a grey label alias), so a
+ * host icon registered as a guide entry always reads as grey-on-navy — dim next
+ * to a plugin whose glyph is coloured. This mark therefore ships its own paint:
+ * the same violet→blue→teal ramp the dashboard header already wears, a white
+ * shield, and a check cut back out of the ramp in the badge's own coordinates.
+ *
+ * Props follow the host's `IconProps` shape (`size` is the square edge in px,
+ * `className` is for placement), so the same component serves the guide capsule
+ * (26px) and the dashboard header (26px in a 34px well).
+ *
+ * @param props - rendered size and placement class.
+ * @returns the statistics badge.
+ */
+export function VerifierSidebarIcon({ size = 26, className }: { size?: number; className?: string }) {
+  // useId keeps two badges on one page from sharing a gradient: a duplicate id
+  // would make the second one paint from the first one's <defs>. Colons are
+  // stripped because the id is referenced as a url(#…) fragment.
+  const gradientId = `llm-verifier-badge-${useId().replace(/[^a-zA-Z0-9-]/g, '')}`
+  const paint = `url(#${gradientId})`
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <defs>
+        <linearGradient id={gradientId} x1="1.5" y1="1" x2="22.5" y2="23" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#8A63FF" />
+          <stop offset="0.5" stopColor="#4F7BFF" />
+          <stop offset="1" stopColor="#2FC5C9" />
+        </linearGradient>
+      </defs>
+      <rect width="24" height="24" rx="7.5" fill={paint} />
+      <path d="M12 4.4 18.4 6.9v5.2c0 3.6-2.7 6.4-6.4 7.6-3.7-1.2-6.4-4-6.4-7.6V6.9L12 4.4Z" fill="#FFFFFF" fillOpacity="0.94" />
+      <path d="M8.8 12.3 11 14.5 15.3 9.7" stroke={paint} strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
 }
 
 export function GlobalVerifierDashboard({ rpc }: { rpc: any }) {

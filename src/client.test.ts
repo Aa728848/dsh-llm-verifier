@@ -871,6 +871,11 @@ describe('client activity card structure', () => {
  * the rename, and React throws on an undefined element type — the settings page would fail to
  * render at all rather than lose one glyph. The regression pins the runtime probe that replaces the
  * named import, in the source-scan style the two suites above already use.
+ *
+ * The statistics mark is the other half of this story: every host glyph paints on `currentColor`,
+ * and the guide capsule pins that ink to a grey label alias, so a host glyph registered there is
+ * necessarily monochrome. It is painted locally instead, and that has to stay true — swapping the
+ * badge back for a host icon would bring the grey one back without failing any other test.
  */
 describe('client host icon resolution', () => {
   const read = (): string => readFileSync(fileURLToPath(new URL('./client.tsx', import.meta.url)), 'utf8')
@@ -884,10 +889,23 @@ describe('client host icon resolution', () => {
 
   it('probes both vocabularies in order and renders nothing when neither is present', () => {
     const source = read()
-    expect(source).toContain('hostIcons.IconDataOutlineRegular ?? hostIcons.IconDataOutline16')
     expect(source).toContain('hostIcons.IconRefreshOutlineRegular ?? hostIcons.IconRefreshOutline16')
-    // One fallback per icon: an absent name drops the glyph instead of handing React `undefined`.
-    expect(source.match(/\?\? \(\(\) => null\)/g)?.length).toBe(2)
+    // One fallback per borrowed icon: an absent name drops the glyph instead of handing React `undefined`.
+    expect(source.match(/\?\? \(\(\) => null\)/g)?.length).toBe(1)
+  })
+
+  it('paints the statistics mark itself instead of borrowing a monochrome host glyph', () => {
+    const source = read()
+    const badge = /export function VerifierSidebarIcon[\s\S]*?\n}/.exec(source)?.[0] ?? ''
+    expect(badge).not.toBe('')
+    // A locally painted mark: an inline SVG with its own gradient, on the host's IconProps shape.
+    expect(badge).toContain('<svg width={size} height={size} viewBox="0 0 24 24"')
+    expect(badge).toContain('<linearGradient id={gradientId}')
+    expect(badge).toContain('useId()')
+    expect(badge).not.toMatch(/hostIcons\./)
+    // The guide capsule and the dashboard header are the two surfaces that show it.
+    expect(source).toContain('icon: VerifierSidebarIcon,')
+    expect(source).toContain('<VerifierSidebarIcon size={26} />')
   })
 })
 

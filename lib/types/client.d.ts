@@ -192,9 +192,26 @@ interface StatisticsPageProps {
 }
 export declare function VerifierSettings({ remote }: VerifierSettingsProps): import("react").JSX.Element;
 export declare function StatisticsPage({ sessionId, rpc, isGlobal, blankComposerSeat }: StatisticsPageProps): import("react").JSX.Element;
-export declare function VerifierSidebarIcon({ size, active }: {
-    size: number;
-    active?: boolean;
+/**
+ * The statistics mark: a brand-gradient tile carrying the verifier's shield-and-check.
+ *
+ * The host's glyph vocabulary is monochrome by contract (every icon draws on
+ * `currentColor`, and the guide capsule pins that ink to a grey label alias), so a
+ * host icon registered as a guide entry always reads as grey-on-navy — dim next
+ * to a plugin whose glyph is coloured. This mark therefore ships its own paint:
+ * the same violet→blue→teal ramp the dashboard header already wears, a white
+ * shield, and a check cut back out of the ramp in the badge's own coordinates.
+ *
+ * Props follow the host's `IconProps` shape (`size` is the square edge in px,
+ * `className` is for placement), so the same component serves the guide capsule
+ * (26px) and the dashboard header (26px in a 34px well).
+ *
+ * @param props - rendered size and placement class.
+ * @returns the statistics badge.
+ */
+export declare function VerifierSidebarIcon({ size, className }: {
+    size?: number;
+    className?: string;
 }): import("react").JSX.Element;
 export declare function GlobalVerifierDashboard({ rpc }: {
     rpc: any;
