@@ -105,7 +105,8 @@
     "src",
     "scripts",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && tsdown && node scripts/sync-installed-profiles.mjs",
@@ -113,7 +114,11 @@
     "typecheck:local": "node scripts/check-harness-types.mjs && tsc --noEmit -p tsconfig.local.json",
     "test": "vitest run",
     "verify:release": "pnpm run typecheck && pnpm test && pnpm run build",
-    "prepublishOnly": "pnpm run verify:release"
+    "prepublishOnly": "pnpm run verify:release",
+    "release": "node .dsh/skills/release-plugin/scripts/release.mjs"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
 }
