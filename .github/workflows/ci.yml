@@ -23,7 +23,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
+          # `cache: pnpm` makes setup-node shell out to `pnpm store path`, which
+          # aborts here with "packages field missing or empty": no
+          # pnpm-workspace.yaml exists, so pnpm resolves no packages and the
+          # store query fails. This failed on BOTH matrices, so the whole CI
+          # pipeline was red before a single test ran. Caching a single-install
+          # pipeline is not worth an implicit dependency on pnpm's store layout.
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
       - run: pnpm run build

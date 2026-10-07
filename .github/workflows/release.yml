@@ -37,7 +37,16 @@ jobs:
         with:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
-          cache: pnpm
+
+          # `cache: pnpm` makes setup-node shell out to `pnpm store path`, which
+          # aborts here with "packages field missing or empty" on a fresh
+          # checkout: no pnpm-workspace.yaml exists, so pnpm resolves no packages
+          # and the store query fails. This release workflow had never run, so
+          # the broken step was never surfaced before a tag hit it.
+          #
+          # Caching is not worth a fragile implicit dependency on pnpm's store
+          # layout for a release that installs once. Drop it rather than pin a
+          # second cache mechanism around it.
 
       - name: Parse version information
         id: version_info
