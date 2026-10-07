@@ -144,7 +144,19 @@ describe('ScoreCache', () => {
   })
 
   it('resolves cache file path correctly', () => {
-    expect(resolveCacheFile('C:\\foo\\bar')).toBe('C:\\foo\\bar\\scores-v1.json')
+    // Build the input with the host separator and assert with host
+    // functions. A literal 'C:\\foo\\bar' made this test pass on Windows
+    // only by coincidence: on POSIX, isAbsolute and join both use '/', so
+    // the Windows path was treated as RELATIVE and resolved against cwd,
+    // yielding cwd + 'C:\\foo\\bar/scores-v1.json'. The assertion then
+    // failed on ubuntu while the code under test was correct. The point of
+    // the test is the join and the relative/absolute branch, both of which
+    // are platform-independent when expressed in platform terms.
+    const base = join(tmpdir(), 'cache-root')
+    expect(resolveCacheFile(base)).toBe(join(base, 'scores-v1.json'))
+
+    // A relative dir resolves against cwd rather than being taken as-is.
+    expect(resolveCacheFile('relative-dir')).toBe(join(process.cwd(), 'relative-dir', 'scores-v1.json'))
   })
 
   it('computes stableHash deterministically', () => {
