@@ -110,13 +110,41 @@ jobs:
         id: pack
         shell: bash
         run: |
-          TARBALL=$(pnpm pack)
-          echo "tarball=$TARBALL" >> $GITHUB_OUTPUT
+          # `pnpm pack` prints the whole file manifest on stdout (197 lines for
+          # this package) with the tarball name as the last of them. Capturing
+          # stdout wholesale puts all of that into $GITHUB_OUTPUT, so the
+          # `files:` input of the release action receives a multi-line blob
+          # instead of a path and the upload fails. Select the single line that
+          # ends in .tgz rather than the whole stream, and write it with printf
+          # so the value is literal.
+          pnpm pack > pack.log
+          TARBALL=$(grep -E '\.tgz$' pack.log | tail -n 1 | tr -d '\r')
+          if [ -z "$TARBALL" ]; then
+            echo "::error::could not find a .tgz filename in pnpm pack output"
+            tail -n 20 pack.log
+            exit 1
+          fi
+          printf 'tarball=%s\n' "$TARBALL" >> "$GITHUB_OUTPUT"
           echo "Packaged: $TARBALL"
 
       - name: Publish to npm
         shell: bash
         run: |
+          # A missing secret and an expired one both surface as a bare ENEEDAUTH,
+          # which reads like an npm outage and sends you looking in the wrong
+          # place. Guard the empty case with the exact remediation, then prove
+          # the credential can actually publish before the real attempt.
+          #
+          # The token must be an *Automation* token: a Publish token requires an
+          # interactive 2FA OTP that no CI runner can answer, so npm rejects it
+          # the same way it rejects a missing one.
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error title=Missing NPM_TOKEN::This repository has no NPM_TOKEN secret, so npm publish cannot authenticate. Create an Automation token (npm token create --automation), then add it with: gh secret set NPM_TOKEN"
+            exit 1
+          fi
+
+          npm whoami --registry https://registry.npmjs.org/
+
           if [ "${{ steps.version_info.outputs.is_prerelease }}" = "true" ]; then
             echo "Publishing prerelease to npm with tag ${{ steps.version_info.outputs.dist_tag }}..."
             pnpm publish --access public --no-git-checks --tag "${{ steps.version_info.outputs.dist_tag }}"
