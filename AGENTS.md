@@ -51,11 +51,11 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 | `criteria.ts` | 判据解析：内置预设直取，自定义 Markdown 缓存重读，失败安全回退至 coding |
 | `replay.ts` | 离线回放：重放阈值、重放解析器、汇总周期与分臂读数（配套 `scripts/eval-replay.mjs`） |
 | `.agents/notes/` | Agent Notes：非平凡变更的决策日志（格式与纪律见 `.agents/notes/README.md`） |
-| `.agents/skills/` | 维护技能：`dsh-version-upgrade`（DSH 版本升级流程、反复踩到的陷阱、每次升级的要点索引）。发现指针是仓库根的 `.claude/skills` → `../.agents/skills` |
+| `.agents/skills/` | 维护技能：`dsh-version-upgrade`（DSH 版本升级流程、反复踩到的陷阱、每次升级的要点索引） |
 
 ## 硬性规矩
 
-1. **改 `src/` 必须 `pnpm run build` 并连同 `lib/` 一起提交**。`lib/` 是宿主加载的入库产物。`build` 脚本已集成 profile 刷新与解除硬链接（`breakHardlinks`），防止 Windows NTFS 64位 FileId 碰撞引发 `npm publish` 报 `415 Hard link is not allowed`。
+1. **改 `src/` 必须 `pnpm run build`，但 `lib/` 是构建产物、不得入库**。`lib/` 已在 `.gitignore` 中解除跟踪，宿主加载的那份由发布时的 `prepublishOnly`（`verify:release`）重新生成，再经 `files` 字段打进 tarball；仓库里看不到它属于正常状态。`build` 末尾的 `scripts/sync-installed-profiles.mjs` 仍不可省：它刷新已安装该插件的 profile 副本并执行解除硬链接（`breakHardlinks`），防止 Windows NTFS 64位 FileId 碰撞引发 `npm publish` 报 `415 Hard link is not allowed`。
 2. **提交前跑 `pnpm run verify:release`**。提交信息遵守英文 conventional commits（`fix:` / `feat:` / `chore:`），版本号单独一次 `chore: bump ...`。
 3. **`sanitizeVerifierText` 返回值必须 ≤ `maxChars`**，截断提示文字必须计入预算。超出一个字符会导致 `boundDecision` 将整条自动路由丢弃。
 4. **凡进入提示词的证据必须单项与总量双层限长**。新增候选/检查点来源必须通过 `itemBudget()` 分摊总预算（保持 $\Sigma \le autoRouteMaxInputChars$ 且单项 $\le autoRouteMaxItemChars$），不可用裸值直接截断。语义路由按**实际渲染文本**（含分隔标记与 ID）计量。
@@ -173,4 +173,4 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 
 ## 发布
 
-`pnpm publish` 触发 `prepublishOnly`，自动执行 `pnpm run verify:release`（按锁定版本运行 `typecheck`、`vitest` 及重建 `lib/`）。打包内容由 `package.json` 中的 `files` 字段声明（`lib`、`src`、`scripts`、`cordis.patch.yml`、`README.md`）；发版前需单独通过 commit 递增版本号。
+`pnpm publish` 触发 `prepublishOnly`，自动执行 `pnpm run verify:release`（按锁定版本运行 `typecheck`、`vitest` 及重建 `lib/`）。打包内容由 `package.json` 中的 `files` 字段声明（`lib`、`src`、`scripts`、`cordis.patch.yml`、`README.md`、`CHANGELOG.md`）；发版前需单独通过 commit 递增版本号。`lib/` 虽不入库，却必须由 `prepublishOnly` 在打包前重建——否则 tarball 里会缺宿主实际加载的产物。
