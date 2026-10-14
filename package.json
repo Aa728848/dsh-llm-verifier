@@ -2,6 +2,7 @@
   "name": "dsh-llm-verifier",
   "version": "0.9.4",
   "description": "Configurable DSH-native LLM verifier with a Web settings page",
+  "icon": "./icon.svg",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Aa728848/dsh-llm-verifier.git"
@@ -102,6 +103,7 @@
   },
   "files": [
     "lib",
+    "icon.svg",
     "src",
     "scripts",
     "cordis.patch.yml",

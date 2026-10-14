@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="DSH LLM Verifier">
+  <title>DSH LLM Verifier</title>
+  <defs>
+    <linearGradient id="llm-verifier-icon" x1="3" y1="2" x2="45" y2="46" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8A63FF"/>
+      <stop offset="0.5" stop-color="#4F7BFF"/>
+      <stop offset="1" stop-color="#2FC5C9"/>
+    </linearGradient>
+  </defs>
+  <rect width="48" height="48" rx="15" fill="url(#llm-verifier-icon)"/>
+  <path d="M24 8.8 36.8 13.8v10.4c0 7.2-5.4 12.8-12.8 15.2C16.6 37 11.2 31.4 11.2 24.2V13.8L24 8.8Z" fill="#FFFFFF" fill-opacity="0.94"/>
+  <path d="M17.6 24.6 22 29l8.6-9.6" fill="none" stroke="url(#llm-verifier-icon)" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
