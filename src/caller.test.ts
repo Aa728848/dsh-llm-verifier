@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RequestLimiter, callVerifier, fallbackDeepFreeze, generateCandidate, generationClient, partialUsage, requestAttempts } from './caller.ts'
-import { TopLogprobCapabilityCache } from './top-logprobs.ts'
+import { TopLogprobCapabilityCache, TopLogprobsBudgetError } from './top-logprobs.ts'
 
 function chunks(text = '<score_A> A </score_A>') { return [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'text-delta', index: 0, text }, { type: 'block-end', index: 0, block: { type: 'text', text } }, { type: 'usage', usage: { inputTokens: 7, cacheReadTokens: 3, outputTokens: 4, reasoningTokens: 2 } }, { type: 'finish', reason: { kind: 'stop' } }] as any[] }
 /** The same stream, but the model stopped because it ran into the output ceiling. */
@@ -82,6 +82,48 @@ describe('automatic verifier scoring', () => {
     // No route at all: nothing was attempted, so nothing was downgraded.
     const noRoute = await callVerifier(config(async function* () { yield* streamOf(chunks()) }), 'prompt')
     expect(noRoute.channelFallback).toBeUndefined()
+  })
+
+  // A judge whose reasoning ate the whole output budget is a configuration problem, not a capability
+  // answer. Three things must hold at once: the request is NOT retried (the failure reproduces
+  // identically and every attempt costs a full-budget reasoning call), the route is NOT marked
+  // unsupported (that would degrade it to explicit tags for 24h purely on the strength of maxTokens),
+  // and the error still names the budget so the operator can act on it.
+  it('surfaces a budget-exhausted judge without retrying it or poisoning the capability memory', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: '' }, finish_reason: 'length' }],
+      usage: { prompt_tokens: 10, completion_tokens: 512 },
+    }), { status: 200 }))
+    vi.stubGlobal('fetch', fetcher)
+    const context = ctx({ providers: { openai: { api: 'openai-completions', baseURL: 'https://example.test/v1' } } })
+    const capabilities = new TopLogprobCapabilityCache()
+    let streamed = 0
+    const cfg = config(async function* () { streamed += 1; yield* streamOf(chunks()) }, vi.fn(), context, { maxTokens: 65536, maxRetries: 2, topLogprobCapabilities: capabilities })
+    const error = await callVerifier(cfg, 'prompt').catch(reason => reason)
+    expect(error).toBeInstanceOf(TopLogprobsBudgetError)
+    expect(error.message).toContain('65536')
+    // Deterministic failure: one paid attempt even with a retry budget of 2.
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    // The capability memory must stay clean, or the whole topic loses this judge's logprob channel.
+    expect(capabilities.isUnsupported('openai', 'gpt-5')).toBe(false)
+    // ...and it must not quietly score through the DSH stream instead: that hides the misconfiguration.
+    expect(streamed).toBe(0)
+  })
+
+  // The retry heuristic sees only the message text, so a plain failure that merely QUOTES a large
+  // token budget used to read as an HTTP 5xx ("65536" contains "553") and burn the entire retry
+  // budget on a perfectly reproducible error. This is the boundary the digit anchoring protects.
+  it('does not retry a plain failure whose message only quotes a large token budget', async () => {
+    const cfg = config(async function* () { throw new Error("llm-verifier: top_logprobs returned no answer logprobs (finish_reason='length', reasoning consumed the 65536-token budget); raise the judge maxTokens or lower the reasoning effort") }, vi.fn(), ctx(), { maxRetries: 2, retryBaseDelayMs: 1 })
+    const error = await callVerifier(cfg, 'prompt').catch(reason => reason)
+    expect(requestAttempts(error)).toBe(1)
+  })
+
+  // The other half of the same boundary: a genuine server-side status must STILL be retried.
+  it('still retries a plain failure carrying a bare HTTP 5xx status', async () => {
+    const cfg = config(async function* () { throw new Error('llm-verifier: top_logprobs request failed with HTTP 503: upstream overloaded') }, vi.fn(), ctx(), { maxRetries: 2, retryBaseDelayMs: 1 })
+    const error = await callVerifier(cfg, 'prompt').catch(reason => reason)
+    expect(requestAttempts(error)).toBe(3)
   })
 
   it('carries the spent attempt count on a finally-failed request', async () => {

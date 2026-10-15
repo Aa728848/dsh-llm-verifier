@@ -399,6 +399,22 @@ describe('review stage framing', () => {
     expect(buildPairwisePrompt('task', 'A body', 'B body', criterion, DEFAULT_GROUND_TRUTH_NOTE, { domain: 'custom' })).toBe(base)
   })
 
+  // The default note is the plugin's answer to "reads professional but actually failed". Its four
+  // distinctions are what stop confident prose from scoring as verified work, so they are pinned
+  // here instead of being left to whatever a future trim of the sentence happens to keep.
+  it('keeps the distinctions that stop confident prose from scoring as verified work', () => {
+    const note = DEFAULT_GROUND_TRUTH_NOTE
+    // Polished summaries and "fully verified" claims show up in failed runs too, so a MISSING
+    // admission is not evidence either way.
+    expect(note).toContain('the absence of admitted problems is not evidence')
+    // An admission, however, IS evidence and has to weigh.
+    expect(note).toMatch(/Problems the agent admits ARE evidence/)
+    // Hedging, expressed uncertainty and trajectory length carry no signal at all.
+    expect(note).toContain('hedging, expressed uncertainty and trajectory length are all neutral')
+    // Substance and how it was checked, never the tone.
+    expect(note).toContain('Judge the substance and how it was checked, not the tone')
+  })
+
   it('renders an optional reference context as its own nonce-terminated data block', () => {
     const without = buildPairwisePrompt('task', 'A body', 'B body', criterion)
     // Absent or blank context must leave the historical prompt — and its cache entry — untouched.

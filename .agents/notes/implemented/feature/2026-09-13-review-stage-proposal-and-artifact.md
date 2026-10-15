@@ -65,7 +65,7 @@ Status: implemented
 
 ## Consequences
 
-- 默认路径逐字不变：省略 `review_stage` 的调用、`coding` 判据的提示词文本、缓存身份（`version 6`）、
+- 默认路径逐字不变：省略 `review_stage` 的调用、`coding` 判据的提示词文本、缓存身份（该变更时为 `version 6`，现为 `version 7`）、
   去重凭据与自动路由行为都与改动前一致；`AGENTS.md` 中「两次比较共用判据」的旧规约已同步修订为两阶段默认不同判据。
 - 代价是**同一份文本可能被评两次**（proposal 一次、带证据的 artifact 一次）。这是有意的：两者问的不是
   同一个问题；缓存键因提示词不同而自然分开，因此两次都真实付费。

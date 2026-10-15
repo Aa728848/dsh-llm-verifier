@@ -42,7 +42,7 @@ export function fallbackDeepFreeze<T>(value: T): T {
 }
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { CompletionLogprobs } from './core.ts'
-import { TopLogprobCapabilityCache, TopLogprobsUnsupportedError, callTopLogprobs, resolveTopLogprobRoute } from './top-logprobs.ts'
+import { TopLogprobCapabilityCache, TopLogprobsBudgetError, TopLogprobsUnsupportedError, callTopLogprobs, resolveTopLogprobRoute } from './top-logprobs.ts'
 import type { Context } from '@deepseek-ai/cordis'
 
 export interface VerifierClientConfig {
@@ -180,7 +180,16 @@ function usage(attempts: number, value = {} as { inputTokens?: number; outputTok
 }
 
 /** Transient failures worth another attempt; anything else fails fast. */
-const RETRYABLE_MESSAGE = /rate|quota|timeout|timed out|temporar|network|fetch|socket|5\d\d/i
+/**
+ * Transient-failure heuristic applied to a thrown message.
+ *
+ * The `5\d\d` arm matches a bare HTTP 5xx status and is therefore ANCHORED to digit boundaries:
+ * an unanchored `5\d\d` matches any three-digit run starting with 5, so an ordinary figure like a
+ * 65536-token output budget hit "553" and made a perfectly reproducible configuration failure look
+ * retryable — four full-budget judge calls before reporting the same error. "HTTP 503" still
+ * matches (the space is a boundary); "65536" no longer does (both sides of "553" are digits).
+ */
+const RETRYABLE_MESSAGE = /rate|quota|timeout|timed out|temporar|network|fetch|socket|(?:^|[^0-9])5\d\d(?:[^0-9]|$)/i
 
 /**
  * Run one logical verifier request under the configured timeout, retrying
@@ -268,7 +277,11 @@ async function retrying<T>(config: VerifierClientConfig, signal: AbortSignal | u
       if (signal?.aborted) cancel(signal.reason ?? error, billed, unknownFailure || billed === undefined)
       // A deadline abort is retryable even when the adapter wraps the reason in
       // its own error type with an unrelated message.
-      const retryable = timedOut || (error instanceof Error && RETRYABLE_MESSAGE.test(error.message))
+      // TopLogprobsBudgetError is excluded on purpose: it quotes the judge's output budget, and a
+      // budget like 65536 contains "553" — which RETRYABLE_MESSAGE reads as an HTTP 5xx. The
+      // underlying failure (reasoning ate the whole budget) reproduces identically on every attempt,
+      // so retrying would only buy 4x the reasoning bill before reporting the same error.
+      const retryable = timedOut || (error instanceof Error && !(error instanceof TopLogprobsBudgetError) && RETRYABLE_MESSAGE.test(error.message))
       if (attempt > config.maxRetries || !retryable) {
         // Every attempt of the chain goes onto the thrown error: the last response alone would
         // report a fraction of the requests and tokens the invocation really spent.

@@ -38,6 +38,43 @@ export class TopLogprobsUnsupportedError extends Error { constructor(message: st
  * this topic to the DSH stream instead of failing the whole verification.
  */
 export class TopLogprobsRouteError extends TopLogprobsUnsupportedError { constructor(message: string, readonly status?: number) { super(message); this.name = 'TopLogprobsRouteError' } }
+/**
+ * A deterministic, non-transient failure of the direct transport: the provider DID answer, but the
+ * answer cannot be scored and no second attempt can change that. Upstream v0.3.0 splits exactly this
+ * condition out of the capability path for the same reason.
+ *
+ * Deliberately NOT a {@link TopLogprobsUnsupportedError}: `callAutomatic` catches that type to
+ * `markUnsupported(provider, model)`, so a route whose reasoning merely ate the output budget would be
+ * remembered for 24h as a model that cannot do logprobs at all — a capability-cache lie that outlives
+ * the misconfiguration that caused it. It is also excluded from the shared retry heuristic, because
+ * the message quotes the budget figure and that figure can read as a transient HTTP 5xx code while the
+ * failure itself is perfectly reproducible.
+ */
+export class TopLogprobsBudgetError extends Error { constructor(message: string) { super(message); this.name = 'TopLogprobsBudgetError' } }
+
+/**
+ * Classify a 200 response that carries no token logprob row.
+ *
+ * Different causes hide behind "no rows", and reporting them as one is how a configuration mistake
+ * turns into a 24h capability-cache entry:
+ *
+ * 1. `finish_reason: 'length'` — reasoning consumed the whole output budget before the answer
+ *    started. Raising `maxTokens` or lowering the reasoning effort fixes it, so this surfaces as
+ *    {@link TopLogprobsBudgetError} and never reaches the capability memory.
+ * 2. Every other finish reason — the route keeps its capability-probe meaning
+ *    ({@link TopLogprobsUnsupportedError}): a provider that answers while ignoring `logprobs` is
+ *    exactly the answer the probe exists to collect.
+ *
+ * The finish reason is recorded either way, so "this model produced no answer" stays readable apart
+ * from "this model cannot report logprobs".
+ * @param finishReason - `choices[0].finish_reason` as a trimmed string, when the provider sent one.
+ * @param maxTokens - the output budget actually requested, quoted back in the budget message.
+ * @returns The error to throw for a response that carries no logprob rows.
+ */
+function noLogprobsError(finishReason: string | undefined, maxTokens: number): Error {
+  if (finishReason === 'length') return new TopLogprobsBudgetError(`llm-verifier: top_logprobs returned no answer logprobs (finish_reason='length', reasoning consumed the ${maxTokens}-token budget); raise the judge maxTokens or lower the reasoning effort`)
+  return new TopLogprobsUnsupportedError('provider returned no token logprobs (finish_reason=' + (finishReason ?? 'unknown') + ', no answer emitted)')
+}
 
 function object(value: unknown): Record<string, unknown> | undefined { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined }
 function text(value: unknown): string | undefined { return typeof value === 'string' && value.trim() ? value.trim() : undefined }
@@ -127,7 +164,7 @@ export async function callTopLogprobs(route: TopLogprobRoute, model: string, pro
   const answer = typeof message?.content === 'string' ? message.content : ''
   const logprobs = object(choice?.logprobs)
   const rows = Array.isArray(logprobs?.content) ? logprobs.content : []
-  if (!rows.length) throw new TopLogprobsUnsupportedError('provider returned no token logprobs')
+  if (!rows.length) throw noLogprobsError(text(choice?.finish_reason), maxTokens)
   const tokens: string[] = []
   const positions: TokenAlternative[][] = []
   for (const rawRow of rows) {

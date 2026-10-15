@@ -25,7 +25,7 @@ describe('config - judges ensemble resolution', () => {
     expect('reasoningEffort' in resDefault.judges[0]).toBe(false)
     expect(resDefault.judges[0].provider).toBe('deepseek-official')
     expect(resDefault.judges[0].model).toBe('deepseek-flash')
-    expect(resDefault.judges[0].maxTokens).toBe(32768)
+    expect(resDefault.judges[0].maxTokens).toBe(65536)
     expect(resDefault.judges[0].label).toBe('deepseek-flash')
 
     const resEmptyArray = resolveConfig({ extraJudges: [] })
@@ -38,7 +38,7 @@ describe('config - judges ensemble resolution', () => {
       provider: 'deepseek-official',
       model: 'deepseek-flash',
       reasoningEffort: 'high',
-      maxTokens: 32768,
+      maxTokens: 65536,
       label: 'deepseek-flash',
     })
   })
@@ -516,7 +516,7 @@ describe('config - settings payload seam', () => {
     expect(parsed.extraJudges).toEqual(payload)
     const resolved = resolveConfig(parsed)
     expect(resolved.judges.map(judge => judge.label)).toEqual(['deepseek-flash', 'Second opinion', 'claude-3-5-sonnet', 'qwen3'])
-    expect(resolved.judges.map(judge => judge.maxTokens)).toEqual([32768, 32768, 32768, 32768])
+    expect(resolved.judges.map(judge => judge.maxTokens)).toEqual([65536, 65536, 65536, 65536])
   })
 
   it('carries the criteria preset across the settings schema, JSON boundary and resolveConfig', () => {

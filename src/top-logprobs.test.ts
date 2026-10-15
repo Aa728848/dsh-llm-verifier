@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { CAPABILITY_TTL_MS, TopLogprobCapabilityCache, callTopLogprobs, resolveCapabilityFile, resolveTopLogprobRoute } from './top-logprobs.ts'
+import { CAPABILITY_TTL_MS, TopLogprobCapabilityCache, TopLogprobsBudgetError, TopLogprobsUnsupportedError, callTopLogprobs, resolveCapabilityFile, resolveTopLogprobRoute } from './top-logprobs.ts'
 
 describe('TopLogprobCapabilityCache persistence', () => {
   it('round-trips marks across instances through the capability file', async () => {
@@ -249,4 +249,54 @@ describe('resolveTopLogprobRoute settings seam', () => {
     ] })).resolves.toEqual({ baseURL: 'https://ok.example/v1', apiKey: 'secret', deepSeekThinking: false })
   })
 })
+describe('callTopLogprobs no-logprob classification', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  const route = { baseURL: 'https://api.example/v1', apiKey: 'test-key', deepSeekThinking: false }
+  /** A response the provider answered but that carries no token distribution at all. */
+  const answerWithoutLogprobs = (finishReason?: string) => ({
+    choices: [{ message: { content: '' }, ...(finishReason === undefined ? {} : { finish_reason: finishReason }) }],
+    usage: { prompt_tokens: 10, completion_tokens: 512 },
+  })
+  const stub = (body: unknown) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })))
+  }
+
+  // Reasoning ate the whole output budget. This is a configuration problem, so it must NOT be a
+  // TopLogprobsUnsupportedError: callAutomatic catches that type to markUnsupported(provider, model),
+  // which would remember a route whose only fault was maxTokens as "cannot do logprobs" for 24h.
+  it('raises a non-capability budget error when reasoning exhausted the output budget', async () => {
+    stub(answerWithoutLogprobs('length'))
+    const error = await callTopLogprobs(route, 'gpt-5', 'prompt', 65536).catch(reason => reason)
+    expect(error).toBeInstanceOf(TopLogprobsBudgetError)
+    expect(error).not.toBeInstanceOf(TopLogprobsUnsupportedError)
+    expect(error.message).toContain("finish_reason='length'")
+    // The actionable half: the budget actually requested, plus both ways out.
+    expect(error.message).toContain('65536')
+    expect(error.message).toMatch(/raise the judge maxTokens or lower the reasoning effort/)
+  })
+
+  // The probe still answers the question it was built for: a provider that IGNORES the logprobs
+  // parameter and returns a normal completion is the capability answer, and must keep marking the
+  // route unsupported so the automatic channel degrades to explicit tags.
+  it('keeps the capability-probe semantics when the provider simply returns no token logprobs', async () => {
+    stub(answerWithoutLogprobs('stop'))
+    const stopped = await callTopLogprobs(route, 'gpt-5', 'prompt', 4096).catch(reason => reason)
+    expect(stopped).toBeInstanceOf(TopLogprobsUnsupportedError)
+    expect(stopped).not.toBeInstanceOf(TopLogprobsBudgetError)
+    expect(stopped.message).toContain('provider returned no token logprobs')
+    // ...but the cause is now readable: this model stopped WITHOUT emitting an answer.
+    expect(stopped.message).toContain('finish_reason=stop')
+    expect(stopped.message).toContain('no answer emitted')
+  })
+
+  // A provider that omits finish_reason entirely is still a capability answer, not a budget fault.
+  it('treats a missing finish_reason as an unsupported route rather than an exhausted budget', async () => {
+    stub(answerWithoutLogprobs())
+    const error = await callTopLogprobs(route, 'gpt-5', 'prompt', 4096).catch(reason => reason)
+    expect(error).toBeInstanceOf(TopLogprobsUnsupportedError)
+    expect(error).not.toBeInstanceOf(TopLogprobsBudgetError)
+    expect(error.message).toContain('finish_reason=unknown')
+  })
+})
+
 

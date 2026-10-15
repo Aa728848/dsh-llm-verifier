@@ -179,8 +179,8 @@ describe('VerifierEngine cache identity', () => {
     expect(labels.filter(label => !label.startsWith('baseline: '))).toHaveLength(3)
   })
 
-  it('uses version 6 in scoreOne cache identity with temperature (regression FIX 1)', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-engine-v6-'))
+  it('uses version 7 in scoreOne cache identity with temperature (regression FIX 1)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-engine-v7-'))
     try {
       const file = join(dir, 'scores.json')
       const options = { problem: 'task', candidateA: 'AAA', candidateB: 'BBB', repeats: 1 }
@@ -192,7 +192,7 @@ describe('VerifierEngine cache identity', () => {
       const { stableHash } = await import('./cache.ts')
       const prompt = (await import('./core.ts')).buildPairwisePrompt(options.problem, options.candidateA, options.candidateB, (await import('./core.ts')).DEFAULT_CRITERIA[0]!)
       const expectedKey = stableHash({
-        version: 6,
+        version: 7,
         provider: 'openai',
         model: 'gpt-5',
         effort: 'high',

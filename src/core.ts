@@ -387,7 +387,7 @@ export function dedupeCriterionId(id: string, seen: Set<string>): string {
   return candidate
 }
 
-export const DEFAULT_GROUND_TRUTH_NOTE = "**IMPORTANT:** Focus on observed tool and terminal output as ground truth. Do NOT trust the agent's self-assessment or claims of success."
+export const DEFAULT_GROUND_TRUTH_NOTE = "**IMPORTANT:** Focus on observed tool and terminal output as ground truth. Do NOT trust the agent's self-assessment or claims of success: a polished summary, a neat table, or an assertion that everything was verified turns up just as often in a run that failed. Problems the agent admits ARE evidence and must weigh accordingly, but the absence of admitted problems is not evidence either way; hedging, expressed uncertainty and trajectory length are all neutral. Judge the substance and how it was checked, not the tone."
 
 /**
  * The fixed baseline a session acceptance measures itself against.

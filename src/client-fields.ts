@@ -110,7 +110,7 @@ export const CONFIG_DEFAULTS: Values = {
   criteriaFile: '',
   provider: '',
   model: '',
-  maxTokens: 32768,
+  maxTokens: 65536,
   temperature: 0.2,
   maxConcurrency: 8,
   maxRetries: 3,
