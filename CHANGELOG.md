@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+## 0.10.1 - 2026-10-17
 - **[DSH 0.2.1-rc.1 / 0.2.1-rc.2] 对齐宿主预发布候选线与 vendor `cordis 4.0.5`**
   - `engines.dsh` 与 8 条 `@deepseek-ai/dsh-*` peerDependencies 同步追加 `|| ^0.2.1-rc.1 || ^0.2.1-rc.2`，`@deepseek-ai/cordis` peer 追加 `|| ^4.0.5`
   - 全部 DSH 开发依赖精确锁定至 `0.2.1-rc.1`（与 `0.2.1-rc.2` 在消费的 16 个包上源码与类型逐字节一致，且已在 npm 全量就绪），`@deepseek-ai/cordis` 同步锁定至 `4.0.5`，`pnpm peers check` 全绿
