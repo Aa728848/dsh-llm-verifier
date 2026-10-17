@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **[DSH 0.2.1-rc.1 / 0.2.1-rc.2] 对齐宿主预发布候选线与 vendor `cordis 4.0.5`**
+  - `engines.dsh` 与 8 条 `@deepseek-ai/dsh-*` peerDependencies 同步追加 `|| ^0.2.1-rc.1 || ^0.2.1-rc.2`，`@deepseek-ai/cordis` peer 追加 `|| ^4.0.5`
+  - 全部 DSH 开发依赖精确锁定至 `0.2.1-rc.1`（与 `0.2.1-rc.2` 在消费的 16 个包上源码与类型逐字节一致，且已在 npm 全量就绪），`@deepseek-ai/cordis` 同步锁定至 `4.0.5`，`pnpm peers check` 全绿
+  - `alpha.5 → rc.1` 宿主仅晋升包版本号；`rc.1 → rc.2` 新增 `ui-deepseek-model-label-1017` 与设置开关后的 DeepSeek Search / Fetch API（`web/web-deepseek-api`、`ui-settings-web-search`），本插件消费的 16 个宿主包源码零改动
+
 ## 0.10.0 - 2026-10-17
 - **[DSH 0.2.1-alpha.5] 对齐宿主并采用新版兼容声明**
   - 新增顶层 `engines.dsh`，供 0.2.1-alpha.3+ 宿主与插件市场优先读取；8 条 `@deepseek-ai/dsh-*` peer 保留为旧宿主回退，两套范围均覆盖 `0.2.1-alpha.1`–`alpha.5` 且由回归测试强制一致

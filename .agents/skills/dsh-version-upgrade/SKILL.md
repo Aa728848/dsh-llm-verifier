@@ -105,6 +105,13 @@ node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc -b tsconfig.cli
 
 最新在上。每条只写"这一版动了什么、我们怎么应对"，深层理由链到 Agent Note。
 
+### 2026-10-17 → DSH `dsh-v0.2.1-rc.1` / `dsh-v0.2.1-rc.2`
+
+- **对齐 `rc.1` 与 `rc.2` 预发布线，同步 vendor `cordis 4.0.5`**：`engines.dsh` 与 8 条 `@deepseek-ai/dsh-*` peer 各追加 `|| ^0.2.1-rc.1 || ^0.2.1-rc.2`，`@deepseek-ai/cordis` peer 追加 `|| ^4.0.5`；由于 `0.2.1-rc.2` 的客户端 `ui-*` 包在 npm 拓扑发布队列中尚未全部就绪，且 `rc.1` 与 `rc.2` 在本插件消费的 16 个包上源码与类型逐字节一致，全部 DSH 开发依赖精确锁到 `0.2.1-rc.1`，`cordis` 锁到 `4.0.5`，`pnpm peers check` 全绿。
+- **本插件消费的宿主面源码零改动**：`alpha.5 → rc.1` 宿主仅将 vendor 与全部 DSH 包晋升版本号；`rc.1 → rc.2` 新增 `ui-deepseek-model-label-1017`（占用 `conversation.input.model.label` 槽位）与设置开关后的 DeepSeek Search / Fetch API（`web/web-deepseek-api`、`ui-settings-web-search`，以及日志事件 `web/deepseek-search-llm-request` 可选 `thinking` 字段），本插件消费的 16 个宿主包零改动。
+- **验证**：`pnpm run verify:release` 通过（27 个文件、754 通过 / 2 跳过）；`index.test.ts` 钉住 `rc.1` / `rc.2` 列入且 `engines.dsh` 与 8 条 peer 一致；直接执行宿主 `0.2.1-rc.2` 源码的 `evaluatePluginCompatibility()`，engines 与 peer 回退均兼容。
+- 决策全文：`.agents/notes/implemented/architecture/2026-09-22-dsh-0.1.7-alignment.md`（原地更新）
+
 ### 2026-10-17 → DSH `dsh-v0.2.1-alpha.5`
 
 - **采用 `engines.dsh`，保留 peer 回退**：8 条 `@deepseek-ai/dsh-*` peer 与新增的顶层 `engines.dsh` 使用同一范围并覆盖到 `^0.2.1-alpha.5`；0.2.1-alpha.3+ 宿主与插件市场读 engines，旧宿主继续读 peers。清单回归测试强制三者不漂移。
@@ -158,7 +165,7 @@ node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc -b tsconfig.cli
 
 ## 6. 已知待决（不要当成 bug 顺手"修"掉）
 
-- **门禁 pin 现精确锁新线**（`0.2.1-alpha.5`）。代价：0.1.1–0.1.6 的**宿主面**不再被自动化类型检查，只靠运行时双形态读取 + 回归测试保证；**客户端面**其余部分只在 0.2.1 类型下受检。想锁回最低基线，需要先把宿主图标换成插件自有的内联 SVG。精确 pin 是因为 npm `next` 已有更高的 `0.2.1-rc.1`，不能让门禁浮到未审查版本。
-- **本机 `typecheck:local` 未接通**（§4 的 junction 没建）。这是有意的：本地 checkout 与 npm `alpha` 同版，精确 pin 已让普通 `typecheck` 验到同一公开 API，它不带来额外覆盖。
-- **本机 harness checkout 的 `lib/` 比源码旧**：全局 `dsh --version` 已报 `0.2.1-alpha.5`，但 `packages/boot/app-boot`、`core/session`、`llm/llm`、`core/tools`、`subagent/subagent` 的 `lib/` 均比各自 `src/` 旧，且分别缺少 `engines.dsh` 兼容逻辑、`appendPluginRecord`、`ConfigureCall` 等新符号。也就是说**版本号随 git pull 更新，真实运行产物却没有同步**；真实新宿主 GUI/Profile 冒烟需在 harness 侧另行重建后进行，不属于本仓库的升级动作。
+- **门禁 pin 现精确锁 `0.2.1-rc.1`（兼容声明至 `0.2.1-rc.2`）**。代价：0.1.1–0.1.6 的**宿主面**不再被自动化类型检查，只靠运行时双形态读取 + 回归测试保证；**客户端面**其余部分只在 0.2.1 类型下受检。想锁回最低基线，需要先把宿主图标换成插件自有的内联 SVG。精确 pin 是为了防止门禁在未逐 tag 审查或上游 npm 拓扑发布尚未全部完成时浮到半发布版本。
+- **本机 `typecheck:local` 未接通**（§4 的 junction 没建）。这是有意的：`rc.1` 与 `rc.2` 在本插件消费的 16 个包上源码零改动，精确 pin 已让普通 `typecheck` 验到同一公开 API，它不带来额外覆盖。
+- **本机 harness checkout 的 `lib/` 比源码旧**：全局 `dsh --version` 已报 `0.2.1-rc.2`，但 `packages/boot/app-boot`、`core/session`、`llm/llm`、`core/tools`、`subagent/subagent` 的 `lib/` 均比各自 `src/` 旧，且分别缺少 `engines.dsh` 兼容逻辑、`appendPluginRecord`、`ConfigureCall` 等新符号。也就是说**版本号随 git pull 更新，真实运行产物却没有同步**；真实新宿主 GUI/Profile 冒烟需在 harness 侧另行重建后进行，不属于本仓库的升级动作。
 - **`lib/types/message-source.d.ts` 是孤立产物**：`message-source.ts` 只含类型层声明，运行时被 tree-shake，因此没有对应的 `lib/message-source.js`；包对外的 `lib/types/index.d.ts` 也不引用它，属正常。
