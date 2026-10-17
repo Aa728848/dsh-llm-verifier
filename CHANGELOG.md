@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+## 0.10.0 - 2026-10-17
 - **[DSH 0.2.1-alpha.5] 对齐宿主并采用新版兼容声明**
   - 新增顶层 `engines.dsh`，供 0.2.1-alpha.3+ 宿主与插件市场优先读取；8 条 `@deepseek-ai/dsh-*` peer 保留为旧宿主回退，两套范围均覆盖 `0.2.1-alpha.1`–`alpha.5` 且由回归测试强制一致
   - DSH 开发依赖精确锁定 `0.2.1-alpha.5`，避免 npm `next` 的 `0.2.1-rc.1` 被未审查地纳入类型门禁；`@deepseek-ai/cordis` 同步到 `4.0.5-alpha.2`，`pnpm peers check` 全绿
