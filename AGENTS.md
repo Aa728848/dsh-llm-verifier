@@ -4,7 +4,7 @@
 
 ## 这是什么
 
-`dsh-llm-verifier` 是 DeepSeek Harness（DSH）的插件：给主 Agent 配一个独立裁判模型，复核候选方案、任务进度与会话交付，并支持宿主机自动门控。生效的产物是 `lib/`（宿主加载的就是它），TS 源码在 `src/`。仓库同时支持 DSH 0.1.1 与 0.1.5 两条宿主线。
+`dsh-llm-verifier` 是 DeepSeek Harness（DSH）的插件：给主 Agent 配一个独立裁判模型，复核候选方案、任务进度与会话交付，并支持宿主机自动门控。生效的产物是 `lib/`（宿主加载的就是它），TS 源码在 `src/`。仓库声明支持 DSH 0.1.1–0.2.1 的多条宿主线，当前类型门禁精确锁定 `0.2.1-alpha.5`。
 
 ## 命令
 
@@ -88,6 +88,7 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 - **轮次与位置偏好抵消**：最终验收默认 2 轮（偶数轮交换 A/B 位置消除偏好）。`compare` 在运行时向上取整到偶数；`select` 的 ring 对称且 pivot 轮逐对平衡；`track` 无位置偏好，保持配置轮次。
 - **显式验收校验**：显式调用 `verifier_current_session` 只有在分数达标、覆盖当前任务起点且评审区间未过期（以被评审的 `toSeq` 判定）时，才算作任务已验收；绝非只要调用过就放行。
 - **门控范围约束**：子 Agent 会话默认不门控（`autoVerifySubagents=false`）。`exit_plan_mode` 计划预审通过不标记任务完成（不设置 `finalRequiredFromSeq`），避免触发空工作验收。Agent Teams 的 `team-message` 视为有效任务边界。**计划模式激活期间全部自动门控挂起**：turn-stopping 的所有自动路由/Team 验收/最终验收、pre-step 的候选早评审与过程选优登记一律跳过，仅 `exit_plan_mode` 计划预审运行；判定走 `auto.ts` 的 `planModeActive`（折叠会话日志最后一条 `plan/mode` 事件，空日志为未激活，载荷非布尔不激活），旧宿主无该事件时行为不变。
+- **子 Agent 在途探针**：会话日志的回执/结算折叠是离线基础，`index.ts` 的 `hasLiveActiveSubagents()` 只做运行时补充。动态读取必须走 `AgentRegistry.list()` 的真实 `status` 与父子关系；`subagents.listChildren()` 是持久目录，`listDescendants().activity` 只是 Session 驻留状态，都不是"执行未完成"。旧 Job 回退必须调用 `jobs.list(agent.id)`，不得传入整个 Agent 对象。
 
 ### 2. 路由与调度策略
 
@@ -136,8 +137,9 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 - **四层定价规则**：手填 > 本地 pi-ai 目录 > models.dev 快照 > 未定价（0）。严格按精确 provider+model 匹配，绝不跨厂商猜测价格；缓存 token 走专用单价。
 - **设置页单一定义源**：默认值唯一存在于 `client-fields.ts` 的 `CONFIG_DEFAULTS`。前端校验仅严格镜像 `resolveConfig` 实际规则；非必填字段（如 `criteriaFile`、`priceProviderOverride` 等）允许为空。
 - **设置保存语义**：优先使用 `settings.replace`（整层替换），宿主不支持时退回带 `{reInheritBase: false}` 的 `update`，确保清空覆盖项和恢复默认生效。
+- **侧车不迁到实验性 plugin records**：0.2.1 的 `appendPluginRecord()` 按宿主契约只供实验性包保存可丢失状态，格式迁移仅尽力保留。评分缓存、统计、决策快照与过程选优账目仍使用话题持久化目录，不得为"换新 API"牺牲正式插件的数据连续性。
 
-### 7. 宿主版本兼容（0.1.7 / 0.2.0 对齐）
+### 7. 宿主版本兼容（0.1.7–0.2.1 对齐）
 
 **升级宿主版本线之前，先读 `.agents/skills/dsh-version-upgrade/SKILL.md`**：那里有本机 harness 的实际路径、逐 tag 对比宿主类型面的命令、验证循环、反复踩到的陷阱，以及每次升级的要点索引。本节只列"看到这些代码不要动"的既定事实。
 
@@ -150,7 +152,7 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 - **0.1.7-rc.2 的「动态工具更新」与 provider 拆包是有意不动的两处**：(a) 宿主把工具声明的变化记成 `developer/message` 事件（`role: 'developer'`，内容为 `tool-addition` / `tool-removal` 块）并给请求附带 `toolHistory`（`dsh-llm` 的 `GenerateOptions.toolHistory?`、`dsh-session` 的 `Session.toolHistory()` 都是新增可选面）。这些是宿主侧的登记动作，不是 Agent 的工作证据，因此 `session.ts` / `router.ts` / `auto.ts` 的事件与块分发（`if/else` 链，无 `assertNever`）**刻意**让它们落空——**不要**为"读全事件"补分支，也不要把它们加进 `textOf()` / `blockText()` / `isEvidenceOutput()`。`auto.ts` 的 `stale()` 只统计有结果的工具调用与 PTC 派发，所以任务中途追加的 `developer/message` 不会让已完成的验收"过期"。(b) DeepSeek provider 拆成 `@deepseek-ai/dsh-llm-deepseek-api-key` 与 `@deepseek-ai/dsh-llm-deepseek-account` 两个包，但 profile 里的**条目 id 仍是 `llm-deepseek`**，设置命名空间与其中的 `baseURL` / `apiKeyEnv` 都没变——`top-logprobs.ts` 照旧读 `llm-deepseek`，**不要**改读新包名。
 - **0.2.0 的「step 失败合成工具结果」是有意不特殊处理的**：0.2.0-rc.1 起，step 抛错时 agent-loop 用 `ToolCallRecovery`（`dsh-session` 新导出）为未完成的工具调用补写合成的失败 `tool/result` 事件（`role: 'tool'` 消息、消息级 `isError: true`、`error.code` 为 `TOOL_NOT_STARTED` / `TOOL_OUTCOME_UNKNOWN`）。这正是 0.1.7 形态的工具结果，`session.ts` 的 `toolResultFailed()` 原样读出"失败"，路由据此不把合成结果当观测证据——**不要**为识别 `error.code` 加特判分支，也不要把合成文案当异常证据过滤。该线其余改动对插件消费面全是加法（`ui-conversation` 提交契约新增可选 `source` 参数与 `MessageSubmission`、`ui-primitives` 新增 `pointerModality` 导出、`api/remotes` 新增 productAnalytics remote），插件源码零改动。
 - **0.2.0-rc.2 的「计时提问迟到回答」与「定时提醒」是有意不视作任务边界的**：宿主新增前台提问超时后的迟到回答（通过 `agent.steer` 注入，`source.kind: 'user-question-reply'`）以及到期定时提醒（`source.kind: 'schedule'`）。`session.ts`（`extractSession`）与 `router.ts`（`latestDirectUserSeq`）的任务边界判断只认 `source.kind === 'user'` 与 `'team-message'`，有意将非直接用户任务的消息排除在任务边界外——**不要**把 `user-question-reply` 或 `schedule` 加入任务边界识别，否则会把回答或提醒误当成全新任务起始并清空此前任务上下文。该版 `api/remotes` 挂载 `userQuestionsRemote`、`ui-primitives` 导出 `MenuGroup`，插件消费面源码零改动。
-- **`peerDependencies` 必须覆盖实际运行线，且 0.1.7-rc.1 起宿主会强制这道检查**：semver 的 `^0.1.7` **不匹配** `0.1.7-alpha.1` 这类预发布版，新增版本线要照现有写法显式列出预发布形态（当前各包以 `… || ^0.1.6-alpha.1 || ^0.1.6-alpha.2 || ~0.1.6 || ^0.1.7-alpha.1 || ^0.1.7-alpha.2 || ^0.1.7-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1 || ^0.2.0-rc.2` 收尾）。宿主侧 `packages/boot/app-boot/src/plugin-compatibility.ts` 对**每一个** `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 条目跑 `semver.satisfies(runtimeVersion, range, { includePrerelease: true })`（运行版本取 `app-boot` 自己的 `package.json`），不满足就把该行标 `disabled`（`profile.ts` 对 bundle 层同理，直接跳过整个 bundle 并打 stderr）。`@deepseek-ai/cordis` 不在检查范围内。因此漏列一条宿主版本线的后果**不是**降级运行，而是**整个插件在 profile 里被停用**；用户只能靠 `dsh plugin allow-version` 的精确版本豁免（profile 目录下的 `compatibility.json`）临时放行。升级宿主后第一件事就是确认新版本线已在 peer 范围内。
+- **`engines.dsh` 与 DSH peer 必须同步覆盖实际运行线**：0.1.7-rc.1 起宿主强制兼容检查；0.2.1-alpha.3 起包自己的 `engines.dsh` 单独决定结果并忽略 DSH peers，缺失时才回退到逐条 peer。两套声明在本仓库必须逐字一致，供新版宿主/插件市场与旧宿主各自读取。semver 的 `^0.1.7` **不匹配** `0.1.7-alpha.1` 这类预发布版，新增版本线要照现有写法显式列出（当前以 `… || ^0.2.0-rc.1 || ^0.2.0-rc.2 || ^0.2.1-alpha.1 || ^0.2.1-alpha.2 || ^0.2.1-alpha.3 || ^0.2.1-alpha.4 || ^0.2.1-alpha.5` 收尾）。宿主按 `semver.satisfies(runtimeVersion, range, { includePrerelease: true })` 判定，不满足就停用插件行或跳过 bundle；漏列不是降级而是**整个插件不加载**。`@deepseek-ai/cordis` 不参与该宿主门禁，但 `pnpm peers check` 也必须通过。升级后先核对两套范围，再执行宿主 `evaluatePluginCompatibility()` 与 peer 检查。
 
 ## 宿主契约速查（`../deepseek-harness`）
 
@@ -165,7 +167,9 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 | 注入消息来源 | 生产者自报 `MessageSourceMap` 键；0.1.7 起禁用 `{kind:'plugin'}` 包装 |
 | 客户端 `ctx.slots` | 由 `@deepseek-ai/dsh-client-ui-renderer/client` 声明，`Context` 取自 `@deepseek-ai/cordis` |
 | `dsh.client.inject` | 仅供排序/清单参考（"informational"），不构成硬依赖校验 |
+| 宿主兼容声明 | 0.2.1-alpha.3 起 `engines.dsh` 优先；缺失时才回退 DSH `peerDependencies`；本仓库两套范围必须一致 |
 | 子会话识别 | 依赖 `parentSession` 或 `origin: 'subagent'` |
+| 子 Agent 动态在途 | 用 `AgentRegistry.list()` 的 `status`；目录 `listChildren` 与驻留 `activity` 都不代表未完成；旧 Job 用 `jobs.list(agent.id)` |
 | 设置读写语义 | ⚠️ `update` 为增量合并，`replace` 为整层替换（清除覆盖需用 replace） |
 | `llm/stream` 拦截 | waterfall 形式 `(options, next) => AsyncIterable<StreamChunk>` |
 | 主循环请求标记 | `isAgentLoopRequest()` 基于模块私有 WeakSet，故 `@deepseek-ai/*` 必须 external |

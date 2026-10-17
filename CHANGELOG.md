@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **[DSH 0.2.1-alpha.5] 对齐宿主并采用新版兼容声明**
+  - 新增顶层 `engines.dsh`，供 0.2.1-alpha.3+ 宿主与插件市场优先读取；8 条 `@deepseek-ai/dsh-*` peer 保留为旧宿主回退，两套范围均覆盖 `0.2.1-alpha.1`–`alpha.5` 且由回归测试强制一致
+  - DSH 开发依赖精确锁定 `0.2.1-alpha.5`，避免 npm `next` 的 `0.2.1-rc.1` 被未审查地纳入类型门禁；`@deepseek-ai/cordis` 同步到 `4.0.5-alpha.2`，`pnpm peers check` 全绿
+- **[修复] 子 Agent 动态在途探针改用真实执行状态**
+  - 不再把 `subagents.listChildren()` 的持久目录项误读为 `kind/activity` 活动记录；改用 `AgentRegistry.list()` 按父子关系发现运行中的后代，并以 visited 集合防环
+  - 旧 Job-backed 回退按宿主契约修正为 `jobs.list(agent.id)`；新版 managed activation 继续复用既有启动回执与 `subagent-settled` 日志判定，不把所有后台 Job 纳入门控
+- **[新能力评估] 不为换新而替换稳定路径**
+  - 话题侧车不迁到实验性的 `appendPluginRecord()`；裁判传输不改写为 `prepareCall()`；PTC 展示 `meta` 不作为模型证据；`working-directory/change` 不改变侧车归属
+  - `index.test.ts` 新增清单一致性与 Agent/Job 动态探针回归
+
 ## 0.9.5 - 2026-10-15
 
 - **[UI / 打包] 补上插件包图标**

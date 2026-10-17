@@ -203,25 +203,41 @@ const PROBE_TIMEOUT_MS = 30000
 interface SessionVerificationResult { sessionId: string; problem: string; score: number; baselineScore: number; winner: 'A' | 'B' | 'tie'; criteria: AcceptanceCriterion[]; /** Located findings of the acceptance comparison; empty means "nothing locatable was reported". */ diagnostics: Diagnostic[]; fromSeq: number; toSeq: number; omittedCharacters: number; calls: number; stats: RunStats; judges: JudgeScore[]; agreement: number }
 
 /**
- * Probe live host runtime services for subagents or background jobs owned by the agent that remain active.
+ * Probe live Agent and Job registries for delegated work owned by the agent that remains active.
  *
- * Probed at runtime without hardcoded version assumptions, gracefully degrading if services are missing.
+ * Catalog readers are not execution-state APIs: `listChildren()` returns durable identities, while
+ * `listDescendants().activity` reports Session residency rather than unfinished work. Runtime probes
+ * gracefully degrade when a registry is missing; the Session log remains the other evidence source.
  * @param ctx - plugin Context.
  * @param agent - calling Agent.
  * @param signal - cancellation signal.
- * @returns True when live subagents or background jobs are actively running.
+ * @returns True when live subagents or legacy Job-backed subagents are actively running.
  */
 export async function hasLiveActiveSubagents(ctx: Context, agent: RoutedAgent, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return false
   try {
-    const subagentsService = (typeof ctx.get === 'function' ? ctx.get('subagents') : undefined)
-      ?? (ctx as unknown as { subagents?: unknown }).subagents
-    const subagents = subagentsService as {
-      listChildren?(parentSessionId: unknown, signal?: AbortSignal): Promise<readonly { kind?: string; activity?: string; status?: string }[]>
-    } | undefined
-    if (typeof subagents?.listChildren === 'function') {
-      const children = await subagents.listChildren(agent.id, signal)
-      if (Array.isArray(children) && children.some(entry => entry.kind === 'child' && (entry.activity === 'running' || entry.status === 'running'))) {
-        return true
+    const agentService = (typeof ctx.get === 'function' ? ctx.get('agents') : undefined)
+      ?? (ctx as unknown as { agents?: unknown }).agents
+    const registry = agentService as { list?(): readonly Agent[] } | undefined
+    if (typeof registry?.list === 'function') {
+      const childrenOf = new Map<unknown, Agent[]>()
+      for (const child of registry.list()) {
+        const { parentSession, origin } = child.session.header
+        if (parentSession === undefined || origin !== 'subagent') continue
+        const siblings = childrenOf.get(parentSession) ?? []
+        siblings.push(child)
+        childrenOf.set(parentSession, siblings)
+      }
+      const pending: unknown[] = [agent.id]
+      const visited = new Set<unknown>()
+      while (pending.length > 0) {
+        const parentId = pending.shift()
+        if (visited.has(parentId)) continue
+        visited.add(parentId)
+        for (const child of childrenOf.get(parentId) ?? []) {
+          if (child.status === 'running') return true
+          pending.push(child.id)
+        }
       }
     }
   } catch {
@@ -234,7 +250,7 @@ export async function hasLiveActiveSubagents(ctx: Context, agent: RoutedAgent, s
       list?(owner?: unknown): readonly { status?: string; kind?: string }[]
     } | undefined
     if (typeof jobs?.list === 'function') {
-      const list = jobs.list(agent)
+      const list = jobs.list(agent.id)
       if (Array.isArray(list) && list.some(job => (job.status === 'running' || job.status === 'stopping') && (job.kind === 'subagent' || job.kind === undefined))) {
         return true
       }

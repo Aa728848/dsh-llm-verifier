@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
-import { apply } from './index.ts'
+import { apply, hasLiveActiveSubagents } from './index.ts'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { partialStats } from './engine.ts'
 import { PROPOSAL_CRITERIA } from './core.ts'
@@ -54,7 +54,63 @@ const exec = { agent: { id: 'agent-1', session: { header: { id: 'session-1' }, r
 /** A session with no logged request header: the tool cannot know which model should draft. */
 const bareExec = { agent: { id: 'agent-2', session: { header: { id: 'session-2' }, requestHeader: () => undefined } }, signal: new AbortController().signal }
 
+describe('hasLiveActiveSubagents', () => {
+  const root = { id: 'root', session: {} }
+  const child = (id: string, status: string, parentSession: string) => ({ id, status, session: { header: { parentSession, origin: 'subagent' } } })
+  const runtime = (agents: readonly Record<string, unknown>[], jobs: readonly Record<string, unknown>[] = []) => {
+    const owners: unknown[] = []
+    const ctx = {
+      get(name: string) {
+        if (name === 'agents') return { list: () => agents }
+        if (name === 'jobs') return { list: (owner: unknown) => { owners.push(owner); return jobs } }
+        return undefined
+      },
+    } as unknown as Context
+    return { ctx, owners }
+  }
+
+  it('finds a running descendant through the Agent registry without reading catalog activity', async () => {
+    const { ctx } = runtime([
+      child('child', 'idle', 'root'),
+      child('grandchild', 'running', 'child'),
+      child('unrelated', 'running', 'other'),
+    ])
+    await expect(hasLiveActiveSubagents(ctx, root as never)).resolves.toBe(true)
+  })
+
+  it('ignores idle descendants, unrelated agents, and non-subagent jobs', async () => {
+    const { ctx, owners } = runtime([child('child', 'idle', 'root')], [{ kind: 'bash', status: 'running' }])
+    await expect(hasLiveActiveSubagents(ctx, root as never)).resolves.toBe(false)
+    expect(owners).toEqual(['root'])
+  })
+
+  it('passes the session id to the legacy Job registry and accepts a stopping subagent', async () => {
+    const { ctx, owners } = runtime([], [{ kind: 'subagent', status: 'stopping' }])
+    await expect(hasLiveActiveSubagents(ctx, root as never)).resolves.toBe(true)
+    expect(owners).toEqual(['root'])
+  })
+
+  it('degrades to false when live registries are absent', async () => {
+    const ctx = { get: () => undefined } as unknown as Context
+    await expect(hasLiveActiveSubagents(ctx, root as never)).resolves.toBe(false)
+  })
+})
+
 describe('plugin assembly', () => {
+  it('keeps engines.dsh identical to every DSH peer compatibility range', () => {
+    const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      engines?: { dsh?: unknown }
+      peerDependencies: Record<string, string>
+    }
+    const range = manifest.engines?.dsh
+    expect(typeof range).toBe('string')
+    expect(range).not.toContain('workspace:')
+    expect(range).toContain('^0.2.1-alpha.5')
+    const peers = Object.entries(manifest.peerDependencies).filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
+    expect(peers).toHaveLength(8)
+    for (const [, peerRange] of peers) expect(peerRange).toBe(range)
+  })
+
   it('registers exactly the four verifier tools with ensemble-aware output schemas', () => {
     const { tools } = assemble()
     expect([...tools.keys()].sort()).toEqual(['verifier_best_of_n', 'verifier_compare', 'verifier_current_session', 'verifier_select', 'verifier_track'])
