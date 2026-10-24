@@ -4,7 +4,7 @@
 
 ## 这是什么
 
-`dsh-llm-verifier` 是 DeepSeek Harness（DSH）的插件：给主 Agent 配一个独立裁判模型，复核候选方案、任务进度与会话交付，并支持宿主机自动门控。生效的产物是 `lib/`（宿主加载的就是它），TS 源码在 `src/`。仓库声明支持 DSH 0.1.1–0.2.1（至 `0.2.1-rc.2`）的多条宿主线，当前类型门禁精确锁定 `0.2.1-rc.1`。
+`dsh-llm-verifier` 是 DeepSeek Harness（DSH）的插件：给主 Agent 配一个独立裁判模型，复核候选方案、任务进度与会话交付，并支持宿主机自动门控。生效的产物是 `lib/`（宿主加载的就是它），TS 源码在 `src/`。仓库声明支持 DSH 0.1.1–0.2.1（至 `0.2.1-rc.3`）的多条宿主线，当前类型门禁精确锁定 `0.2.1-rc.3`。
 
 ## 命令
 
@@ -152,7 +152,8 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 - **0.1.7-rc.2 的「动态工具更新」与 provider 拆包是有意不动的两处**：(a) 宿主把工具声明的变化记成 `developer/message` 事件（`role: 'developer'`，内容为 `tool-addition` / `tool-removal` 块）并给请求附带 `toolHistory`（`dsh-llm` 的 `GenerateOptions.toolHistory?`、`dsh-session` 的 `Session.toolHistory()` 都是新增可选面）。这些是宿主侧的登记动作，不是 Agent 的工作证据，因此 `session.ts` / `router.ts` / `auto.ts` 的事件与块分发（`if/else` 链，无 `assertNever`）**刻意**让它们落空——**不要**为"读全事件"补分支，也不要把它们加进 `textOf()` / `blockText()` / `isEvidenceOutput()`。`auto.ts` 的 `stale()` 只统计有结果的工具调用与 PTC 派发，所以任务中途追加的 `developer/message` 不会让已完成的验收"过期"。(b) DeepSeek provider 拆成 `@deepseek-ai/dsh-llm-deepseek-api-key` 与 `@deepseek-ai/dsh-llm-deepseek-account` 两个包，但 profile 里的**条目 id 仍是 `llm-deepseek`**，设置命名空间与其中的 `baseURL` / `apiKeyEnv` 都没变——`top-logprobs.ts` 照旧读 `llm-deepseek`，**不要**改读新包名。
 - **0.2.0 的「step 失败合成工具结果」是有意不特殊处理的**：0.2.0-rc.1 起，step 抛错时 agent-loop 用 `ToolCallRecovery`（`dsh-session` 新导出）为未完成的工具调用补写合成的失败 `tool/result` 事件（`role: 'tool'` 消息、消息级 `isError: true`、`error.code` 为 `TOOL_NOT_STARTED` / `TOOL_OUTCOME_UNKNOWN`）。这正是 0.1.7 形态的工具结果，`session.ts` 的 `toolResultFailed()` 原样读出"失败"，路由据此不把合成结果当观测证据——**不要**为识别 `error.code` 加特判分支，也不要把合成文案当异常证据过滤。该线其余改动对插件消费面全是加法（`ui-conversation` 提交契约新增可选 `source` 参数与 `MessageSubmission`、`ui-primitives` 新增 `pointerModality` 导出、`api/remotes` 新增 productAnalytics remote），插件源码零改动。
 - **0.2.0-rc.2 的「计时提问迟到回答」与「定时提醒」是有意不视作任务边界的**：宿主新增前台提问超时后的迟到回答（通过 `agent.steer` 注入，`source.kind: 'user-question-reply'`）以及到期定时提醒（`source.kind: 'schedule'`）。`session.ts`（`extractSession`）与 `router.ts`（`latestDirectUserSeq`）的任务边界判断只认 `source.kind === 'user'` 与 `'team-message'`，有意将非直接用户任务的消息排除在任务边界外——**不要**把 `user-question-reply` 或 `schedule` 加入任务边界识别，否则会把回答或提醒误当成全新任务起始并清空此前任务上下文。该版 `api/remotes` 挂载 `userQuestionsRemote`、`ui-primitives` 导出 `MenuGroup`，插件消费面源码零改动。
-- **`engines.dsh` 与 DSH peer 必须同步覆盖实际运行线**：0.1.7-rc.1 起宿主强制兼容检查；0.2.1-alpha.3 起包自己的 `engines.dsh` 单独决定结果并忽略 DSH peers，缺失时才回退到逐条 peer。两套声明在本仓库必须逐字一致，供新版宿主/插件市场与旧宿主各自读取。semver 的 `^0.1.7` **不匹配** `0.1.7-alpha.1` 这类预发布版，新增版本线要照现有写法显式列出（当前以 `… || ^0.2.0-rc.1 || ^0.2.0-rc.2 || ^0.2.1-alpha.1 || ^0.2.1-alpha.2 || ^0.2.1-alpha.3 || ^0.2.1-alpha.4 || ^0.2.1-alpha.5 || ^0.2.1-rc.1 || ^0.2.1-rc.2` 收尾）。宿主按 `semver.satisfies(runtimeVersion, range, { includePrerelease: true })` 判定，不满足就停用插件行或跳过 bundle；漏列不是降级而是**整个插件不加载**。`@deepseek-ai/cordis` 不参与该宿主门禁，但 `pnpm peers check` 也必须通过。升级后先核对两套范围，再执行宿主 `evaluatePluginCompatibility()` 与 peer 检查。
+- **`0.2.1-rc.3` 后 master 的拆包与独立 fork 不改变既有读取**：PTC 执行器移到独立包，但 `tool/ptc-dispatch` 的事件名与载荷不变；条件工具、`model/selection` 和图标 sprite 化不要求插件新增证据分支或改图标名。普通 fork 不再写 `parentSession`，真实子 Agent 仍同时保留 `origin: 'subagent'` 与直接创建者 id；`isSubagentSession()` 的 parent 分支仅用于旧宿主/历史日志，独立 fork 必须返回 `false`，动态在途探针继续同时要求 `origin + parentSession`，**不要**虚构宿主未提供的 descriptor 父 id。
+- **`engines.dsh` 与 DSH peer 必须同步覆盖实际运行线**：0.1.7-rc.1 起宿主强制兼容检查；0.2.1-alpha.3 起包自己的 `engines.dsh` 单独决定结果并忽略 DSH peers，缺失时才回退到逐条 peer。两套声明在本仓库必须逐字一致，供新版宿主/插件市场与旧宿主各自读取。semver 的 `^0.1.7` **不匹配** `0.1.7-alpha.1` 这类预发布版，新增版本线要照现有写法显式列出（当前以 `… || ^0.2.0-rc.1 || ^0.2.0-rc.2 || ^0.2.1-alpha.1 || ^0.2.1-alpha.2 || ^0.2.1-alpha.3 || ^0.2.1-alpha.4 || ^0.2.1-alpha.5 || ^0.2.1-rc.1 || ^0.2.1-rc.2 || ^0.2.1-rc.3` 收尾）。宿主按 `semver.satisfies(runtimeVersion, range, { includePrerelease: true })` 判定，不满足就停用插件行或跳过 bundle；漏列不是降级而是**整个插件不加载**。`@deepseek-ai/cordis` 不参与该宿主门禁，但 `pnpm peers check` 也必须通过。升级后先核对两套范围，再执行宿主 `evaluatePluginCompatibility()` 与 peer 检查。
 
 ## 宿主契约速查（`../deepseek-harness`）
 
@@ -168,7 +169,7 @@ node scripts/eval-replay.mjs   # 离线回放（无模型调用）：阈值扫�
 | 客户端 `ctx.slots` | 由 `@deepseek-ai/dsh-client-ui-renderer/client` 声明，`Context` 取自 `@deepseek-ai/cordis` |
 | `dsh.client.inject` | 仅供排序/清单参考（"informational"），不构成硬依赖校验 |
 | 宿主兼容声明 | 0.2.1-alpha.3 起 `engines.dsh` 优先；缺失时才回退 DSH `peerDependencies`；本仓库两套范围必须一致 |
-| 子会话识别 | 依赖 `parentSession` 或 `origin: 'subagent'` |
+| 子会话识别 | 现行宿主以 `origin: 'subagent'` 为子 Agent 标识；`parentSession` 仅作旧宿主/历史日志兼容读取，新普通 fork 不再携带该字段 |
 | 子 Agent 动态在途 | 用 `AgentRegistry.list()` 的 `status`；目录 `listChildren` 与驻留 `activity` 都不代表未完成；旧 Job 用 `jobs.list(agent.id)` |
 | 设置读写语义 | ⚠️ `update` 为增量合并，`replace` 为整层替换（清除覆盖需用 replace） |
 | `llm/stream` 拦截 | waterfall 形式 `(options, next) => AsyncIterable<StreamChunk>` |

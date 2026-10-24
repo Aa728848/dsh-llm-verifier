@@ -201,12 +201,13 @@ describe('automatic verification policy', () => {
     expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ eligible: true, consequentialToolCalls: 2 })
   })
 
-  it('recognizes delegated child sessions that must not be gated by default', () => {
+  it('recognizes delegated child sessions without misclassifying independent forks', () => {
     expect(isSubagentSession(undefined)).toBe(false)
     expect(isSubagentSession({ session: {} })).toBe(false)
     expect(isSubagentSession({ session: { header: { id: 's1' } } })).toBe(false)
     expect(isSubagentSession({ session: { header: { id: 's2', origin: 'subagent' } } })).toBe(true)
     expect(isSubagentSession({ session: { header: { id: 's3', parentSession: 's1' } } })).toBe(true)
+    expect(isSubagentSession({ session: { header: { id: 's4', isSeeded: true } } })).toBe(false)
   })
 
   it('builds actionable low-score feedback', () => {

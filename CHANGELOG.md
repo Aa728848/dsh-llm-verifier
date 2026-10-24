@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **[DSH 0.2.1-rc.3 / 本机 master] 对齐宿主版本与新增会话边界**
+  - `engines.dsh` 与 8 条 DSH peer 同步追加 `|| ^0.2.1-rc.3`，全部 DSH 开发依赖精确锁定至 `0.2.1-rc.3`，pnpm 发布年龄豁免同步更新；Cordis 保持 `4.0.5`
+  - 审查本机 `22ddee37924`（rc.3 后 1533 个提交）：工具执行器拆包、条件工具、会话写入收紧与图标 sprite 化未移除本插件消费的接口；新增 `model/selection` 不进入裁判证据
+  - 普通 fork 不再携带 `parentSession`，`isSubagentSession()` 明确以 `origin: 'subagent'` 为现行标识、仅为历史记录保留 parent 兼容读取；回归测试钉住无 parent/origin 的独立 fork 不会被误分类
+  - `verify:release`、peer 检查、宿主 engines/peer 回退兼容调用与构建产物加载均通过；本机 HEAD 的 Host/Client 调用面通过独立声明镜像类型检查
+
 ## 0.10.1 - 2026-10-17
 - **[DSH 0.2.1-rc.1 / 0.2.1-rc.2] 对齐宿主预发布候选线与 vendor `cordis 4.0.5`**
   - `engines.dsh` 与 8 条 `@deepseek-ai/dsh-*` peerDependencies 同步追加 `|| ^0.2.1-rc.1 || ^0.2.1-rc.2`，`@deepseek-ai/cordis` peer 追加 `|| ^4.0.5`

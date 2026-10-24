@@ -108,6 +108,7 @@ describe('plugin assembly', () => {
     expect(range).toContain('^0.2.1-alpha.5')
     expect(range).toContain('^0.2.1-rc.1')
     expect(range).toContain('^0.2.1-rc.2')
+    expect(range).toContain('^0.2.1-rc.3')
     const peers = Object.entries(manifest.peerDependencies).filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
     expect(peers).toHaveLength(8)
     for (const [, peerRange] of peers) expect(peerRange).toBe(range)

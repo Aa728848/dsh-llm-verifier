@@ -98,7 +98,7 @@ DSH 0.1.7 又搬动了两处判定地基，两侧形态插件都读：
 
 客户端面（Web 设置页与看板）另有两处只随新版本线变化：提供 `ctx.slots` 的包是 `@deepseek-ai/dsh-client-ui-renderer`（`@deepseek-ai/dsh-client-runtime` 在 0.1.2 就已删除，插件类型一律取自 `@deepseek-ai/cordis` 的 `Context`）；宿主图标名在 0.1.7 整体由尺寸后缀改为笔画后缀。图标是具名导入、且该模块对客户端 bundle 是 external，一份源码无法同时满足两套名字，因此插件改为按名探测两种拼写、都缺失时渲染空——旧宿主不会因此白屏。
 
-typecheck 门禁按 `package.json` 的 `devDependencies` 解析，已随宿主推进并**精确锁定**到 `0.2.1-rc.1`（与 `0.2.1-rc.2` 在本插件消费的 16 个宿主包上源码与类型逐字节一致；此前从 `0.1.1-rc.2` 上移到 `0.1.7-alpha.1` 并持续推进）：客户端面的图标名在 0.1.7 才改名，一份源码只能对齐一侧，宿主面的旧形态兼容由运行时代码与回归测试保证。开发依赖不用 caret，避免门禁悄悄浮到尚未逐 tag 审查或 npm 拓扑发布尚未收尾的版本。从 `0.1.7-alpha.1` 到 `0.1.7-rc.1` 的宿主改动对本插件消费的所有宿主面**全是加法**（`tools/pre-execute` 侧只新增可选 `projectContent`，`dsh-session` / `dsh-llm` / `dsh-settings` / `dsh-agent` / `dsh-credentials` / 客户端槽位与图标包源码零改动），因此这一步只换版本线，不动插件代码。
+typecheck 门禁按 `package.json` 的 `devDependencies` 解析，已随宿主推进并**精确锁定**到 `0.2.1-rc.3`；本插件消费的 16 个 DSH 包均已在 npm 发布这一版本，`@deepseek-ai/cordis` 保持 `4.0.5`。开发依赖不用 caret，避免门禁悄悄浮到尚未逐 tag 审查或 npm 拓扑发布尚未收尾的版本。早期宿主的兼容仍由运行时双形态读取与回归测试承担，例如客户端图标在 0.1.7 改名后同时探测两种拼写。
 
 `0.1.7-rc.2` 同样只换版本线：这一版给宿主加了「动态工具更新」机制，对插件全是新增的可选面（`dsh-llm` 的 `GenerateOptions.toolHistory?` 与 `ToolUpdate`、`dsh-session` 的 `Session.toolHistory()`、`dsh-tools` 的 `PreToolDecision.ask.displayReason?`）。插件不消费这套机制，宿主新增的事件与块类型也读不到它：宿主在工具名变化时追加的 `developer/message`（`role: 'developer'`，内容为 `tool-addition` / `tool-removal` 块）不属于观测证据，插件的 `if/else` 分发自然跳过它们；验收的"过期"判定只统计有结果的工具调用与 PTC 派发，因此这类中途追加的消息不会让已完成的验收失效。另需注意 DeepSeek provider 在这一版裂成两个包（`llm-deepseek-api-key` 与 `llm-deepseek-account`），但 profile 里的**条目 id 仍是 `llm-deepseek`**，设置命名空间与其中的 `baseURL` / `apiKeyEnv` 都没变，直连 logprobs 通道照常读到；新增的 `deepseek-account` provider 走账号令牌、没有 API key，直连通道对它不适用，按设计降级到显式标签通道。
 
@@ -112,6 +112,8 @@ typecheck 门禁按 `package.json` 的 `devDependencies` 解析，已随宿主�
 - **子 Agent 在途探针**：新版 managed activation 不再使用 Job-backed delegation，现有 `started subagent <id>` / `subagent-settled` 日志判定保持不变。动态补充探针不再把 `listChildren()` 的持久目录项误当活动状态，改用 `AgentRegistry.list()` 检查运行中的后代；旧 Job 回退则按宿主契约修正为 `jobs.list(agent.id)`。
 - **新 API 取舍**：不把侧车迁到实验性的 `appendPluginRecord()`（格式迁移只尽力保留），不把裁判调用改为 `prepareCall()`（现有明确参数、直连 logprobs 与旧宿主回退没有收益），也不把 PTC 新增的展示用 `meta` 当作模型证据。
 
+`0.2.1-rc.3` 的核心消费面没有破坏变化，客户端只新增槽位、图标与可选字段，因此依赖与声明直接推进到该版。本机 checkout 另停在 `22ddee37924`（`rc.3` 后 1533 个提交），这部分不是新的 npm 版本线：PTC 执行器拆包不改变 `tool/ptc-dispatch` 事件，条件工具与 `model/selection` 不进入裁判证据，图标导出名保持兼容；普通 fork 不再写 `parentSession`，真实子 Agent 仍以 `origin: 'subagent'` 标识并保留直接创建者 id。`isSubagentSession()` 仅为旧宿主和历史日志保留 parent 兼容读取，无 parent/origin 的独立 fork 不会被误当成子 Agent；动态在途探针仍按真实子 Agent 的 `origin + parentSession` 工作。
+
 其中一处更隐蔽的差异是 `deepFreeze`：0.1.1 的 `@deepseek-ai/dsh-llm` 会重新导出它，0.1.5 已把它移到 `@deepseek-ai/dsh-util-values`。插件因此自带一份等价的兜底实现，并同样**放过 `AbortSignal`**——冻结那个还在重试循环里使用、尚未被订阅的信号，会让传输层首次 `addEventListener`（Node ≥26.5）或超时/取消时的 `controller.abort()`（所有 Node 版本）抛 `Cannot assign to read only property`。
 
 ### 发布到 npm
@@ -120,7 +122,7 @@ typecheck 门禁按 `package.json` 的 `devDependencies` 解析，已随宿主�
 
 发布内容由 `package.json` 的 `files` 字段决定：`lib`（构建产物、source map 与 `lib/types` 类型声明）、`src`、`cordis.patch.yml`、`README.md`。`tsconfig.local.json` 之类的本机文件不会进入 tarball。
 
-`engines.dsh` 与 `peerDependencies` 中逐个列出的预发布范围都是必需的，而且从 DSH 0.1.7-rc.1 起**由宿主强制执行**：0.2.1-alpha.3 起，包自己的 `engines.dsh` 单独决定兼容性并忽略 DSH peers；该字段缺失时才回退为逐个检查 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` peer。本插件保留两套完全相同的声明以覆盖新旧宿主，并用回归测试防止它们漂移。按 semver 规则，预发布版本只有在同一 `x.y.z` 段存在带预发布的比较符时才算满足，因此不能简化成 `>=0.1.1-rc.2 <0.2.0`（那样会漏掉 `0.1.2-alpha.*`、`0.1.5-rc.*`、`0.1.7-alpha.*` 等宿主）。判定使用 `semver.satisfies(运行版本, 范围, { includePrerelease: true })`，任何一条不满足就把插件行停用（bundle 层直接跳过整个 bundle），并在 stderr 写出原因；应急可用 `dsh plugin allow-version` 做精确版本豁免。当前声明覆盖到 `0.2.1-rc.2`，与本机 checkout 一致；`@deepseek-ai/cordis` 不参与这道宿主门禁，但仍须满足包管理器的 peer 解析。
+`engines.dsh` 与 `peerDependencies` 中逐个列出的预发布范围都是必需的，而且从 DSH 0.1.7-rc.1 起**由宿主强制执行**：0.2.1-alpha.3 起，包自己的 `engines.dsh` 单独决定兼容性并忽略 DSH peers；该字段缺失时才回退为逐个检查 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` peer。本插件保留两套完全相同的声明以覆盖新旧宿主，并用回归测试防止它们漂移。按 semver 规则，预发布版本只有在同一 `x.y.z` 段存在带预发布的比较符时才算满足，因此不能简化成 `>=0.1.1-rc.2 <0.2.0`（那样会漏掉 `0.1.2-alpha.*`、`0.1.5-rc.*`、`0.1.7-alpha.*` 等宿主）。判定使用 `semver.satisfies(运行版本, 范围, { includePrerelease: true })`，任何一条不满足就把插件行停用（bundle 层直接跳过整个 bundle），并在 stderr 写出原因；应急可用 `dsh plugin allow-version` 做精确版本豁免。当前声明覆盖到 `0.2.1-rc.3`；本机 `rc.3` 后 master 只做额外源码核对，不单独虚构预发布版本线。`@deepseek-ai/cordis` 不参与这道宿主门禁，但仍须满足包管理器的 peer 解析。
 
 统计数据有两条传输路径：优先走 `/api/llm-verifier/statistics`（Connection 的 exact Fetch 路由，带 Host/Origin 栅栏与浏览器鉴权），宿主较旧时回落到插件自己的 `/llm-verifier` RPC 通道（同样经过鉴权）。裸的 webServer 路由已被移除。
 

@@ -30,6 +30,7 @@ DSH 0.2.1 对齐审查又确认动态补充探针存在两处既有失配：`sub
      - 进度路由（`track`）不标记交付优先（`preferFinal`），也不向最终验收下落；
      - 最终验收门禁直接跳过并关闭回合，不调用裁判模型、不注入任何错误或阻断警告，静待宿主子代理结算通知自然唤醒下一轮。
 3. **动态探针以真实执行状态为准**：`hasLiveActiveSubagents()` 使用与宿主 `archive-admission` 相同的 `AgentRegistry.list()` 读取方式，按 `session.header.parentSession` 与 `origin: 'subagent'` 建立父子关系，以 visited 集合防环，发现任一 `status === 'running'` 的后代即判在途。旧 Job-backed 路径仅作兼容回退，并调用 `jobs.list(agent.id)` 取得当前 Session 可见的 Job；新版 managed activation 继续由第 1 条的启动回执与 `subagent-settled` 覆盖。
+4. **普通 fork 与子 Agent 分类分离**：本机 `22ddee37924` 的普通 fork 不再写 `parentSession`，真实子 Agent 仍同时写 `origin: 'subagent'` 与直接创建者 id。`isSubagentSession()` 以 `origin` 作为现行子 Agent 标识，`parentSession` 只保留旧宿主与历史 parent-linked 日志的兼容读取；无 `origin` / `parentSession` 的独立 fork 返回 `false`。动态探针继续同时要求 `origin` 与 `parentSession`，因为宿主明确不为新普通 fork 写替代来源字段，而真实子 Agent 的直接创建者关系仍保留。
 
 ## Alternatives considered
 
@@ -37,6 +38,7 @@ DSH 0.2.1 对齐审查又确认动态补充探针存在两处既有失配：`sub
 2. **仅在主 Agent 文本中正则匹配“子代理已派出”**：否决。自然语言表述多变且易被伪造，无法保证准确度与版本稳定性；协议级工具回执与结算事件才是权威源。
 3. **只依赖宿主动态服务探测（`ctx.agents` / `ctx.jobs`）**：否决。离线回放（`eval-replay.mjs`）与部分宿主环境缺乏运行时句柄，必须以会话事件日志为基础、以动态探测为补充，确保双模兼容与优雅降级。
 4. **用 `listChildren()` 或 `listDescendants().activity` 替代 AgentRegistry 状态**：否决。前者只给持久目录身份，后者的 `activity` 表示 Session 是否驻留；continuable 子 Agent 结算后仍可能驻留，而 external activation 又没有本地 Session，两者都不能表示“执行尚未完成”。
+5. **为独立 fork 或未来父子关系另造来源字段**：否决。宿主明确不为新普通 fork 写替代来源字段，真实子 Agent 仍保留直接创建者 id；读取不存在的 descriptor 父 id 只会让动态探针静默失效。现行读取保持 `origin + parentSession`，`auto.test.ts` 另以无 parent/origin 的 `isSeeded` 会话钉住独立 fork 返回 `false`。
 
 ## Consequences
 
@@ -44,3 +46,4 @@ DSH 0.2.1 对齐审查又确认动态补充探针存在两处既有失配：`sub
 - 待子代理结算消息注入并由主 Agent 在后续回合完成最终答复后，验收门禁在子代理全部结算的状态下恢复正常判定；
 - `AutoTaskEvidence` 新增 `pendingSubagents: boolean` 字段，保持类型与向后兼容性。
 - 动态补充探针恢复实际判别力：`index.test.ts` 覆盖运行中后代、idle/无关分支、旧 Job 的 SessionId 调用与 stopping 状态、非 subagent Job 以及服务缺失降级。新版 managed activation 不需要伪造 Job 生命周期事件。
+- 新普通 fork 不再因子级历史前缀而被当作 delegated child 跳过自动门控；历史 parent-only 日志仍沿用兼容读取。`auto.test.ts` 同时保留真实子 Agent、历史 parent-linked 会话与独立 fork 三侧断言。

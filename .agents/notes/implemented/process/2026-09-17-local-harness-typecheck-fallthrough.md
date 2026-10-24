@@ -35,6 +35,7 @@ File '.../node_modules/@deepseek-ai/dsh-session/lib/types/index.d.ts' exists - u
 4. **留应急逃生阀** `DSH_VERIFIER_SKIP_HARNESS_CHECK=1`，用于确实需要在未重建 harness 时跑一次的场景。
 5. **`peerDependencies` 补齐 0.1.6 版本线**。注意 semver 细节：`^0.1.6` **不匹配** `0.1.6-alpha.2` 这类预发布版，故照既有写法显式列出 `^0.1.6-alpha.1 || ^0.1.6-alpha.2 || ~0.1.6`（0.1.7-alpha.1 后来以同一写法追加在各包末尾）。
 6. **`AGENTS.md` 命令节**补充两条：护栏的存在与逃生阀、以及"客户端面因缺可选依赖可能长期停在旧产物上"这一已知限制。
+7. **不能重建宿主时用外置声明镜像做补充检查**：2026-10-24 对齐 `0.2.1-rc.3` 后，标准 `typecheck:local` 通过临时 junction 找到真实 checkout，但被 11 个包的源码新于声明产物拦下，未使用跳过开关。另在会话临时目录用宿主 TypeScript `6.0.3` 的 `noCheck` + `emitDeclarationOnly` 生成当前 HEAD 声明镜像，再分别对插件 Host 与 Client 做 `noEmit` 检查，并用 `--traceResolution` 确认直接消费的核心与客户端包均解析到该镜像。镜像只证明插件调用面与新声明一致，不证明宿主自身内部类型检查通过，也不替代标准 `typecheck:local` 或 npm 发布门禁；Cordis / Schemastery 保留已逐行审阅的既有声明，避免把其独立 compilerOptions 误并入插件严格程序。
 
 ## Alternatives considered
 
@@ -43,6 +44,7 @@ File '.../node_modules/@deepseek-ai/dsh-session/lib/types/index.d.ts' exists - u
 3. **让护栏只告警不失败**：否决。告警会被忽略，而这里失败的代价极低（重建 harness 或设一次逃生阀），收益是把"假绿"变成"明确的分岔"。唯一会让人不适的情形是客户端面缺可选依赖时无法重建——该情形已在失败文案与 `AGENTS.md` 中单独说明。
 4. **把 devDependencies 升到 0.1.6 让发版门禁直接验新宿主**：否决（当时）。锁定最低版本是有意的兼容性基线，升上去等于放弃"旧宿主仍可用"的验证；新宿主由 `typecheck:local` 负责，两者分工不同。**该取舍已在 2026-09-22 被反转**：客户端面的图标名在同一份源码里无法同时满足 0.1.6 与 0.1.7 两套拼写，锁最低基线就无法验通客户端面，于是门禁改锁 `0.1.7-alpha.1`（2026-09-23 又随宿主推进到 `0.1.7-rc.1`，2026-09-25 到 `0.1.7-rc.2`），旧宿主的宿主面兼容改由运行时双形态读取与回归测试承担。反转理由与边界见 `implemented/architecture/2026-09-22-dsh-0.1.7-alignment.md`。
 5. **让护栏校验构建产物的时间戳标记而非比对源码 mtime**：否决。harness 没有写入构建时间戳的约定，比对源码 mtime 无需上游配合，且直接对应"源码比产物新"这一真实失效条件。
+6. **把宿主全部 `src` 直接并入插件的一个 TypeScript 程序**：否决。宿主 Host / Client 两套 `Context` 合并本来就不能同处一个程序，Cordis 等包还使用独立 compilerOptions；直接合并会制造大量不属于插件的错误。外置声明镜像只用于插件调用面补充检查，且必须分 Host / Client 并核对解析落点。
 
 ## Consequences
 
@@ -51,3 +53,4 @@ File '.../node_modules/@deepseek-ai/dsh-session/lib/types/index.d.ts' exists - u
 - 代价：本地 harness 未构建或未更新时，该命令会失败而非"通过"。这是有意的取舍，`AGENTS.md` 已说明重建步骤与逃生阀。
 - 客户端面的结论仍然不完整：`client/ui-settings`、`client/ui-conversation`、`client/locale`、`api/remotes` 依赖 harness 的可选依赖（`@xterm/*`、`esbuild`、`diff`、`simple-icons` 等）才能 emit，本机缺失时这些包的 `lib/types` 停在 2026-09-02。护栏会如实报告这些条目，不会假装它们已验证。0.1.6 时曾以独立取证确认客户端面无风险：仓库客户端代码未触碰 0.1.6 改动的任何符号（`provenance` 重命名、`settings.plugin.item` 移除、`turnTail` 由 `chain` 改 `list`），只注册四个未变动的槽位。**该结论只对 0.1.6 成立**：0.1.7 确实改动了客户端面（`ctx.slots` 的声明包与整套图标名），那两处已在 `implemented/architecture/2026-09-22-dsh-0.1.7-alignment.md` 中单独处理。
 - 验证基线：护栏在缺目录与源码较新两种情形下均以非零退出并给出可执行指引；`DSH_VERIFIER_SKIP_HARNESS_CHECK=1` 下退出码 0 并打印跳过说明。
+- 2026-10-24 的标准 `typecheck:local` 因 11 个包产物陈旧而按预期失败；外置 HEAD 声明镜像的插件 Host / Client 检查均零错误。临时 junction 已删除，镜像、配置与解析日志都在会话临时目录，不进入插件或宿主仓库。

@@ -55,11 +55,12 @@ const CONSEQUENTIAL_TOOLS = new Set([
 ])
 
 /**
- * Whether an agent session is a delegated child rather than the operator's own
- * topic. Child sessions are seeded with a real user message, so they look like
- * a fresh task to {@link analyzeAutoTask}; gate them only when asked.
+ * Whether an agent session inherits delegated-child gating rather than being
+ * treated as the operator's own topic. Current hosts mark subagents with
+ * `origin`; `parentSession` retains compatibility with historical child logs.
+ * Independent forks created by newer hosts have neither field.
  * @param agent - Agent (or any object exposing its session).
- * @returns True for subagent and forked-child sessions.
+ * @returns True for subagents and legacy parent-linked child sessions.
  */
 export function isSubagentSession(agent: { session?: unknown } | undefined): boolean {
   const header = (agent?.session as { header?: { origin?: string; parentSession?: unknown } } | undefined)?.header
