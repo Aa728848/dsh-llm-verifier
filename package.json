@@ -22,27 +22,27 @@
   "author": "eddyskywalker",
   "type": "module",
   "main": "lib/index.js",
-  "types": "lib/types/index.d.ts",
+  "types": "lib/types/plugin/index.d.ts",
   "exports": {
     ".": {
-      "types": "./lib/types/index.d.ts",
+      "types": "./lib/types/plugin/index.d.ts",
       "default": "./lib/index.js"
     },
     "./core": {
-      "types": "./lib/types/core.d.ts",
+      "types": "./lib/types/scoring/core.d.ts",
       "default": "./lib/core.js"
     },
     "./caller": {
-      "types": "./lib/types/caller.d.ts",
+      "types": "./lib/types/judge/caller.d.ts",
       "default": "./lib/caller.js"
     },
     "./replay": {
-      "types": "./lib/types/replay.d.ts",
+      "types": "./lib/types/replay/replay.d.ts",
       "default": "./lib/replay.js"
     },
     "./package.json": "./package.json",
     "./client": {
-      "types": "./lib/types/client.d.ts",
+      "types": "./lib/types/client/view/client.d.ts",
       "default": "./lib/client.js"
     }
   },
@@ -111,19 +111,24 @@
     "scripts",
     "cordis.patch.yml",
     "README.md",
-    "CHANGELOG.md"
+    "docs/CHANGELOG.md"
   ],
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && tsdown && node scripts/sync-installed-profiles.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.build.json",
     "typecheck:local": "node scripts/check-harness-types.mjs && tsc --noEmit -p tsconfig.local.json",
     "test": "vitest run",
-    "verify:release": "pnpm run typecheck && pnpm test && pnpm run build",
+    "check:layout": "node scripts/check-layout.mjs",
+    "verify:release": "pnpm run check:layout && pnpm run typecheck && pnpm test && pnpm run build",
     "prepublishOnly": "pnpm run verify:release",
-    "release": "node .dsh/skills/release-plugin/scripts/release.mjs"
+    "release": "node scripts/release.mjs"
   },
   "license": "MIT",
   "publishConfig": {
     "access": "public"
   }
 }
+
+
+
+

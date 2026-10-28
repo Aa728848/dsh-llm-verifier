@@ -28,7 +28,12 @@ const clientExternals = [
 
 const host: UserConfig = {
   name: packageId,
-  entry: ['src/index.ts', 'src/core.ts', 'src/caller.ts', 'src/replay.ts'],
+  entry: {
+    index: 'src/plugin/index.ts',
+    core: 'src/scoring/core.ts',
+    caller: 'src/judge/caller.ts',
+    replay: 'src/replay/replay.ts',
+  },
   outDir: 'lib',
   format: ['esm'],
   fixedExtension: false,
@@ -47,7 +52,7 @@ const host: UserConfig = {
 
 const client: UserConfig = {
   name: `${packageId}/client`,
-  entry: { client: 'src/client.tsx' },
+  entry: { client: 'src/client/view/client.tsx' },
   outDir: 'lib',
   format: 'cjs',
   platform: 'browser',
@@ -75,3 +80,4 @@ if (localClientOut) {
 }
 
 export default configs
+

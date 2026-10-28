@@ -18,7 +18,7 @@
  *   node scripts/eval-replay.mjs --dir <topic-dir>  # one topic directory (repeatable)
  *   node scripts/eval-replay.mjs --thresholds 0.5,0.65,0.8
  *   node scripts/eval-replay.mjs --json
- *   node scripts/eval-replay.mjs --samples samples/strategy   # labeled trigger evaluation
+ *   node scripts/eval-replay.mjs --samples docs/samples/strategy   # labeled trigger evaluation
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -166,3 +166,4 @@ if (options.json) {
   console.log('  note: a top-logprobs score is an expectation over a token distribution the snapshot')
   console.log('  does not keep, so its text-channel re-parse is expected to differ.')
 }
+
