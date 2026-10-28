@@ -417,7 +417,7 @@ export const JudgeConfig: z<JudgeConfig> = z.object({
   reasoningEffort: z.string(),
   maxTokens: z.number().step(1).min(1),
   label: z.string(),
-})
+}) as z<JudgeConfig>
 
 export const Config: z<Config> = markVolatile(z.object({
   enabled: z.boolean().default(true),
@@ -477,7 +477,7 @@ export const Config: z<Config> = markVolatile(z.object({
     maxTokens: z.number().step(1).min(1),
     label: z.string(),
   })).default([]),
-}))
+}) as z<Config>)
 
 function resolveJudgeLabel(
   rawLabel: string | undefined,
