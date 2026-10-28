@@ -411,15 +411,21 @@ export function markVolatile<T extends z>(schema: T): T {
   return installVolatileRefProtocol(marked)
 }
 
-export const JudgeConfig: z<JudgeConfig> = z.object({
+/**
+ * `schemastery` and `@deepseek-ai/schemastery` both augment the global `Schemastery`
+ * namespace. When the host's `volatile` mode joins that namespace, `z.object()` infers
+ * `Volatile<...>` fields that the plain config interfaces do not have; these casts keep the
+ * public schema types on the runtime shape instead of the merged type.
+ */
+export const JudgeConfig = z.object({
   provider: z.string(),
   model: z.string(),
   reasoningEffort: z.string(),
   maxTokens: z.number().step(1).min(1),
   label: z.string(),
-})
+}) as unknown as z<JudgeConfig>
 
-export const Config: z<Config> = markVolatile(z.object({
+export const Config = markVolatile(z.object({
   enabled: z.boolean().default(true),
   autoVerifyMode: z.union(['manual', 'smart', 'strict']).default('smart'),
   autoVerifyThreshold: z.number().min(0).max(1).default(0.65),
@@ -477,7 +483,7 @@ export const Config: z<Config> = markVolatile(z.object({
     maxTokens: z.number().step(1).min(1),
     label: z.string(),
   })).default([]),
-}))
+})) as unknown as z<Config>
 
 function resolveJudgeLabel(
   rawLabel: string | undefined,
