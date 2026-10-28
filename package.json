@@ -111,7 +111,8 @@
     "scripts",
     "cordis.patch.yml",
     "README.md",
-    "docs/CHANGELOG.md"
+    "CONTRIBUTING.md",
+    "docs"
   ],
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && tsdown && node scripts/sync-installed-profiles.mjs",
@@ -128,7 +129,3 @@
     "access": "public"
   }
 }
-
-
-
-

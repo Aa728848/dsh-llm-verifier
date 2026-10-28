@@ -47,5 +47,5 @@
 
 - **门禁精确锁在 `0.2.1-rc.3`，兼容声明也停在这条线**。代价是 0.1.1–0.1.6 的宿主面不再被自动化类型检查覆盖，只靠运行时双形态读取与回归测试保证。精确 pin 是为了防止门禁在未逐 tag 审查时浮到半发布版本。
 - **`snapshotEvents()` 是有豁免的调用**：见 [D12](adr/D12-host-seams.md)。
-- **`lib/types/message-source.d.ts` 是孤立产物**：该模块只含类型层声明，运行时被 tree-shake，没有对应的 `lib/message-source.js`，属正常。
+- **`lib/types/plugin/message-source.d.ts` 是孤立产物**：该模块只含类型层声明，运行时被 tree-shake，没有对应的 `lib/plugin/message-source.js`，属正常。
 - **`lib/` 里的 chunk 文件名带 hash**：`build` 先清空 `lib/`，磁盘上成对的新增/删除是正常的，不要手工保留旧文件。

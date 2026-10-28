@@ -9,7 +9,7 @@ pnpm run typecheck       # 按 package.json 锁定的 @deepseek-ai/dsh-* 检查�
 pnpm run typecheck:local # 按 ../deepseek-harness 的实际类型检查
 pnpm test                # 全量单测
 npx vitest run test/routing/router.test.ts   # 单个文件
-pnpm run verify:release  # typecheck + test + build，提交前必跑
+pnpm run verify:release  # check:layout + typecheck + test + build，提交前必跑
 node scripts/eval-replay.mjs                 # 离线回放，无模型调用，需先 build
 ```
 
@@ -31,12 +31,14 @@ lib/                 构建产物，不入库
 
 英文 conventional commits：`feat:` / `fix:` / `chore:` / `docs:` / `test:` / `refactor:`。
 
-版本号是**单独一次** `chore: bump ...`，不与功能混在同一次提交里。
+版本号是**单独一次** `chore(release): bump ...`，不与功能混在同一次提交里。
 
 ## 发布
 
-`v*` tag 触发 `.github/workflows/release.yml`：typecheck → build → test → 从 CHANGELOG 取 notes → `pnpm pack` → 发布 npm 与 GitHub Release。
+1. **审计提交并定版本**：`git describe --tags --abbrev=0`，再 `git log <tag>..HEAD --oneline`；按改动性质决定 SemVer。
+2. **一条命令发版**：`pnpm run release <version>`。脚本更新 `package.json` 与 `docs/CHANGELOG.md`、跑 `verify:release`、预览 `pnpm pack`，最后提交并打 `v<version>` tag。
+3. **推送触发 CI**：`git push origin main --tags`。`.github/workflows/release.yml` 从 `docs/CHANGELOG.md` 取 notes，发布 npm 与 GitHub Release。
+4. **手动兜底**：`npm whoami` 后 `pnpm publish --access public --no-git-checks`；`prepublishOnly` 会再跑一次 `verify:release`。
+5. **预发布**：npm 11+ 必须显式传 `--tag <dist-tag>`；CI 会从 `v<version>-<tag>` 自动识别。
 
-手动发布时 `pnpm publish` 会先跑 `prepublishOnly`（即 `verify:release`），确保产物来自 npm 依赖而不是本地 checkout 的类型。
-
-CHANGELOG 的条目在 `docs/CHANGELOG.md`，格式是 `## <版本> - <日期>` 加分类小节，发版工作流按标题提取。
+`lib/` 永远不入库；`files` 决定 tarball 内容，改 README 的文档链接时同步检查 `pnpm pack --dry-run`。CHANGELOG 条目在 `docs/CHANGELOG.md`，格式是 `## <版本> - <日期>` 加分类小节。

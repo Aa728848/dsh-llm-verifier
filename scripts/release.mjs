@@ -11,7 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const projectRoot = path.resolve(__dirname, '../../../../');
+const projectRoot = path.resolve(__dirname, '..');
 
 function run(command, options = {}) {
   console.log(`\n\x1b[36m> ${command}\x1b[0m`);
@@ -24,7 +24,7 @@ function runCapture(command) {
 
 async function main() {
   const pkgPath = path.join(projectRoot, 'package.json');
-  const changelogPath = path.join(projectRoot, 'CHANGELOG.md');
+  const changelogPath = path.join(projectRoot, 'docs', 'CHANGELOG.md');
 
   if (!fs.existsSync(pkgPath)) {
     console.error('Error: package.json not found in project root.');
@@ -74,24 +74,18 @@ async function main() {
   }
 
   // 3. 执行门禁检查
-  console.log('\n[3/5] 执行全量类型检查与单元测试...');
-  run('pnpm run typecheck');
-  run('pnpm test');
+  console.log('\n[3/5] 执行全量门禁...');
+  run('pnpm run verify:release');
 
-  // 4. 清理旧产物并构建
-  console.log('\n[4/5] 清理 lib 并重新构建...');
-  const libDir = path.join(projectRoot, 'lib');
-  if (fs.existsSync(libDir)) {
-    fs.rmSync(libDir, { recursive: true, force: true });
-  }
-  run('pnpm run build');
+  // 4. 预览发布包
+  console.log('\n[4/5] 预览发布包...');
   run('pnpm pack --dry-run');
 
   // 5. Git Commit & Tag
   console.log('\n[5/5] Git 提交与打 Tag...');
-  run('git add package.json CHANGELOG.md');
+  run('git add package.json docs/CHANGELOG.md');
 
-  const status = runCapture('git status --porcelain package.json CHANGELOG.md');
+  const status = runCapture('git status --porcelain package.json docs/CHANGELOG.md');
   if (status) {
     run(`git commit -m "chore(release): bump package version to ${targetVersion}"`);
   } else {

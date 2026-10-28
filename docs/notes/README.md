@@ -11,4 +11,4 @@ implemented/    已交付：architecture / bug-fix / feature / process / simplif
 proposed/       未开工的计划，不是承诺
 ```
 
-历史页里出现的路径（`src/*.ts`、`.agents/notes/`）是写作当时的布局，2026-11 的结构重构把源码拆进了 `src/<域>/`、测试移到了 `test/<域>/`。
+历史页里出现的路径（`src/*.ts`、`.agents/notes/`）是写作当时的布局，2026-10 的结构重构把源码拆进了 `src/<域>/`、测试移到了 `test/<域>/`。

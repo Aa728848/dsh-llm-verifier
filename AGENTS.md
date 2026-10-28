@@ -18,7 +18,7 @@ pnpm run verify:release  # 提交前必跑
 ## 硬性规矩
 
 1. **改 `src/` 必须 `pnpm run build`，但 `lib/` 不入库**。构建末尾的 `scripts/sync-installed-profiles.mjs` 不可省：它刷新已安装副本并解除硬链接，防 Windows NTFS FileId 碰撞导致发布报 `415 Hard link is not allowed`。
-2. **提交前跑 `pnpm run verify:release`**。英文 conventional commits，版本号单独一次 `chore: bump ...`。
+2. **提交前跑 `pnpm run verify:release`**。英文 conventional commits，版本号单独一次 `chore(release): bump ...`。
 3. **一个事实只有一个归宿**。机制写在代码里；为什么这么设计写 `docs/adr/D*.md`；跨模块地图写 `docs/ARCHITECTURE.md`。代码注释只允许写"为什么这行不显然"，并在需要时引用 ADR 编号——**不要**在注释里复述文档已经说过的机制，也不要让测试去断言文档里的一句话。
 4. **失败即抛出**（[D3](docs/adr/D3-fail-closed.md)）：判决解析不出必须报错，不静默给分、不静默放行。语义路由分类必须是严格 JSON，多余字段一律拒绝。
 5. **证据双层限长**（[D10](docs/adr/D10-evidence-budget.md)）：新增候选或检查点来源必须经 `itemBudget()` 分摊总预算，单项与总量都不越界，截断标记计入预算。
