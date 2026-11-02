@@ -944,6 +944,40 @@ describe('process cycle execution', () => {
     expect(report?.error).toContain('candidate B')
     expect(h.failed).toBe(1)
   })
+
+  it('retries alternative generation without temperature when the model rejects temperature', async () => {
+    const seenRequests: any[] = []
+    const h = harness({
+      stream: (request: any) => {
+        seenRequests.push(request)
+        if ('temperature' in request) {
+          return streamOf([{
+            type: 'finish',
+            reason: {
+              kind: 'error',
+              failure: {
+                message: `sub2api API error (400): {"message":"Unsupported parameter: 'temperature' is not supported with this model.","param":"temperature","type":"invalid_request_error"}`,
+                code: 'INVALID_REQUEST',
+              },
+            },
+          } as never])
+        }
+        return streamOf(textChunks('ALTERNATIVE-WITHOUT-TEMP'))
+      },
+      compare: async () => compareResult('B'),
+    })
+    const first = await run(h, { original: textChunks('ORIGINAL-1') })
+    expect(first.chunks).toEqual(textChunks('ALTERNATIVE-WITHOUT-TEMP'))
+    expect(seenRequests).toHaveLength(2)
+    expect(seenRequests[0].temperature).toBe(1)
+    expect('temperature' in seenRequests[1]).toBe(false)
+
+    // Second cycle on the same route remembers and omits temperature immediately.
+    const second = await run(h, { original: textChunks('ORIGINAL-2'), intent: intent({ registeredAt: 2000 }) })
+    expect(second.chunks).toEqual(textChunks('ALTERNATIVE-WITHOUT-TEMP'))
+    expect(seenRequests).toHaveLength(3)
+    expect('temperature' in seenRequests[2]).toBe(false)
+  })
 })
 
 describe('process activity, the source of the chat chip', () => {

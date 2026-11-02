@@ -22,6 +22,40 @@ describe('automatic verifier scoring', () => {
     await callVerifier(config(async function* (options) { seen = options; yield* streamOf(chunks()) }, vi.fn(), ctx(), { temperature: 0.7 }), 'prompt')
     expect(seen.temperature).toBe(0.7)
   })
+  it('retries llm.stream without temperature when the model rejects temperature and remembers the capability', async () => {
+    const seenOptions: any[] = []
+    const capabilities = new TopLogprobCapabilityCache()
+    const cfg = config(async function* (options) {
+      seenOptions.push(options)
+      if ('temperature' in options) {
+        yield {
+          type: 'finish',
+          reason: {
+            kind: 'error',
+            failure: {
+              message: `sub2api API error (400): {"message":"Unsupported parameter: 'temperature' is not supported with this model.","param":"temperature","type":"invalid_request_error"}`,
+              code: 'INVALID_REQUEST',
+            },
+          },
+        }
+        return
+      }
+      yield* streamOf(chunks())
+    }, vi.fn(), ctx(), { provider: 'sub2api', model: 'gpt-6-astra', topLogprobCapabilities: capabilities })
+
+    const first = await callVerifier(cfg, 'prompt-1')
+    expect(first.scoringMode).toBe('explicit-tag')
+    expect(seenOptions).toHaveLength(2)
+    expect(seenOptions[0].temperature).toBe(0.2)
+    expect('temperature' in seenOptions[1]).toBe(false)
+    expect(capabilities.isTemperatureUnsupported('sub2api', 'gpt-6-astra')).toBe(true)
+
+    // Subsequent call omits temperature up front without wasting a failing request.
+    const second = await callVerifier(cfg, 'prompt-2')
+    expect(second.scoringMode).toBe('explicit-tag')
+    expect(seenOptions).toHaveLength(3)
+    expect('temperature' in seenOptions[2]).toBe(false)
+  })
   it('uses top-logprob distributions on an explicit OpenAI-compatible route', async () => {
     const body = { choices: [{ message: { content: '<score_A> A </score_A>' }, logprobs: { content: [{ token: '<score_A>', logprob: 0, top_logprobs: [] }, { token: 'A', logprob: -0.1, top_logprobs: [{ token: 'A', logprob: Math.log(0.7) }, { token: 'T', logprob: Math.log(0.3) }] }] } }], usage: { prompt_tokens: 10, completion_tokens: 2 } }
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })))

@@ -42,7 +42,7 @@ export function fallbackDeepFreeze<T>(value: T): T {
 }
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { CompletionLogprobs } from '../scoring/core.ts'
-import { TopLogprobCapabilityCache, TopLogprobsBudgetError, TopLogprobsUnsupportedError, callTopLogprobs, resolveTopLogprobRoute } from './top-logprobs.ts'
+import { TopLogprobCapabilityCache, TopLogprobsBudgetError, TopLogprobsUnsupportedError, callTopLogprobs, isTemperatureUnsupportedMessage, resolveTopLogprobRoute } from './top-logprobs.ts'
 import type { Context } from '@deepseek-ai/cordis'
 
 export interface VerifierClientConfig {
@@ -326,6 +326,7 @@ const imageRefs = new WeakMap<VerifierImage, Promise<unknown>>()
  * @returns The completion (with `truncated`) when it produced text.
  */
 async function callTextCompletion(config: VerifierClientConfig, prompt: string, signal: AbortSignal | undefined, images: readonly VerifierImage[] | undefined, attempt: number, tolerateTruncation: boolean): Promise<VerifierCompletion & { truncated: boolean }> {
+  await config.topLogprobCapabilities.ensureLoaded()
   const content: ContentBlock[] = [{ type: 'text', text: prompt }]
   for (const image of images ?? []) {
     let pending = imageRefs.get(image)
@@ -344,17 +345,34 @@ async function callTextCompletion(config: VerifierClientConfig, prompt: string, 
     content.push({ type: 'image', attachment: await pending as never })
   }
   const messages = [createUserMessage({ content, source: { kind: 'llm-verifier' } })]
-  const assembler = new BlockAssembler()
-  const options = deepFreeze({
-    provider: config.provider,
-    model: config.model,
-    ...(config.reasoningEffort ? { reasoningEffort: ReasoningEffortId(config.reasoningEffort) } : {}),
-    messages,
-    maxTokens: config.maxTokens,
-    temperature: config.temperature,
-    signal,
-  })
-  for await (const chunk of config.llm.stream(options)) assembler.push(chunk)
+  const runStream = async (omitTemperature: boolean) => {
+    const assembler = new BlockAssembler()
+    const options = deepFreeze({
+      provider: config.provider,
+      model: config.model,
+      ...(config.reasoningEffort ? { reasoningEffort: ReasoningEffortId(config.reasoningEffort) } : {}),
+      messages,
+      maxTokens: config.maxTokens,
+      ...(omitTemperature ? {} : { temperature: config.temperature }),
+      signal,
+    })
+    for await (const chunk of config.llm.stream(options)) assembler.push(chunk)
+    return assembler
+  }
+  const omitInitially = config.topLogprobCapabilities.isTemperatureUnsupported(config.provider, config.model)
+  let assembler: BlockAssembler
+  try {
+    assembler = await runStream(omitInitially)
+  } catch (error) {
+    if (!omitInitially && error instanceof Error && isTemperatureUnsupportedMessage(error.message)) {
+      config.topLogprobCapabilities.markTemperatureUnsupported(config.provider, config.model)
+      assembler = await runStream(true)
+    } else throw error
+  }
+  if (!omitInitially && assembler.finish.kind === 'error' && isTemperatureUnsupportedMessage(assembler.finish.failure.message)) {
+    config.topLogprobCapabilities.markTemperatureUnsupported(config.provider, config.model)
+    assembler = await runStream(true)
+  }
   let truncated = false
   if (assembler.finish.kind === 'max-tokens') {
     if (!tolerateTruncation) throw unusable('model call failed: ' + failureMessage(assembler.finish), attempt, assembler.usage)
@@ -407,7 +425,9 @@ async function callAutomatic(config: VerifierClientConfig, prompt: string, signa
   if (!config.topLogprobCapabilities.isUnsupported(config.provider, config.model)) {
     const route = await resolveTopLogprobRoute(config.ctx, config.provider)
     if (route !== undefined) {
-      try { return await callTopLogprobs(route, config.model, prompt, config.maxTokens, config.reasoningEffort, signal, images, attempt, config.temperature) }
+      const temperature = config.topLogprobCapabilities.isTemperatureUnsupported(config.provider, config.model) ? undefined : config.temperature
+      const markTempUnsupported = () => config.topLogprobCapabilities.markTemperatureUnsupported(config.provider, config.model)
+      try { return await callTopLogprobs(route, config.model, prompt, config.maxTokens, config.reasoningEffort, signal, images, attempt, temperature, markTempUnsupported) }
       catch (error) {
         // Both a capability rejection and a non-retryable provider rejection of
         // the direct transport fall back to the DSH stream instead of failing

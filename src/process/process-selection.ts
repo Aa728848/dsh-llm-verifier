@@ -8,6 +8,7 @@ import type {} from '../plugin/message-source.ts'
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { addUsage, emptyUsage, GENERATION_TEMPERATURE, type UsageStats } from '../judge/caller.ts'
+import { isTemperatureUnsupportedMessage } from '../judge/top-logprobs.ts'
 import { stableHash } from '../engine/cache.ts'
 import { PROCESS_CRITERIA, type Criterion } from '../scoring/core.ts'
 import { mergeRunStats, partialStats, type CompareResult, type RunStats, type SelectResult } from '../engine/engine.ts'
@@ -858,6 +859,8 @@ export class ProcessSelector {
   private readonly intents = new Map<string, ProcessIntent>()
   /** Requests this plugin dispatched itself (the alternative reply): never a selection subject. */
   private readonly internal = new WeakSet<object>()
+  /** Routes whose stream rejected the `temperature` parameter during alternative generation. */
+  private readonly temperatureUnsupported = new Set<string>()
   /**
    * Phase controllers of the cycles currently in flight, one per session.
    *
@@ -1070,9 +1073,19 @@ export class ProcessSelector {
       // Candidate i uses pool entry i, wrapping around a shorter list; an empty pool mirrors the
       // original request, which is the shipped resampling behaviour.
       const request = buildAlternativeRequest(options, phase.signal, intent.failureContext, alternativeTargetAt(alternativeTargets, index))
-      this.internal.add(request as object)
+      const routeKey = request.provider + '\0' + request.model
+      const omitTemp = this.temperatureUnsupported.has(routeKey)
+      const initialRequest: GenerateOptions = omitTemp ? (() => { const { temperature: _t, ...rest } = request; return rest })() : request
+      this.internal.add(initialRequest as object)
       const chunks: StreamChunk[] = []
-      const generated = drainAlternative(this.deps.stream(request), PROCESS_CANDIDATE_CAP_CHARS, chunks)
+      const retryWithoutTemperature = (): AsyncIterable<StreamChunk> => {
+        this.temperatureUnsupported.add(routeKey)
+        chunks.length = 0
+        const { temperature: _t, ...withoutTemp } = request
+        this.internal.add(withoutTemp as object)
+        return this.deps.stream(withoutTemp)
+      }
+      const generated = drainAlternative(this.deps.stream(initialRequest), PROCESS_CANDIDATE_CAP_CHARS, chunks, omitTemp ? undefined : retryWithoutTemperature)
       // A discarded cycle must never surface as an unhandled rejection; the awaiting paths still see it.
       generated.catch(() => {})
       dispatches.push({ generated, chunks })
@@ -1474,14 +1487,36 @@ export class ProcessSelector {
  * The chunk list is owned by the CALLER so the usage reported before a stream failure is still
  * available to the failure row; keeping it local discarded it and recorded a free generation.
  */
-async function drainAlternative(source: AsyncIterable<StreamChunk>, cap: number, chunks: StreamChunk[]): Promise<BufferedCandidate> {
-  let chars = 0
-  let overflow = false
-  for await (const chunk of source) {
-    chunks.push(chunk)
-    chars += measureChunk(chunk)
-    if (chars > cap) { overflow = true; break }
+function streamTemperatureRejected(chunks: readonly StreamChunk[]): boolean {
+  for (const chunk of chunks) {
+    if (chunk.type === 'finish' && chunk.reason.kind === 'error' && isTemperatureUnsupportedMessage(chunk.reason.failure.message)) return true
   }
+  return false
+}
+
+async function drainAlternative(source: AsyncIterable<StreamChunk>, cap: number, chunks: StreamChunk[], retryWithoutTemperature?: () => AsyncIterable<StreamChunk>): Promise<BufferedCandidate> {
+  const consume = async (stream: AsyncIterable<StreamChunk>) => {
+    let count = 0
+    let over = false
+    for await (const chunk of stream) {
+      chunks.push(chunk)
+      count += measureChunk(chunk)
+      if (count > cap) { over = true; break }
+    }
+    return { chars: count, overflow: over }
+  }
+  let result: { chars: number; overflow: boolean }
+  try {
+    result = await consume(source)
+  } catch (error) {
+    if (retryWithoutTemperature !== undefined && error instanceof Error && isTemperatureUnsupportedMessage(error.message)) {
+      result = await consume(retryWithoutTemperature())
+    } else throw error
+  }
+  if (retryWithoutTemperature !== undefined && !result.overflow && streamTemperatureRejected(chunks)) {
+    result = await consume(retryWithoutTemperature())
+  }
+  const { chars, overflow } = result
   const rendered = renderCandidate(chunks)
   const finish = finishKind(chunks)
   return {

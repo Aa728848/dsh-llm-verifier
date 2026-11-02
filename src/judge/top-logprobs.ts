@@ -37,6 +37,13 @@ export class TopLogprobsRouteError extends TopLogprobsUnsupportedError { constru
  */
 export class TopLogprobsBudgetError extends Error { constructor(message: string) { super(message); this.name = 'TopLogprobsBudgetError' } }
 
+const TEMPERATURE_REJECTED_MESSAGE = /(?:unsupported|unknown|unrecognized|invalid)[^\n]{0,80}\btemperature\b|\btemperature\b[^\n]{0,80}(?:not support|unsupported|not allowed|cannot be|only\b|must be 1\b)/i
+
+/** Whether a provider error message specifically rejects the `temperature` parameter. */
+export function isTemperatureUnsupportedMessage(message: string): boolean {
+  return TEMPERATURE_REJECTED_MESSAGE.test(message)
+}
+
 /**
  * Classify a 200 response that carries no token logprob row.
  *
@@ -123,15 +130,25 @@ export async function resolveTopLogprobRoute(ctx: Context, provider: string): Pr
   return { baseURL, ...(apiKey ? { apiKey } : {}), ...(headers ? { headers } : {}), deepSeekThinking: false }
 }
 
-export async function callTopLogprobs(route: TopLogprobRoute, model: string, prompt: string, maxTokens: number, reasoningEffort: string | undefined, signal?: AbortSignal, images?: readonly VerifierImage[], attempt = 1, temperature = 0.2): Promise<TopLogprobCompletion> {
+export async function callTopLogprobs(route: TopLogprobRoute, model: string, prompt: string, maxTokens: number, reasoningEffort: string | undefined, signal?: AbortSignal, images?: readonly VerifierImage[], attempt = 1, temperature: number | undefined = 0.2, onTemperatureUnsupported?: () => void): Promise<TopLogprobCompletion> {
   const content: string | Record<string, unknown>[] = images?.length ? [{ type: 'text', text: prompt }, ...images.map(image => ({ type: 'image_url', image_url: { url: dataUrl(image) } }))] : prompt
   const thinking = route.deepSeekThinking && reasoningEffort ? reasoningEffort === 'off' ? { thinking: { type: 'disabled' } } : { thinking: { type: 'enabled' }, reasoning_effort: reasoningEffort } : {}
-  const response = await fetch(endpoint(route.baseURL), {
+  const send = (temp: number | undefined) => fetch(endpoint(route.baseURL), {
     method: 'POST', redirect: 'error', signal,
     headers: { 'content-type': 'application/json', ...(route.apiKey ? { authorization: 'Bearer ' + route.apiKey } : {}), ...route.headers },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content }], max_tokens: maxTokens, temperature, logprobs: true, top_logprobs: 20, ...thinking }),
+    body: JSON.stringify({ model, messages: [{ role: 'user', content }], max_tokens: maxTokens, ...(temp === undefined ? {} : { temperature: temp }), logprobs: true, top_logprobs: 20, ...thinking }),
   })
-  const raw = await response.text()
+  let response = await send(temperature)
+  let raw = await response.text()
+  // Fixed-sampling models (o-series, gpt-5/gpt-6 reasoning routes) reject `temperature` with HTTP
+  // 400/422. Without this check the generic `unsupported` pattern below misclassified the parameter
+  // error as a `top_logprobs` rejection and downgraded to the DSH stream — which then failed with
+  // the exact same `temperature` error.
+  if (!response.ok && temperature !== undefined && [400, 422].includes(response.status) && isTemperatureUnsupportedMessage(raw.slice(0, 1000))) {
+    onTemperatureUnsupported?.()
+    response = await send(undefined)
+    raw = await response.text()
+  }
   if (!response.ok) {
     const excerpt = raw.slice(0, 1000)
     const message = 'llm-verifier: top_logprobs request failed with HTTP ' + response.status + ': ' + excerpt
@@ -172,7 +189,7 @@ export async function callTopLogprobs(route: TopLogprobRoute, model: string, pro
 /** Marks older than this are dropped on hydration so a provider that later gains logprobs support is re-probed. */
 export const CAPABILITY_TTL_MS = 24 * 60 * 60 * 1000
 
-interface CapabilityDocument { version: 1; entries: Record<string, number> }
+interface CapabilityDocument { version: 1; entries: Record<string, number>; temperatureUnsupported?: Record<string, number> }
 
 /** Resolves the capability memory file beside the score cache inside the topic verifier directory. */
 export function resolveCapabilityFile(cacheDir: string, cwd = process.cwd()): string {
@@ -200,6 +217,7 @@ async function replaceFile(temporary: string, target: string): Promise<void> {
 
 export class TopLogprobCapabilityCache {
   private readonly unsupported = new Map<string, number>()
+  private readonly temperatureUnsupported = new Map<string, number>()
   private loaded = false
   private hydrating: Promise<void> | undefined
   private writing: Promise<void> = Promise.resolve()
@@ -215,19 +233,35 @@ export class TopLogprobCapabilityCache {
     return true
   }
 
+  /** Whether this provider/model rejected the `temperature` parameter within the capability TTL. */
+  isTemperatureUnsupported(provider: string, model: string): boolean {
+    const key = provider + '\0' + model
+    const markedAt = this.temperatureUnsupported.get(key)
+    if (markedAt === undefined) return false
+    if (this.now() - markedAt > CAPABILITY_TTL_MS) { this.temperatureUnsupported.delete(key); return false }
+    return true
+  }
+
   /** Hydrates persisted marks once; in-process marks always win over file contents. */
   async ensureLoaded(): Promise<void> {
     if (this.loaded || this.file === undefined) return
     this.hydrating ??= (async () => {
       try {
         const document = JSON.parse(await readFile(this.file!, 'utf8')) as CapabilityDocument
-        const entries = document !== null && typeof document === 'object' && document.version === 1 && typeof document.entries === 'object' && document.entries !== null ? document.entries : {}
+        const valid = document !== null && typeof document === 'object' && document.version === 1
+        const entries = valid && typeof document.entries === 'object' && document.entries !== null ? document.entries : {}
+        const tempEntries = valid && typeof document.temperatureUnsupported === 'object' && document.temperatureUnsupported !== null ? document.temperatureUnsupported : {}
         const now = this.now()
         for (const [key, markedAt] of Object.entries(entries)) {
           if (typeof markedAt !== 'number' || !Number.isFinite(markedAt) || markedAt < 0 || now - markedAt > CAPABILITY_TTL_MS) continue
           // Max-merge: never let an older persisted stamp clobber a fresher in-process probe.
           const existing = this.unsupported.get(key)
           if (existing === undefined || existing < markedAt) this.unsupported.set(key, markedAt)
+        }
+        for (const [key, markedAt] of Object.entries(tempEntries)) {
+          if (typeof markedAt !== 'number' || !Number.isFinite(markedAt) || markedAt < 0 || now - markedAt > CAPABILITY_TTL_MS) continue
+          const existing = this.temperatureUnsupported.get(key)
+          if (existing === undefined || existing < markedAt) this.temperatureUnsupported.set(key, markedAt)
         }
       } catch { /* a missing or unreadable file simply starts empty */ }
       this.loaded = true
@@ -237,6 +271,11 @@ export class TopLogprobCapabilityCache {
 
   markUnsupported(provider: string, model: string): void {
     this.unsupported.set(provider + '\0' + model, this.now())
+    this.persist()
+  }
+
+  markTemperatureUnsupported(provider: string, model: string): void {
+    this.temperatureUnsupported.set(provider + '\0' + model, this.now())
     this.persist()
   }
 
@@ -256,11 +295,12 @@ export class TopLogprobCapabilityCache {
   forget(provider: string, model: string): void {
     const key = provider + '\0' + model
     this.unsupported.delete(key)
+    this.temperatureUnsupported.delete(key)
     if (this.file === undefined) return
     const next = this.writing
       .catch(() => {})
       .then(() => this.ensureLoaded())
-      .then(() => { this.unsupported.delete(key); return this.writeDocument() })
+      .then(() => { this.unsupported.delete(key); this.temperatureUnsupported.delete(key); return this.writeDocument() })
     this.writing = next
     next.catch(() => { /* capability memory is best-effort */ })
   }
@@ -277,7 +317,11 @@ export class TopLogprobCapabilityCache {
   }
 
   private async writeDocument(): Promise<void> {
-    const snapshot: CapabilityDocument = { version: 1, entries: Object.fromEntries(this.unsupported) }
+    const snapshot: CapabilityDocument = {
+      version: 1,
+      entries: Object.fromEntries(this.unsupported),
+      ...(this.temperatureUnsupported.size > 0 ? { temperatureUnsupported: Object.fromEntries(this.temperatureUnsupported) } : {}),
+    }
     await mkdir(dirname(this.file!), { recursive: true })
     const temporary = this.file! + '.tmp-' + process.pid + '-' + (++replaceOrdinal)
     await writeFile(temporary, JSON.stringify(snapshot), 'utf8')

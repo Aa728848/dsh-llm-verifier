@@ -185,6 +185,66 @@ describe('callTopLogprobs temperature', () => {
     await callTopLogprobs(route, 'gpt-4o', 'test prompt', 100, undefined, undefined, undefined, 1, 0.7)
     expect(capturedBody.temperature).toBe(0.7)
   })
+
+  it('retries without temperature on 400 unsupported-temperature error instead of throwing TopLogprobsUnsupportedError', async () => {
+    const bodies: any[] = []
+    let notified = 0
+    const mockResponse = {
+      choices: [{
+        message: { content: '<score_A> A </score_A>' },
+        logprobs: {
+          content: [
+            { token: '<score_A>', logprob: 0, top_logprobs: [] },
+            { token: 'A', logprob: -0.1, top_logprobs: [{ token: 'A', logprob: 0 }] },
+          ],
+        },
+      }],
+      usage: { prompt_tokens: 10, completion_tokens: 2 },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_url, init: any) => {
+      const parsed = JSON.parse(init.body)
+      bodies.push(parsed)
+      if ('temperature' in parsed) {
+        return new Response(
+          JSON.stringify({ message: "Unsupported parameter: 'temperature' is not supported with this model.", param: 'temperature', type: 'invalid_request_error' }),
+          { status: 400 },
+        )
+      }
+      return new Response(JSON.stringify(mockResponse), { status: 200 })
+    }))
+
+    const route = { baseURL: 'https://api.openai.com/v1', apiKey: 'test-key', deepSeekThinking: false }
+    const res = await callTopLogprobs(route, 'gpt-6-astra', 'test prompt', 100, undefined, undefined, undefined, 1, 0.2, () => { notified += 1 })
+    expect(res.scoringMode).toBe('top-logprobs')
+    expect(notified).toBe(1)
+    expect(bodies).toHaveLength(2)
+    expect(bodies[0].temperature).toBe(0.2)
+    expect('temperature' in bodies[1]).toBe(false)
+  })
+
+  it('persists and forgets temperatureUnsupported marks alongside logprob marks', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-verifier-temp-caps-'))
+    try {
+      const file = resolveCapabilityFile(dir)
+      const first = new TopLogprobCapabilityCache(file)
+      expect(first.isTemperatureUnsupported('sub2api', 'gpt-6-astra')).toBe(false)
+      first.markTemperatureUnsupported('sub2api', 'gpt-6-astra')
+      await first.flush()
+
+      const second = new TopLogprobCapabilityCache(file)
+      await second.ensureLoaded()
+      expect(second.isTemperatureUnsupported('sub2api', 'gpt-6-astra')).toBe(true)
+      expect(second.isUnsupported('sub2api', 'gpt-6-astra')).toBe(false)
+
+      second.forget('sub2api', 'gpt-6-astra')
+      await second.flush()
+      expect(second.isTemperatureUnsupported('sub2api', 'gpt-6-astra')).toBe(false)
+
+      const third = new TopLogprobCapabilityCache(file)
+      await third.ensureLoaded()
+      expect(third.isTemperatureUnsupported('sub2api', 'gpt-6-astra')).toBe(false)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
 })
 
 describe('resolveTopLogprobRoute settings seam', () => {
