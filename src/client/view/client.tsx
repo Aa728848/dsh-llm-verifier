@@ -25,7 +25,7 @@ import * as uiPrimitives from '@deepseek-ai/dsh-client-ui-primitives'
  */
 const hostIcons = uiPrimitives as unknown as Record<string, React.ComponentType<{ size?: number }> | undefined>
 const IconRefresh = hostIcons.IconRefreshOutlineRegular ?? hostIcons.IconRefreshOutline16 ?? (() => null)
-import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage,
   compact, money, duration, dateTime, type I18nDict,
@@ -51,16 +51,18 @@ import {
   FIELDS,
   PROFILES,
   SECTIONS,
+  SETTINGS_TABS,
   acceptsNumber,
   activeProfile,
   applyProfile,
   isFieldChanged,
+  isFieldEnabled,
   issueMap,
   issueMessageKey,
   recommendedBudgets,
   resetField,
   sectionSummary,
-  renderSections,
+  renderTabSections,
   textIssue,
   validateValues,
   valuesFromView,
@@ -68,6 +70,7 @@ import {
   type FieldSpec,
   type Format,
   type ProfileId,
+  type SettingsTabId,
   type Translate,
   type Values,
 } from '../model/client-fields.ts'
@@ -177,18 +180,24 @@ interface StatisticsPageProps {
   }
 }
 
-const shell: React.CSSProperties = { width: '100%', maxWidth: 720, display: 'flex', flexDirection: 'column', gap: 12, padding: '0 0 32px', color: 'var(--dsw-alias-label-primary)' }
+const shell: React.CSSProperties = { width: '100%', maxWidth: 720, display: 'flex', flexDirection: 'column', gap: 16, padding: '0 0 24px', color: 'var(--dsw-alias-label-primary)' }
+const settingsHeader: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 6 }
 const settingsHeading: React.CSSProperties = { margin: 0, fontSize: 16, fontWeight: 500, lineHeight: '24px', color: 'var(--dsw-alias-label-primary)' }
-const settingsIntro: React.CSSProperties = { margin: 0, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-tertiary)' }
-const group: React.CSSProperties = { width: '100%', display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--dsw-alias-border-l2)' }
-const sectionTitle: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '18px 0 8px', border: 0, background: 'transparent', cursor: 'pointer', textAlign: 'left', font: 'inherit', color: 'var(--dsw-alias-label-primary)' }
-const sectionHeadingStyle: React.CSSProperties = { fontSize: 14, fontWeight: 500, lineHeight: '22px' }
+const settingsIntro: React.CSSProperties = { margin: 0, fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-tertiary)' }
+const statusChips: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 2 }
+const statusChip: React.CSSProperties = { padding: '1px 8px', borderRadius: 999, border: '1px solid var(--dsw-alias-border-l2)', color: 'var(--dsw-alias-label-secondary)', fontSize: 11, lineHeight: '18px' }
+const panelStyle: React.CSSProperties = { display: 'flex', flexDirection: 'column', minWidth: 0 }
+const group: React.CSSProperties = { width: '100%', display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--dsw-alias-border-l2)', marginTop: 16 }
+const sectionTitle: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '14px 0 6px', border: 0, background: 'transparent', textAlign: 'left', font: 'inherit', color: 'var(--dsw-alias-label-primary)' }
+const sectionHeadingStyle: React.CSSProperties = { fontSize: 13, fontWeight: 600, lineHeight: '20px' }
 const sectionSummaryStyle: React.CSSProperties = { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: '1 1 auto' }
 const badgeStyle: React.CSSProperties = { flex: '0 0 auto', padding: '0 6px', borderRadius: 999, fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)', border: '1px solid var(--dsw-alias-border-l2)' }
 const linkButton: React.CSSProperties = { border: 0, background: 'transparent', padding: 0, font: 'inherit', fontSize: 12, lineHeight: '18px', cursor: 'pointer', color: 'var(--dsw-alias-link)' }
-const row: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px 24px', minHeight: 56, padding: '10px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)' }
-const labelCell: React.CSSProperties = { flex: '1 1 220px', minWidth: 0 }
-const controlCell: React.CSSProperties = { flex: '0 0 268px', maxWidth: '100%', minWidth: 0, display: 'flex', justifyContent: 'flex-end' }
+const row: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px 24px', padding: '14px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)' }
+const blockRow: React.CSSProperties = { ...row, flexDirection: 'column', alignItems: 'stretch', gap: 10 }
+const subRow: React.CSSProperties = { paddingTop: 6, borderBottom: '1px solid var(--dsw-alias-border-l2)' }
+const labelCell: React.CSSProperties = { flex: '1 1 200px', minWidth: 0 }
+const controlCell: React.CSSProperties = { flex: '0 1 280px', maxWidth: '100%', minWidth: 0, display: 'flex', justifyContent: 'flex-end' }
 /** The switch is a fixed 40px glyph; this cell keeps it on the same right edge as every other control. */
 const toggleCell: React.CSSProperties = { width: '100%', display: 'flex', justifyContent: 'flex-end' }
 const fieldTitle: React.CSSProperties = { fontSize: 14, fontWeight: 400, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' }
@@ -196,21 +205,13 @@ const fieldHelp: React.CSSProperties = { fontSize: 12, lineHeight: '18px', color
 const fullLine: React.CSSProperties = { flex: '1 1 100%', margin: '0 0 2px', fontSize: 12, lineHeight: '18px' }
 const unitStyle: React.CSSProperties = { flex: '0 0 auto', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }
 const sliderStyle: React.CSSProperties = { width: '100%', margin: 0, accentColor: 'var(--dsw-alias-state-business-primary)' }
-const toolbarStyle: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '10px 0', borderTop: '1px solid var(--dsw-alias-border-l2)' }
-const summaryLineStyle: React.CSSProperties = { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' }
-const stickyBar: React.CSSProperties = { position: 'sticky', bottom: 0, zIndex: 5, display: 'flex', flexDirection: 'column', gap: 6, padding: '10px 0 12px', borderTop: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-alias-bg-module-platform)', boxShadow: '0 -10px 24px var(--dsw-alias-bg-mask-2)' }
-const statusStyle: React.CSSProperties = { fontSize: 12, lineHeight: '18px', display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'wrap' }
-/**
- * ONE box model for every settings control — select, number, text and the judges grid all paint
- * the same 36px layer, so their columns measure equally and their right edges line up. A control
- * that cannot stretch (the host `Input`, for instance, owns an inline-flex wrapper that collapses
- * to its content and hard-codes a 32px height) is not usable here; the native elements below
- * spread this constant and only add their own padding.
- */
+const judgeCard: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 12, padding: 12, borderRadius: 12, border: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-specific-input-major)' }
+const judgeGrid: React.CSSProperties = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(210px, 100%), 1fr))', gap: 10 }
+const judgeField: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }
+const judgeFieldLabel: React.CSSProperties = { color: 'var(--dsw-alias-label-tertiary)', fontSize: 12, lineHeight: '18px' }
+/** Every input and select shares one box, including the fields inside judge cards. */
 const controlStyle: React.CSSProperties = { boxSizing: 'border-box', width: '100%', height: 36, borderRadius: 8, color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-specific-input-major)', border: '1px solid var(--dsw-alias-border-l2)', font: 'inherit', fontSize: 14, lineHeight: '22px', outline: 'none' }
-/** A native select only adds the dropdown-arrow gutter. */
 const selectStyle: React.CSSProperties = { ...controlStyle, padding: '0 34px 0 12px' }
-/** A native text/number input keeps the same box with symmetric horizontal padding. */
 const inputStyle: React.CSSProperties = { ...controlStyle, padding: '0 12px' }
 const toggleStyle = (enabled: boolean): React.CSSProperties => ({ position: 'relative', flex: '0 0 auto', width: 40, height: 22, padding: 0, border: 0, borderRadius: 999, cursor: 'pointer', transition: 'background .15s ease', background: enabled ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-specific-input-major)' })
 const toggleThumbStyle = (enabled: boolean): React.CSSProperties => ({ position: 'absolute', top: 3, left: enabled ? 21 : 3, width: 16, height: 16, borderRadius: '50%', background: 'var(--dsw-static-neutral-00)', boxShadow: '0 1px 3px rgba(0,0,0,.28)', transition: 'left .15s ease' })
@@ -250,14 +251,129 @@ function shortCycleId(cycleId: string): string { return cycleId.length <= 10 ? c
 function startOfRange(days: number): number { const date = new Date(); date.setHours(0,0,0,0); date.setDate(date.getDate() - days + 1); return date.getTime() }
 function endOfToday(): number { const date = new Date(); date.setHours(0,0,0,0); date.setDate(date.getDate() + 1); return date.getTime() }
 
+const SETTINGS_CSS = `
+.llm-verifier-segments { position: relative; display: inline-flex; align-items: center; gap: 2px; padding: 2px; box-sizing: border-box; border-radius: 7px; background: var(--dsw-specific-input-major); }
+.llm-verifier-segments::before { content: ""; position: absolute; left: 0; top: 0; width: var(--llm-verifier-pill-w, 0px); height: var(--llm-verifier-pill-h, 0px); border-radius: 7px; background: var(--dsw-alias-bg-module-platform); box-shadow: 0 1px 2px var(--dsw-alias-bg-mask-2); opacity: 0; pointer-events: none; transform: translate(var(--llm-verifier-pill-x, 0px), var(--llm-verifier-pill-y, 0px)); }
+.llm-verifier-segments[data-pill]::before { opacity: 1; transition: transform 180ms cubic-bezier(.2,.8,.2,1), width 180ms cubic-bezier(.2,.8,.2,1), height 180ms cubic-bezier(.2,.8,.2,1); }
+body[data-ds-dark-theme] .llm-verifier-segments::before { background: rgba(255,255,255,.14); box-shadow: none; }
+.llm-verifier-segments > * { position: relative; z-index: 1; }
+.llm-verifier-segment { appearance: none; margin: 0; border: 0; border-radius: 7px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font: inherit; font-size: 14px; font-weight: 500; line-height: 18px; padding: 3px 12px; transition: color 120ms ease; }
+.llm-verifier-segment:hover:not([data-active]) { color: var(--dsw-alias-label-primary); }
+.llm-verifier-segment[data-active] { color: var(--dsw-alias-label-primary); }
+.llm-verifier-segment:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
+.llm-verifier-segment:disabled { cursor: not-allowed; opacity: .45; }
+.llm-verifier-segments-compact .llm-verifier-segment { font-size: 12px; line-height: 18px; padding: 3px 10px; }
+.llm-verifier-settings-tabs { display: flex; align-self: stretch; flex-wrap: wrap; width: 100%; }
+.llm-verifier-settings-tabs > [role="tab"] { flex: 1 1 0; min-width: max-content; }
+.llm-verifier-settings-tab-icon { width: 15px; height: 15px; margin-right: 6px; vertical-align: -2px; }
+.llm-verifier-settings-pages { position: relative; min-width: 0; }
+.llm-verifier-settings-leaving { position: absolute; inset: 0 0 auto; pointer-events: none; }
+.llm-verifier-settings-panel { min-width: 0; }
+.llm-verifier-settings-panel[data-enter] { animation: llm-verifier-page-in 180ms cubic-bezier(.2,.8,.2,1); }
+.llm-verifier-settings-panel[data-enter="back"], .llm-verifier-settings-panel[data-leave="forward"] { --llm-verifier-page-shift: -20px; }
+.llm-verifier-settings-panel[data-enter="forward"], .llm-verifier-settings-panel[data-leave="back"] { --llm-verifier-page-shift: 20px; }
+.llm-verifier-settings-panel[data-leave] { animation: llm-verifier-page-out 180ms cubic-bezier(.2,.8,.2,1) forwards; }
+@keyframes llm-verifier-page-in { from { opacity: 0; transform: translateX(var(--llm-verifier-page-shift)); filter: blur(2px); } to { opacity: 1; transform: none; filter: blur(0); } }
+@keyframes llm-verifier-page-out { from { opacity: 1; transform: none; filter: blur(0); } to { opacity: 0; transform: translateX(var(--llm-verifier-page-shift)); filter: blur(2px); } }
+@media (prefers-reduced-motion: reduce) { .llm-verifier-settings-panel[data-enter], .llm-verifier-settings-panel[data-leave] { animation: none; } }
+`
+
+interface SlidingOption<T extends string> {
+  value: T
+  label: string
+  icon?: React.ReactNode
+  id?: string
+  controls?: string
+}
+
+function syncSlidingPill(control: HTMLDivElement | null): void {
+  if (!control) return
+  const active = control.querySelector('[data-active]')
+  if (!(active instanceof HTMLElement)) {
+    control.removeAttribute('data-pill')
+    return
+  }
+  const box = control.getBoundingClientRect()
+  const item = active.getBoundingClientRect()
+  if (box.width === 0 || item.width === 0) {
+    control.removeAttribute('data-pill')
+    return
+  }
+  control.style.setProperty('--llm-verifier-pill-x', `${item.left - box.left - control.clientLeft}px`)
+  control.style.setProperty('--llm-verifier-pill-y', `${item.top - box.top - control.clientTop}px`)
+  control.style.setProperty('--llm-verifier-pill-w', `${item.width}px`)
+  control.style.setProperty('--llm-verifier-pill-h', `${item.height}px`)
+  control.setAttribute('data-pill', '')
+}
+
+function SlidingSegments<T extends string>(props: {
+  label: string
+  options: readonly SlidingOption<T>[]
+  value: T
+  onPick(value: T): void
+  disabled?: boolean
+  role?: 'group' | 'tablist'
+  className?: string
+  compact?: boolean
+}) {
+  const group = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => { syncSlidingPill(group.current) })
+  useLayoutEffect(() => {
+    const control = group.current
+    if (!control || typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(() => syncSlidingPill(control))
+    observer.observe(control)
+    return () => observer.disconnect()
+  }, [])
+  const tabs = props.role === 'tablist'
+  const classes = ['llm-verifier-segments', props.compact ? 'llm-verifier-segments-compact' : '', props.className ?? ''].filter(Boolean).join(' ')
+  return <div ref={group} className={classes} role={props.role ?? 'group'} aria-label={props.label}>
+    {props.options.map(option => <button
+      key={option.value}
+      id={option.id}
+      type="button"
+      className="llm-verifier-segment"
+      role={tabs ? 'tab' : 'button'}
+      data-active={option.value === props.value ? '' : undefined}
+      aria-selected={tabs ? option.value === props.value : undefined}
+      aria-pressed={tabs ? undefined : option.value === props.value}
+      aria-controls={option.controls}
+      disabled={props.disabled}
+      onClick={() => { if (option.value !== props.value) props.onPick(option.value) }}
+    >{option.icon}{option.label}</button>)}
+  </div>
+}
+
+function SettingsTabIcon({ id }: { id: SettingsTabId }) {
+  const paths: Record<SettingsTabId, React.ReactNode> = {
+    general: <path d="M4 8h6M14 8h6M12 5.4v5.2M4 16h16M8 13.4v5.2"/>,
+    judges: <><path d="M12 3.4 19 6v5.2c0 4.3-2.8 7.5-7 9.4-4.2-1.9-7-5.1-7-9.4V6z"/><path d="m8.8 12 2.1 2.1 4.3-4.3"/></>,
+    automation: <><path d="M5 7h10M12 4l3 3-3 3M19 17H9M12 14l-3 3 3 3"/><path d="M5 4v6M19 14v6"/></>,
+    limits: <><path d="M4.2 16a8 8 0 1 1 15.6 0"/><path d="m12 12 4-4M8 16h8"/></>,
+    data: <><ellipse cx="12" cy="5.5" rx="7" ry="3"/><path d="M5 5.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6M5 11.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></>,
+  }
+  return <svg className="llm-verifier-settings-tab-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round">{paths[id]}</svg>
+}
+
+const PAGE_MOTION_MS = 180
+
 export function VerifierSettings({ remote }: VerifierSettingsProps) {
   const lang = useLanguage()
   const t = dictionaries[lang]
-  const [loaded,setLoaded]=useState<Loaded|null>(null); const [draft,setDraft]=useState<Values|null>(null); const [busy,setBusy]=useState(false); const [error,setError]=useState<string|null>(null); const [saved,setSaved]=useState(false); const [editing,setEditing]=useState<Record<string,string>>({})
+  const [loaded,setLoaded]=useState<Loaded|null>(null); const [draft,setDraft]=useState<Values|null>(null); const [error,setError]=useState<string|null>(null); const [editing,setEditing]=useState<Record<string,string>>({})
+  const [saveState,setSaveState]=useState<'saving'|'saved'|null>(null)
   const [openSections,setOpenSections]=useState<Record<string,boolean>>(()=>Object.fromEntries(SECTIONS.map(section=>[section.id,section.open])))
+  const [activeTab,setActiveTab]=useState<SettingsTabId>('general')
+  const [pageDirection,setPageDirection]=useState<'forward'|'back'|null>(null)
+  const panelRef=useRef<HTMLDivElement>(null)
+  const leavingRef=useRef<HTMLDivElement>(null)
+  const pageTimer=useRef<number|null>(null)
+  const saveVersion=useRef(0)
+  const writtenVersion=useRef(0)
+  const saveInFlight=useRef(false)
+  const persistRef=useRef<(version:number)=>Promise<void>>(async()=>{})
   const load=async()=>{setError(null);try{const [m,s]=await Promise.all([remote.session.modelCatalog(),remote.settings.describe()]);if(!m.ok)throw new Error(m.error.message);if(!s.ok)throw new Error(s.error.message);const view=s.value.namespaces.find((x:SettingsNamespaceView)=>x.ns===NS);if(!view)throw new Error(t['settings.nsUnregistered']);const next={groups:m.value.groups,settings:view,writable:s.value.writable,failures:m.value.failures.map((f: { id?: string; provider?: string; name?: string; message: string })=>(f.id??f.provider??f.name??'unknown')+': '+f.message)};setLoaded(next);setDraft(values(view));setEditing({})}catch(e){setError(message(e))}}
   useEffect(()=>{void load()},[])
-  const dirty=useMemo(()=>loaded!==null&&draft!==null&&!sameSettingValue(draft,values(loaded.settings)),[loaded,draft])
   // Another writer — the settings shell's reset, a second window, an edit to
   // settings.yaml — can move this namespace under a page that never re-reads
   // it, and the stale draft would then be written straight back on the next
@@ -280,7 +396,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
           if(!view||view.revision===at.settings.revision)return
           const next:Loaded={...at,settings:view,writable:s.value.writable}
           latest.current={loaded:next,draft:values(view)}
-          setLoaded(next);setDraft(values(view));setEditing({});setSaved(false)
+          setLoaded(next);setDraft(values(view));setEditing({});setSaveState(null)
         }catch{/* keep the last good view; the reload button still forces a read */}
       })()
     }
@@ -290,7 +406,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
   },[remote])
   const models=useMemo(()=>loaded?.groups.find(g=>g.id===draft?.provider)?.models??[],[loaded,draft?.provider])
   const selected=models.find(m=>m.id===draft?.model); const efforts=selected?.reasoning?.efforts??[]
-  const patch=<K extends keyof Values>(key:K,value:Values[K])=>{setSaved(false);setDraft(v=>v?{...v,[key]:value}:v)}
+  const patch=<K extends keyof Values>(key:K,value:Values[K])=>{setSaveState(null);setDraft(v=>v?{...v,[key]:value}:v)}
   const conflict = useMemo(() => (draft ? judgeConflict({ provider: draft.provider, model: draft.model }, draft.extraJudges) : undefined), [draft?.provider, draft?.model, draft?.extraJudges])
   const addJudge = () => {
     if (!loaded || !draft || draft.extraJudges.length >= MAX_EXTRA_JUDGES) return
@@ -333,39 +449,59 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
   const format = useMemo<Format>(() => (key: string, params?: Record<string, string | number>) => tFormat(translate(key) ?? key, params), [translate])
   const issues = useMemo(() => (draft ? validateValues(draft) : []), [draft])
   const issuesByField = useMemo(() => issueMap(issues), [issues])
-  // The saved section holds only real overrides: a draft field equal to the
-  // composition base is dropped so a later plugin default still reaches this
-  // install (see sectionForSave).
-  const save=async()=>{
-    if(!loaded||!draft||conflict)return
-    setBusy(true);setSaved(false);setError(null)
+  // Writes are serialized. A newer draft waits for the active request, then uses the revision
+  // returned by that request; rapid edits therefore cannot finish out of order.
+  const persist=async(version:number)=>{
+    if(saveInFlight.current)return
+    const {loaded:at,draft:target}=latest.current
+    if(!at||!target)return
+    writtenVersion.current=version
+    if(!at.writable||sameSettingValue(target,values(at.settings)))return
+    if(validateValues(target).length>0||judgeConflict({provider:target.provider,model:target.model},target.extraJudges)){
+      setSaveState(null)
+      return
+    }
+    saveInFlight.current=true;setSaveState('saving');setError(null)
     try{
-      // An explicit undefined means "clear the stored override": sectionForSave
-      // starts from the previous user layer, so simply omitting a key would let
-      // the stale override outlive the save that cleared it.
       const editable:Record<string,unknown>={
-        ...draft,
-        extraJudges:serializeExtraJudges(draft.extraJudges),
-        reasoningEffort:draft.reasoningEffort||undefined,
-        label:draft.label?.trim()||undefined,
-        cacheDir:resolveCacheDirOnSave(draft.cacheDir,values(loaded.settings).cacheDir),
+        ...target,
+        extraJudges:serializeExtraJudges(target.extraJudges),
+        reasoningEffort:target.reasoningEffort||undefined,
+        label:target.label?.trim()||undefined,
+        cacheDir:resolveCacheDirOnSave(target.cacheDir,values(at.settings).cacheDir),
       }
-      const base=loaded.settings.base===undefined?undefined:record(loaded.settings.base)
-      // "Restore default" only works through a wholesale replace: the host's
-      // update() merges a patch into the stored section, so a key we leave out
-      // to re-inherit the base keeps its old override instead. Prefer replace
-      // and pin every draft value when only update() is available.
+      const base=at.settings.base===undefined?undefined:record(at.settings.base)
       const replaceSettings=remote.settings.replace
       const canReplace=typeof replaceSettings==='function'
-      const section=sectionForSave(record(loaded.settings.user),editable,base,{reInheritBase:canReplace})
+      const section=sectionForSave(record(at.settings.user),editable,base,{reInheritBase:canReplace})
       const res=canReplace
-        ?await replaceSettings.call(remote.settings,NS,section as never,loaded.settings.revision)
-        :await remote.settings.update(NS,section as never,loaded.settings.revision)
+        ?await replaceSettings.call(remote.settings,NS,section as never,at.settings.revision)
+        :await remote.settings.update(NS,section as never,at.settings.revision)
       if(!res.ok)throw new Error(res.error.message)
-      setLoaded(v=>v?{...v,settings:res.value}:v);setDraft(values(res.value));setEditing({});setSaved(true)
-    }catch(e){setError(message(e))}finally{setBusy(false)}
+      const next={...at,settings:res.value}
+      latest.current={...latest.current,loaded:next}
+      setLoaded(next)
+      if(latest.current.draft&&sameSettingValue(latest.current.draft,target)){
+        setDraft(values(res.value));setEditing({})
+      }
+      setSaveState('saved')
+    }catch(e){setError(message(e));setSaveState(null)}finally{
+      saveInFlight.current=false
+      if(writtenVersion.current<saveVersion.current)void persistRef.current(saveVersion.current)
+    }
   }
+  persistRef.current=persist
+  useEffect(()=>{
+    if(!loaded||!draft||!loaded.writable||sameSettingValue(draft,values(loaded.settings)))return
+    const version=++saveVersion.current
+    const timer=window.setTimeout(()=>void persistRef.current(version),300)
+    return()=>window.clearTimeout(timer)
+  },[draft])
+  useEffect(() => () => {
+    if (pageTimer.current !== null) window.clearTimeout(pageTimer.current)
+  }, [])
   if(!loaded||!draft)return <div style={shell}><h2 style={settingsHeading}>{t['settings.title']}</h2><p style={settingsIntro}>{error??t['settings.loading']}</p>{error&&<div><Button variant="outline" onClick={()=>void load()}>{t['settings.retry']}</Button></div>}</div>
+  const readOnly = !loaded.writable
   const criteriaCount = draft.criteriaPreset === 'custom' ? WORST_CASE_CRITERIA_PER_COMPARISON : CRITERIA_PRESETS[draft.criteriaPreset].length
   const issueText = (issue: FieldIssue): string => tFormat(translate(issueMessageKey(issue)) ?? issueMessageKey(issue), issue.params)
   const helpFor = (field: FieldSpec): string =>
@@ -374,11 +510,30 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
       : translate(field.helpKey) ?? ''
   const inputAria = (field: FieldSpec): string => translate(field.titleKey) ?? String(field.key)
   const setSectionOpen = (id: string, open: boolean) => setOpenSections(current => ({ ...current, [id]: open }))
-  const expandAll = () => setOpenSections(Object.fromEntries(SECTIONS.map(section => [section.id, true])))
-  const collapseAll = () => setOpenSections(Object.fromEntries(SECTIONS.map(section => [section.id, false])))
+  const pickTab = (next: SettingsTabId) => {
+    if (next === activeTab) return
+    const direction = SETTINGS_TABS.findIndex(tab => tab.id === next) > SETTINGS_TABS.findIndex(tab => tab.id === activeTab) ? 'forward' : 'back'
+    const panel = panelRef.current
+    const leaving = leavingRef.current
+    if (panel && leaving && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      const still = panel.cloneNode(true) as HTMLElement
+      still.removeAttribute('id')
+      still.removeAttribute('data-enter')
+      still.setAttribute('aria-hidden', 'true')
+      still.setAttribute('inert', '')
+      still.setAttribute('data-leave', direction)
+      leaving.replaceChildren(still)
+      if (pageTimer.current !== null) window.clearTimeout(pageTimer.current)
+      pageTimer.current = window.setTimeout(() => still.remove(), PAGE_MOTION_MS)
+    }
+    setPageDirection(direction)
+    setActiveTab(next)
+  }
   const jumpTo = (key: keyof Values) => {
     const field = FIELDS.find(candidate => candidate.key === key)
     if (!field) return
+    const tab = SETTINGS_TABS.find(candidate => candidate.sections.includes(field.section))
+    if (tab) pickTab(tab.id)
     setSectionOpen(field.section, true)
     window.requestAnimationFrame(() => {
       const node = document.querySelector('[data-field="' + String(key) + '"]')
@@ -389,12 +544,12 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     })
   }
   const resetOne = (field: FieldSpec) => {
-    setSaved(false)
+    setSaveState(null)
     setEditing(current => { if (!(field.key in current)) return current; const next = { ...current }; delete next[field.key]; return next })
     setDraft(current => (current ? resetField(current, field.key) : current))
   }
   const fillRecommended = () => {
-    setSaved(false)
+    setSaveState(null)
     setDraft(current => (current ? { ...current, ...recommendedBudgets(computeJudgeCount(current.extraJudges.length), criteriaCount) } : current))
   }
   const messageFor = (field: FieldSpec): FieldIssue | null => {
@@ -403,7 +558,15 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     if (field.kind === 'number' && editing[field.key] !== undefined) return textIssue(field, editing[field.key])
     return null
   }
-  const renderNumber = (field: FieldSpec) => {
+  const renderSegment = <T extends string,>(label: string, options: readonly { value: T; label: string }[], value: T, onPick: (value: T) => void, enabled = true) => <SlidingSegments
+    compact
+    label={label}
+    options={options}
+    value={value}
+    onPick={onPick}
+    disabled={readOnly || !enabled}
+  />
+  const renderNumber = (field: FieldSpec, enabled: boolean) => {
     const key = field.key
     const current = Number(draft[key])
     return <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
@@ -412,7 +575,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
           style={{ ...inputStyle, flex: '1 1 auto', minWidth: 0 }}
           type="text"
           inputMode="decimal"
-          disabled={busy}
+          disabled={readOnly || !enabled}
           aria-label={inputAria(field)}
           aria-invalid={messageFor(field) ? true : undefined}
           value={editing[key] ?? String(draft[key] ?? '')}
@@ -431,123 +594,150 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
         min={field.min ?? 0}
         max={field.max ?? 1}
         step={field.max !== undefined && field.max <= 1 ? 0.001 : 1}
-        disabled={busy}
+        disabled={readOnly || !enabled}
         aria-label={inputAria(field)}
         value={Number.isFinite(current) ? current : field.min ?? 0}
         onChange={event => patch(key, Number(event.target.value) as never)}
       />}
     </div>
   }
-  const renderText = (field: FieldSpec) => {
+  const renderText = (field: FieldSpec, enabled: boolean) => {
     const key = field.key
     const placeholder = key === 'criteriaFile' ? 'criteria/my-task.md' : key === 'cacheDir' ? 'verifier' : undefined
     return <input
       style={inputStyle}
       type="text"
-      disabled={busy}
+      disabled={readOnly || !enabled}
       placeholder={placeholder}
       aria-label={inputAria(field)}
       value={String(draft[key] ?? '')}
       onChange={event => patch(key, event.target.value as never)}
     />
   }
-  const renderSelect = (field: FieldSpec) => {
-    if (field.select === 'mode') return <select style={selectStyle} disabled={busy} aria-label={inputAria(field)} value={draft.autoVerifyMode} onChange={event => patch('autoVerifyMode', event.target.value as Values['autoVerifyMode'])}>
-      <option value="manual">{t['field.autoVerifyMode.manual']}</option>
-      <option value="smart">{t['field.autoVerifyMode.smart']}</option>
-      <option value="strict">{t['field.autoVerifyMode.strict']}</option>
-    </select>
-    if (field.select === 'processSelection') return <select style={selectStyle} disabled={busy} aria-label={inputAria(field)} value={draft.autoProcessSelection} onChange={event => patch('autoProcessSelection', event.target.value as Values['autoProcessSelection'])}>
-      {(['off','recovery','every-step'] as const).map(id => <option key={id} value={id}>{t[('field.autoProcessSelection.' + id) as keyof I18nDict] as string}</option>)}
-    </select>
-    if (field.select === 'criteriaPreset') return <select style={selectStyle} disabled={busy} aria-label={inputAria(field)} value={draft.criteriaPreset} onChange={event => patch('criteriaPreset', event.target.value as Values['criteriaPreset'])}>
+  const renderSelect = (field: FieldSpec, enabled: boolean) => {
+    if (field.select === 'mode') return renderSegment(inputAria(field), [
+      { value: 'manual', label: t['field.autoVerifyMode.manual'] },
+      { value: 'smart', label: t['field.autoVerifyMode.smart'] },
+      { value: 'strict', label: t['field.autoVerifyMode.strict'] },
+    ], draft.autoVerifyMode, value => patch('autoVerifyMode', value), enabled)
+    if (field.select === 'processSelection') return renderSegment(inputAria(field), (['off','recovery','every-step'] as const).map(id => ({
+      value: id,
+      label: t[('field.autoProcessSelection.' + id) as keyof I18nDict] as string,
+    })), draft.autoProcessSelection, value => patch('autoProcessSelection', value), enabled)
+    if (field.select === 'criteriaPreset') return <select style={selectStyle} disabled={readOnly || !enabled} aria-label={inputAria(field)} value={draft.criteriaPreset} onChange={event => patch('criteriaPreset', event.target.value as Values['criteriaPreset'])}>
       {(['coding','debug','research','ops','writing','custom'] as const).map(id => <option key={id} value={id}>{t[('field.criteriaPreset.' + id) as keyof I18nDict] as string}</option>)}
     </select>
-    if (field.select === 'provider') return <select style={selectStyle} disabled={busy} aria-label={inputAria(field)} value={draft.provider} onChange={event => {
+    if (field.select === 'provider') return <select style={selectStyle} disabled={readOnly || !enabled} aria-label={inputAria(field)} value={draft.provider} onChange={event => {
       const provider = event.target.value
       const first = loaded.groups.find(group => group.id === provider)?.models[0]
-      setSaved(false)
+      setSaveState(null)
       setDraft({ ...draft, provider, ...(first ? { model: first.id, reasoningEffort: first.reasoning?.defaultEffort } : {}) })
     }}>
       {loaded.groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.id}</option>)}
     </select>
-    if (field.select === 'model') return <select style={selectStyle} disabled={busy} aria-label={inputAria(field)} value={draft.model} onChange={event => {
+    if (field.select === 'model') return <select style={selectStyle} disabled={readOnly || !enabled} aria-label={inputAria(field)} value={draft.model} onChange={event => {
       const model = event.target.value
       const found = models.find(entry => entry.id === model)
-      setSaved(false)
+      setSaveState(null)
       setDraft({ ...draft, model, ...(found?.reasoning?.defaultEffort ? { reasoningEffort: found.reasoning.defaultEffort } : { reasoningEffort: undefined }) })
     }}>
       {models.map(entry => <option key={entry.id} value={entry.id}>{entry.name} · {entry.id}</option>)}
     </select>
-    if (field.select === 'effort') return <select style={selectStyle} disabled={busy} aria-label={inputAria(field)} value={draft.reasoningEffort ?? ''} onChange={event => patch('reasoningEffort', event.target.value || undefined)}>
+    if (field.select === 'effort') return <select style={selectStyle} disabled={readOnly || !enabled} aria-label={inputAria(field)} value={draft.reasoningEffort ?? ''} onChange={event => patch('reasoningEffort', event.target.value || undefined)}>
       <option value="">{t['field.reasoningEffort.default']}</option>
       {efforts.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}
     </select>
     return null
   }
   const renderControl = (field: FieldSpec) => {
+    const enabled = isFieldEnabled(field, draft)
     if (field.kind === 'toggle') {
       const on = Boolean(draft[field.key])
-      return <div style={toggleCell}><button type="button" role="switch" aria-checked={on} aria-label={inputAria(field)} disabled={busy} onClick={() => patch(field.key, !on as never)} style={toggleStyle(on)}><span style={toggleThumbStyle(on)}/></button></div>
+      return <div style={toggleCell}><button type="button" role="switch" aria-checked={on} aria-label={inputAria(field)} disabled={readOnly || !enabled} onClick={() => patch(field.key, !on as never)} style={toggleStyle(on)}><span style={toggleThumbStyle(on)}/></button></div>
     }
-    if (field.kind === 'number') return renderNumber(field)
-    if (field.kind === 'text') return renderText(field)
-    if (field.kind === 'select') return renderSelect(field)
+    if (field.kind === 'number') return renderNumber(field, enabled)
+    if (field.kind === 'text') return renderText(field, enabled)
+    if (field.kind === 'select') return renderSelect(field, enabled)
     return null
   }
-  const renderJudges = () => <Fragment key="extraJudges">
-    <div style={row}>
-      <div style={labelCell}>
-        <div style={fieldTitle}>{translate('field.extraJudges.title') ?? 'extraJudges'}</div>
-        <div style={fieldHelp}>{translate('field.extraJudges.help') ?? ''}</div>
-      </div>
-      <div style={controlCell}><Button variant="outline" disabled={busy || draft.extraJudges.length >= MAX_EXTRA_JUDGES} onClick={addJudge}>{t['field.extraJudges.add']}</Button></div>
-    </div>
-    {draft.extraJudges.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '10px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)' }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(110px, 1.2fr) minmax(120px, 1.3fr) minmax(95px, 1fr) minmax(95px, 1fr) auto', gap: 8, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', paddingBottom: 2 }}>
-        <div>{t['field.provider.title']}</div>
-        <div>{t['field.model.title']}</div>
-        <div>{t['field.reasoningEffort.title']}</div>
-        <div>{t['field.extraJudges.labelTitle']}</div>
-        <div/>
-      </div>
-      {draft.extraJudges.map((judge, idx) => {
-        const judgeGroup = loaded.groups.find(group => group.id === judge.provider)
-        const judgeModels = judgeGroup?.models ?? []
-        const judgeModel = judgeModels.find(entry => entry.id === judge.model)
-        const judgeEfforts = judgeModel?.reasoning?.efforts ?? []
-        return <div key={idx} style={{ display: 'grid', gridTemplateColumns: 'minmax(110px, 1.2fr) minmax(120px, 1.3fr) minmax(95px, 1fr) minmax(95px, 1fr) auto', gap: 8, alignItems: 'center' }}>
-          <select style={selectStyle} disabled={busy} aria-label={tFormat(t['field.extraJudges.providerAria'], { index: idx + 1 })} value={judge.provider} onChange={event => {
-            const newProvider = event.target.value
-            const targetGroup = loaded.groups.find(group => group.id === newProvider)
-            const firstM = targetGroup?.models[0]
-            updateJudge(idx, { provider: newProvider, model: firstM?.id ?? '', ...(firstM?.reasoning?.defaultEffort ? { reasoningEffort: firstM.reasoning.defaultEffort } : { reasoningEffort: undefined }) })
-          }}>
-            {!loaded.groups.some(group => group.id === judge.provider) && judge.provider && <option value={judge.provider}>{judge.provider}</option>}
-            {loaded.groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.id}</option>)}
-          </select>
-          <select style={selectStyle} disabled={busy} aria-label={tFormat(t['field.extraJudges.modelAria'], { index: idx + 1 })} value={judge.model} onChange={event => {
-            const newModel = event.target.value
-            const found = judgeModels.find(entry => entry.id === newModel)
-            updateJudge(idx, { model: newModel, ...(found?.reasoning?.defaultEffort ? { reasoningEffort: found.reasoning.defaultEffort } : { reasoningEffort: undefined }) })
-          }}>
-            {!judgeModels.some(entry => entry.id === judge.model) && judge.model && <option value={judge.model}>{judge.model}</option>}
-            {judgeModels.map(entry => <option key={entry.id} value={entry.id}>{entry.name} · {entry.id}</option>)}
-          </select>
-          <select style={selectStyle} disabled={busy} aria-label={tFormat(t['field.extraJudges.effortAria'], { index: idx + 1 })} value={judge.reasoningEffort ?? ''} onChange={event => updateJudge(idx, { reasoningEffort: event.target.value || undefined })}>
-            <option value="">{t['field.reasoningEffort.default']}</option>
-            {judgeEfforts.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}
-          </select>
-          <input style={inputStyle} type="text" disabled={busy} placeholder={t['field.extraJudges.labelPlaceholder']} aria-label={tFormat(t['field.extraJudges.labelAria'], { index: idx + 1 })} value={judge.label ?? ''} onChange={event => updateJudge(idx, { label: event.target.value })}/>
-          <Button variant="outline" disabled={busy} aria-label={tFormat(t['field.extraJudges.removeAria'], { index: idx + 1 })} onClick={() => removeJudge(idx)}>{t['field.extraJudges.remove']}</Button>
+  const renderJudges = () => {
+    const conflictText = (idx: number): string | null => {
+      if (conflict?.index !== idx) return null
+      const judge = draft.extraJudges[idx]
+      const id = judgeIdentity(judge?.provider ?? '', judge?.model ?? '')
+      return conflict.duplicateOf === 'primary'
+        ? tFormat(t['field.extraJudges.conflictPrimary'], { index: idx + 1, id })
+        : tFormat(t['field.extraJudges.conflictDuplicate'], { index: idx + 1, other: conflict.duplicateOf + 1, id })
+    }
+    return <Fragment key="extraJudges">
+      <div style={row}>
+        <div style={labelCell}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={fieldTitle}>{translate('field.extraJudges.title') ?? 'extraJudges'}</span>
+            <span style={badgeStyle}>{tFormat(t['field.extraJudges.count'], { count: draft.extraJudges.length, max: MAX_EXTRA_JUDGES })}</span>
+          </div>
+          <div style={fieldHelp}>{translate('field.extraJudges.help') ?? ''}</div>
         </div>
-      })}
-    </div>}
-    {conflict && <p style={{ margin: '8px 0 0', fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-warn-label)' }}>{conflict.duplicateOf === 'primary' ? tFormat(t['field.extraJudges.conflictPrimary'], { index: conflict.index + 1, id: judgeIdentity(draft.extraJudges[conflict.index]?.provider ?? '', draft.extraJudges[conflict.index]?.model ?? '') }) : tFormat(t['field.extraJudges.conflictDuplicate'], { index: conflict.index + 1, other: conflict.duplicateOf + 1, id: judgeIdentity(draft.extraJudges[conflict.index]?.provider ?? '', draft.extraJudges[conflict.index]?.model ?? '') })}</p>}
-  </Fragment>
+        <div style={controlCell}><Button variant="outline" disabled={readOnly || draft.extraJudges.length >= MAX_EXTRA_JUDGES} onClick={addJudge}>{t['field.extraJudges.add']}</Button></div>
+      </div>
+      {draft.extraJudges.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '0 0 14px', borderBottom: '1px solid var(--dsw-alias-border-l2)' }}>
+        {draft.extraJudges.map((judge, idx) => {
+          const judgeGroup = loaded.groups.find(group => group.id === judge.provider)
+          const judgeModels = judgeGroup?.models ?? []
+          const judgeModel = judgeModels.find(entry => entry.id === judge.model)
+          const judgeEfforts = judgeModel?.reasoning?.efforts ?? []
+          const cardConflict = conflictText(idx)
+          return <div key={idx} style={judgeCard} data-judge-index={idx}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <span style={{ ...fieldTitle, fontSize: 13, fontWeight: 500 }}>{tFormat(t['field.extraJudges.itemTitle'], { index: idx + 1 })}</span>
+              <button type="button" style={linkButton} disabled={readOnly} aria-label={tFormat(t['field.extraJudges.removeAria'], { index: idx + 1 })} onClick={() => removeJudge(idx)}>{t['field.extraJudges.remove']}</button>
+            </div>
+            <div style={judgeGrid}>
+              <label style={judgeField}>
+                <span style={judgeFieldLabel}>{t['field.provider.title']}</span>
+                <select style={selectStyle} disabled={readOnly} aria-label={tFormat(t['field.extraJudges.providerAria'], { index: idx + 1 })} value={judge.provider} onChange={event => {
+                  const newProvider = event.target.value
+                  const targetGroup = loaded.groups.find(group => group.id === newProvider)
+                  const firstM = targetGroup?.models[0]
+                  updateJudge(idx, { provider: newProvider, model: firstM?.id ?? '', ...(firstM?.reasoning?.defaultEffort ? { reasoningEffort: firstM.reasoning.defaultEffort } : { reasoningEffort: undefined }) })
+                }}>
+                  {!loaded.groups.some(group => group.id === judge.provider) && judge.provider && <option value={judge.provider}>{judge.provider}</option>}
+                  {loaded.groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.id}</option>)}
+                </select>
+              </label>
+              <label style={judgeField}>
+                <span style={judgeFieldLabel}>{t['field.model.title']}</span>
+                <select style={selectStyle} disabled={readOnly} aria-label={tFormat(t['field.extraJudges.modelAria'], { index: idx + 1 })} value={judge.model} onChange={event => {
+                  const newModel = event.target.value
+                  const found = judgeModels.find(entry => entry.id === newModel)
+                  updateJudge(idx, { model: newModel, ...(found?.reasoning?.defaultEffort ? { reasoningEffort: found.reasoning.defaultEffort } : { reasoningEffort: undefined }) })
+                }}>
+                  {!judgeModels.some(entry => entry.id === judge.model) && judge.model && <option value={judge.model}>{judge.model}</option>}
+                  {judgeModels.map(entry => <option key={entry.id} value={entry.id}>{entry.name} · {entry.id}</option>)}
+                </select>
+              </label>
+              <label style={judgeField}>
+                <span style={judgeFieldLabel}>{t['field.reasoningEffort.title']}</span>
+                <select style={selectStyle} disabled={readOnly} aria-label={tFormat(t['field.extraJudges.effortAria'], { index: idx + 1 })} value={judge.reasoningEffort ?? ''} onChange={event => updateJudge(idx, { reasoningEffort: event.target.value || undefined })}>
+                  <option value="">{t['field.reasoningEffort.default']}</option>
+                  {judgeEfforts.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}
+                </select>
+              </label>
+              <label style={judgeField}>
+                <span style={judgeFieldLabel}>{t['field.extraJudges.labelTitle']}</span>
+                <input style={inputStyle} type="text" disabled={readOnly} placeholder={t['field.extraJudges.labelPlaceholder']} aria-label={tFormat(t['field.extraJudges.labelAria'], { index: idx + 1 })} value={judge.label ?? ''} onChange={event => updateJudge(idx, { label: event.target.value })}/>
+              </label>
+            </div>
+            {cardConflict && <p style={{ margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-warn-label)' }}>{cardConflict}</p>}
+          </div>
+        })}
+      </div>}
+    </Fragment>
+  }
   const renderRow = (field: FieldSpec) => {
     const message = messageFor(field)
     const changed = isFieldChanged(field, draft)
+    const enabled = isFieldEnabled(field, draft)
     const warning = field.key === 'autoMaxModelCallsPerTask' && budgetWarning?.warnTask
       ? tFormat(translate('field.autoMaxModelCallsPerTask.warnBudget') ?? '', { current: draft.autoMaxModelCallsPerTask, required: budgetWarning.worstCaseTask, judges: budgetWarning.judgeCount })
       : field.key === 'autoMaxModelCallsPerSession' && budgetWarning?.warnSession
@@ -563,16 +753,16 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
       </details>
     })() : null
     return <Fragment key={String(field.key)}>
-      <div style={row} data-field={String(field.key)}>
+      <div style={{ ...row, ...(field.enabledWhen ? subRow : null) }} data-field={String(field.key)} data-disabled={enabled ? undefined : ''}>
         <div style={labelCell}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
             <span style={fieldTitle}>{translate(field.titleKey) ?? String(field.key)}</span>
             {changed && <span style={badgeStyle}>{t['settings.fieldChanged']}</span>}
-            {changed && <button type="button" style={linkButton} disabled={busy} onClick={() => resetOne(field)}>{t['settings.fieldReset']}</button>}
+            {changed && <button type="button" style={linkButton} disabled={readOnly} onClick={() => resetOne(field)}>{t['settings.fieldReset']}</button>}
           </div>
           <div style={fieldHelp}>{helpFor(field)}</div>
         </div>
-        <div style={controlCell}>{renderControl(field)}</div>
+        <div style={{ ...controlCell, opacity: enabled ? 1 : 0.45 }}>{renderControl(field)}</div>
         {/* The every-step arm buys an alternative and a judging round on EVERY main-loop request, so
             the cost warning belongs next to the switch that turns it on, not only in the help text
             of a section the operator may never open. */}
@@ -584,77 +774,95 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     </Fragment>
   }
   const currentProfile = activeProfile(draft, criteriaCount)
-  const sections = renderSections(draft)
+  const sections = renderTabSections(activeTab, draft)
   return <div style={shell}>
-    <h2 style={settingsHeading}>{t['settings.title']}</h2>
-    <p style={settingsIntro}>{t['settings.intro']}</p>
-    <p style={summaryLineStyle}>{draft.autoVerifyMode === 'manual'
-      ? translate('settings.summary.manual') ?? ''
-      : tFormat(translate('settings.summary.line') ?? '', {
-          mode: translate('field.autoVerifyMode.' + draft.autoVerifyMode) ?? draft.autoVerifyMode,
-          preset: translate('field.criteriaPreset.' + draft.criteriaPreset) ?? draft.criteriaPreset,
-          threshold: draft.autoVerifyThreshold,
-          judges: tFormat(translate('settings.summary.judges') ?? '{count}', { count: computeJudgeCount(draft.extraJudges.length) }),
-          task: budgetWarning?.worstCaseTask ?? draft.autoMaxModelCallsPerTask,
-          session: budgetWarning?.worstCaseSession ?? draft.autoMaxModelCallsPerSession,
-        })}</p>
+    <style>{SETTINGS_CSS}</style>
+    <header style={settingsHeader}>
+      <h2 style={settingsHeading}>{t['settings.title']}</h2>
+      <p style={settingsIntro}>{t['settings.intro']}</p>
+      <div style={statusChips}>
+        <span style={statusChip}>{translate('field.autoVerifyMode.' + draft.autoVerifyMode)}</span>
+        <span style={statusChip}>{tFormat(t['settings.summary.judges'], { count: computeJudgeCount(draft.extraJudges.length) })}</span>
+        {saveState && <span style={{ ...statusChip, color: saveState === 'saved' ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-secondary)' }}>{saveState === 'saving' ? t['settings.autosave.saving'] : t['settings.autosave.saved']}</span>}
+      </div>
+    </header>
 
-    <div style={toolbarStyle}>
-      <span style={{ fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' }}>{t['settings.profile.title']}</span>
-      <select style={{ ...selectStyle, width: 220 }} disabled={busy} title={translate('settings.profile.hint')} aria-label={t['settings.profile.title']} value={currentProfile} onChange={event => {
-        const picked = event.target.value
-        if (picked === 'custom') return
-        setSaved(false)
-        setDraft(current => (current ? applyProfile(current, picked as ProfileId, criteriaCount) : current))
-      }}>
-        {currentProfile === 'custom' && <option value="custom" disabled>{t['settings.profile.custom']}</option>}
-        {PROFILES.map(profile => <option key={profile.id} value={profile.id}>{translate(profile.titleKey) ?? profile.id}</option>)}
-      </select>
-      <span style={{ flex: '1 1 0' }}/>
-      <Button variant="outline" disabled={busy} onClick={expandAll}>{t['settings.expandAll']}</Button>
-      <Button variant="outline" disabled={busy} onClick={collapseAll}>{t['settings.collapseAll']}</Button>
-    </div>
+    <SlidingSegments
+      role="tablist"
+      className="llm-verifier-settings-tabs"
+      label={t['settings.tabs.aria']}
+      options={SETTINGS_TABS.map(tab => ({
+        value: tab.id,
+        label: translate(tab.titleKey) ?? tab.id,
+        icon: <SettingsTabIcon id={tab.id}/>,
+        id: 'verifier-tab-' + tab.id,
+        controls: 'verifier-panel-' + tab.id,
+      }))}
+      value={activeTab}
+      onPick={pickTab}
+    />
 
-    {sections.map(entry => {
-      const title = translate(entry.section.titleKey) ?? entry.section.id
-      const open = openSections[entry.section.id] === true
-      const summary = sectionSummary(entry.section.id, draft, translate, format)
-      return <section key={entry.section.id} style={group}>
-        <button type="button" style={sectionTitle} aria-expanded={open} aria-label={tFormat(translate(open ? 'settings.sectionCollapse' : 'settings.sectionExpand') ?? '', { title })} onClick={() => setSectionOpen(entry.section.id, !open)}>
+    {(issues.length > 0 || error) && <div style={{ fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-error-primary)' }}>
+      {issues.length > 0
+        ? <span>{tFormat(t['settings.invalid.summary'], { count: issues.length })} <button type="button" style={linkButton} onClick={() => jumpTo(issues[0].key)}>{t['settings.jumpToIssue']}</button></span>
+        : error}
+    </div>}
+
+    <div className="llm-verifier-settings-pages">
+      <div ref={leavingRef} className="llm-verifier-settings-leaving"/>
+      <div ref={panelRef} key={activeTab} className="llm-verifier-settings-panel" data-enter={pageDirection ?? undefined} style={panelStyle} role="tabpanel" id={'verifier-panel-' + activeTab} aria-labelledby={'verifier-tab-' + activeTab}>
+      {activeTab === 'general' && <div style={blockRow}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+          <div style={labelCell}>
+            <div style={fieldTitle}>{t['settings.profile.title']}</div>
+            <div style={fieldHelp}>{t['settings.profile.hint']}</div>
+          </div>
+          {currentProfile === 'custom' && <span style={badgeStyle}>{t['settings.profile.custom']}</span>}
+        </div>
+        {renderSegment<ProfileId | ''>(t['settings.profile.title'], PROFILES.map(profile => ({
+          value: profile.id as ProfileId | '',
+          label: translate(profile.titleKey) ?? profile.id,
+        })), currentProfile === 'custom' ? '' : currentProfile, picked => {
+          if (picked === '') return
+          setSaveState(null)
+          setDraft(current => (current ? applyProfile(current, picked, criteriaCount) : current))
+        })}
+      </div>}
+
+      {sections.map(entry => {
+        const title = translate(entry.section.titleKey) ?? entry.section.id
+        const advanced = entry.section.tier === 'advanced'
+        const open = !advanced || openSections[entry.section.id] === true
+        const summary = advanced && !open ? sectionSummary(entry.section.id, draft, translate, format) : ''
+        const heading = <>
           <span style={sectionHeadingStyle}>{title}</span>
-          {entry.section.tier === 'advanced' && <span style={badgeStyle}>{t['settings.advancedBadge']}</span>}
+          {advanced && <span style={badgeStyle}>{t['settings.advancedBadge']}</span>}
           {summary && <span style={sectionSummaryStyle}>{summary}</span>}
-          <span style={{ marginLeft: summary ? 0 : 'auto', color: 'var(--dsw-alias-label-tertiary)', fontSize: 12 }}>{open ? '▾' : '▸'}</span>
-        </button>
-        {open && entry.fields.map(field => (field.kind === 'custom' ? renderJudges() : renderRow(field)))}
-        {open && entry.section.id === 'tools' && !draft.enabled && <p style={{ margin: '8px 0 0', fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-warn-label)' }}>{t['field.enabled.warnDisabled']}</p>}
-        {open && entry.section.id === 'autoVerify' && draft.autoVerifyMode !== 'manual' && <p style={{ margin: '8px 0 0', fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-warn-label)' }}>{t['field.autoVerify.warnNotice']}</p>}
-        {open && entry.section.id === 'budgets' && <div style={{ padding: '10px 0' }}><Button variant="outline" disabled={busy} onClick={fillRecommended}>{t['settings.recommend']}</Button></div>}
-      </section>
-    })}
+          {advanced && <span style={{ marginLeft: summary ? 0 : 'auto', color: 'var(--dsw-alias-label-tertiary)', fontSize: 12 }}>{open ? '▾' : '▸'}</span>}
+        </>
+        return <section key={entry.section.id} style={group} data-section={entry.section.id}>
+          {advanced
+            ? <button type="button" style={{ ...sectionTitle, cursor: 'pointer' }} aria-expanded={open} aria-label={tFormat(translate(open ? 'settings.sectionCollapse' : 'settings.sectionExpand') ?? '', { title })} onClick={() => setSectionOpen(entry.section.id, !open)}>{heading}</button>
+            : <div style={sectionTitle}>{heading}</div>}
+          {open && entry.fields.map(field => (field.kind === 'custom' ? renderJudges() : renderRow(field)))}
+          {open && entry.section.id === 'tools' && !draft.enabled && <p style={{ margin: '8px 0 0', fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-warn-label)' }}>{t['field.enabled.warnDisabled']}</p>}
+          {open && entry.section.id === 'autoVerify' && draft.autoVerifyMode !== 'manual' && <div style={{ padding: '10px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)', fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' }}>
+            <p style={{ margin: 0 }}>{t['field.autoVerify.warnNotice']}</p>
+            <details style={{ marginTop: 4 }}>
+              <summary style={{ cursor: 'pointer', color: 'var(--dsw-alias-label-secondary)' }}>{t['field.autoVerify.flowSummary']}</summary>
+              <p style={{ margin: '6px 0 0' }}>{t['field.autoVerify.flow']}</p>
+            </details>
+          </div>}
+          {open && entry.section.id === 'budgets' && <div style={{ padding: '12px 0' }}><Button variant="outline" disabled={readOnly} onClick={fillRecommended}>{t['settings.recommend']}</Button></div>}
+        </section>
+      })}
+      </div>
+    </div>
 
     {loaded.failures.length > 0 && <div style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--dsw-alias-state-warn-tertiary)', color: 'var(--dsw-alias-state-warn-label)', fontSize: 12, lineHeight: '18px' }}>
       <div style={{ fontWeight: 500, marginBottom: 3 }}>{t['settings.catalogFailures']}</div>
       {loaded.failures.map(failure => <div key={failure}>{failure}</div>)}
     </div>}
-
-    <div style={stickyBar}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        {issues.length > 0
-          ? <span style={{ ...statusStyle, color: 'var(--dsw-alias-state-error-primary)' }}>{tFormat(t['settings.invalid.summary'], { count: issues.length })}<button type="button" style={linkButton} onClick={() => jumpTo(issues[0].key)}>{t['settings.jumpToIssue']}</button></span>
-          : error
-            ? <span style={{ ...statusStyle, color: 'var(--dsw-alias-state-error-primary)' }}>{error}</span>
-            : saved && !dirty
-              ? <span style={{ ...statusStyle, color: 'var(--dsw-alias-state-success-primary)' }}>{t['settings.saved']}</span>
-              : dirty
-                ? <span style={{ ...statusStyle, color: 'var(--dsw-alias-state-warn-label)' }}>{t['settings.unsaved']}</span>
-                : null}
-        <span style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-          <Button variant="outline" disabled={busy} onClick={() => void load()}>{t['settings.reload']}</Button>
-          <Button variant="primary" disabled={busy || !loaded.writable || Boolean(conflict) || issues.length > 0} onClick={() => void save()}>{busy ? t['settings.saving'] : t['settings.save']}</Button>
-        </span>
-      </div>
-    </div>
   </div>
 }
 

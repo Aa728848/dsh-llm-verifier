@@ -6,17 +6,20 @@ import {
   PROFILES,
   PROFILE_IDS,
   SECTIONS,
+  SETTINGS_TABS,
   acceptsNumber,
   activeProfile,
   applyProfile,
   fieldsOfSection,
   isFieldChanged,
+  isFieldEnabled,
   isFieldVisible,
   issueMap,
   issueMessageKey,
   recommendedBudgets,
   resetField,
   renderSections,
+  renderTabSections,
   sectionSummary,
   textIssue,
   validateValues,
@@ -367,6 +370,31 @@ describe('settings navigation', () => {
     const custom = visibleKeys({ ...base, criteriaPreset: 'custom' })
     expect(custom).toContain('criteriaFile')
     expect(custom).toHaveLength(visibleKeys(base).length + 1)
+  })
+
+  it('assigns every section to exactly one localized task tab', () => {
+    const assigned = SETTINGS_TABS.flatMap(tab => tab.sections)
+    expect([...assigned].sort()).toEqual(SECTIONS.map(section => section.id).sort())
+    expect(new Set(assigned).size).toBe(assigned.length)
+    for (const tab of SETTINGS_TABS) {
+      expect(typeof zhT(tab.titleKey)).toBe('string')
+      expect(typeof enT(tab.titleKey)).toBe('string')
+      expect(renderTabSections(tab.id, base).map(entry => entry.section.id)).toEqual(tab.sections)
+    }
+    expect(() => renderTabSections('missing' as never, base)).toThrow('Unknown settings tab: missing')
+  })
+
+  it('disables only the dependent controls whose parent does not apply', () => {
+    expect(isFieldEnabled(field('autoRouteMinConfidence'), base)).toBe(true)
+    expect(isFieldEnabled(field('autoRouteMinConfidence'), { ...base, autoRouteSemantic: false })).toBe(false)
+    expect(isFieldEnabled(field('autoProcessSelection'), base)).toBe(true)
+    for (const key of ['autoProcessFailureContext', 'autoProcessAlternativeModel', 'autoProcessCandidates'] as const) {
+      expect(isFieldEnabled(field(key), base)).toBe(false)
+      expect(isFieldEnabled(field(key), { ...base, autoProcessSelection: 'recovery' })).toBe(true)
+      expect(isFieldEnabled(field(key), { ...base, autoProcessSelection: 'every-step' })).toBe(true)
+    }
+    expect(isFieldEnabled(field('maxProcessCyclesPerTask'), { ...base, autoProcessSelection: 'recovery' })).toBe(false)
+    expect(isFieldEnabled(field('maxProcessCyclesPerTask'), { ...base, autoProcessSelection: 'every-step' })).toBe(true)
   })
 
   it('summarizes a collapsed section from the live draft', () => {

@@ -957,29 +957,35 @@ describe('client settings layout', () => {
     expect(source.match(/style=\{inputStyle\}/g)?.length).toBe(2)
     // The number renderer keeps it and only adds the flex share for its unit suffix.
     expect(source.match(/style=\{\{ \.\.\.inputStyle, flex: '1 1 auto', minWidth: 0 \}\}/g)?.length).toBe(1)
-    // Every select resolves to the constant-derived style: verbatim in a row, spread in the toolbar.
+    // Long catalog choices stay native selects; the two short enums use segmented buttons.
     const selects = source.match(/<select/g)?.length ?? 0
     const styledSelects = (source.match(/style=\{selectStyle\}/g)?.length ?? 0)
       + (source.match(/style=\{\{ \.\.\.selectStyle/g)?.length ?? 0)
-    expect(selects).toBeGreaterThanOrEqual(10)
+    expect(selects).toBe(7)
     expect(styledSelects).toBe(selects)
+    expect(source).toContain("if (field.select === 'mode') return renderSegment(")
+    expect(source).toContain("if (field.select === 'processSelection') return renderSegment(")
     // No control may carry a rival box model inline (the shared constant is the only one).
     expect(source).not.toMatch(/\{\{[^}]*height: 36, borderRadius: 8/)
   })
 
-  it('keeps the control column at a fixed width so no long label can squeeze it', () => {
+  it('lets the control column adapt to narrow settings panels without a positive floor', () => {
     const source = read()
     const cell = declaration(source, 'controlCell')
-    expect(cell).toContain("flex: '0 0 268px'")
+    expect(cell).toContain("flex: '0 1 280px'")
     expect(cell).toContain("justifyContent: 'flex-end'")
-    // A shrinkable control column is the bug: rows would then measure differently.
-    expect(cell).not.toMatch(/flex: '0 1/)
-    // ...and so is any positive floor: the width must come from the basis alone.
-    expect(cell).not.toMatch(/minWidth: (?!0\b)\d/)
-    // The fixed column must still be allowed to fall back to the full row width when the row wraps.
+    // The column can shrink and wrap, while its content still starts from a consistent width.
     expect(cell).toContain("maxWidth: '100%'")
     expect(cell).toContain('minWidth: 0')
+    expect(cell).not.toMatch(/minWidth: (?!0\b)\d/)
     expect(declaration(source, 'row')).toContain("flexWrap: 'wrap'")
+  })
+
+  it('lays each extra judge out as a responsive card instead of a five-column table', () => {
+    const source = read()
+    expect(declaration(source, 'judgeGrid')).toContain("repeat(auto-fit, minmax(min(210px, 100%), 1fr))")
+    expect(source).toContain('data-judge-index={idx}')
+    expect(source).not.toContain('minmax(110px, 1.2fr)')
   })
 
   it('parks the fixed-width switch on the same right edge as the inputs and selects', () => {
@@ -989,6 +995,38 @@ describe('client settings layout', () => {
     expect(toggle).toContain("justifyContent: 'flex-end'")
     // The switch itself is a 40px glyph and must be wrapped, not asked to stretch.
     expect(source).toContain("return <div style={toggleCell}><button type=\"button\" role=\"switch\"")
+  })
+
+  it('writes valid drafts automatically in order without a manual save bar', () => {
+    const source = read()
+    expect(source).toContain('saveInFlight')
+    expect(source).toContain('persistRef.current(saveVersion.current)')
+    expect(source).toContain('window.setTimeout(()=>void persistRef.current(version),300)')
+    expect(source).toContain("t['settings.autosave.saving']")
+    expect(source).not.toContain('stickyBar')
+    expect(source).not.toContain("t['settings.save']")
+    expect(source).not.toContain("t['settings.reload']")
+  })
+
+  it('declares every settings hook before the loading early return', () => {
+    const source = read()
+    const earlyReturn = source.indexOf('if(!loaded||!draft)return')
+    const settingsEnd = source.indexOf('function Metric', earlyReturn)
+    expect(earlyReturn).toBeGreaterThan(0)
+    expect(settingsEnd).toBeGreaterThan(earlyReturn)
+    expect(source.slice(earlyReturn, settingsEnd)).not.toMatch(/\buse(?:Effect|LayoutEffect|Memo|Ref|State)\b/)
+  })
+
+  it('uses icon tabs with a measured sliding pill and two-way page transitions', () => {
+    const source = read()
+    expect(source).toContain('function SettingsTabIcon')
+    expect(source).toContain('function SlidingSegments')
+    expect(source).toContain('new ResizeObserver(() => syncSlidingPill(control))')
+    expect(source).toContain("still.setAttribute('data-leave', direction)")
+    expect(source).toContain('data-enter={pageDirection ?? undefined}')
+    expect(source).toContain('@keyframes llm-verifier-page-in')
+    expect(source).toContain('@keyframes llm-verifier-page-out')
+    expect(source).toContain('@media (prefers-reduced-motion: reduce)')
   })
 })
 

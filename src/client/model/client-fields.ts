@@ -147,12 +147,29 @@ export interface SectionSpec {
 export const SECTIONS: readonly SectionSpec[] = [
   { id: 'tools', titleKey: 'section.tools', tier: 'core', open: true },
   { id: 'autoVerify', titleKey: 'section.autoVerify', tier: 'core', open: true },
-  { id: 'routing', titleKey: 'section.routing', tier: 'core', open: false },
+  { id: 'routing', titleKey: 'section.routing', tier: 'core', open: true },
   { id: 'model', titleKey: 'section.model', tier: 'core', open: true },
   { id: 'budgets', titleKey: 'section.budgets', tier: 'advanced', open: false },
   { id: 'storage', titleKey: 'section.storage', tier: 'advanced', open: false },
   { id: 'execution', titleKey: 'section.execution', tier: 'advanced', open: false },
   { id: 'cost', titleKey: 'section.cost', tier: 'advanced', open: false },
+]
+
+export type SettingsTabId = 'general' | 'judges' | 'automation' | 'limits' | 'data'
+
+export interface SettingsTabSpec {
+  id: SettingsTabId
+  titleKey: string
+  sections: readonly SectionId[]
+}
+
+/** Task-oriented navigation: every section has exactly one home. */
+export const SETTINGS_TABS: readonly SettingsTabSpec[] = [
+  { id: 'general', titleKey: 'settings.tab.general', sections: ['tools', 'autoVerify'] },
+  { id: 'judges', titleKey: 'settings.tab.judges', sections: ['model'] },
+  { id: 'automation', titleKey: 'settings.tab.automation', sections: ['routing'] },
+  { id: 'limits', titleKey: 'settings.tab.limits', sections: ['budgets', 'execution'] },
+  { id: 'data', titleKey: 'settings.tab.data', sections: ['storage', 'cost'] },
 ]
 
 export type FieldKind = 'toggle' | 'number' | 'text' | 'select' | 'custom'
@@ -179,6 +196,8 @@ export interface FieldSpec {
   /** `false` for identity fields that have no meaningful default (provider/model/judges). */
   resettable?: boolean
   visibleWhen?: (values: Values) => boolean
+  /** Dependent controls stay visible but become unavailable while their parent does not apply. */
+  enabledWhen?: (values: Values) => boolean
 }
 
 const fieldOf = (key: keyof Values, section: SectionId, kind: FieldKind): Pick<FieldSpec, 'key' | 'section' | 'kind' | 'titleKey' | 'helpKey'> => ({
@@ -215,7 +234,7 @@ export const FIELDS: readonly FieldSpec[] = [
   number('autoVerifyThreshold', 'autoVerify', { min: 0, max: 1, slider: true }),
 
   toggle('autoRouteSemantic', 'routing'),
-  number('autoRouteMinConfidence', 'routing', { min: 0, max: 1, slider: true }),
+  number('autoRouteMinConfidence', 'routing', { min: 0, max: 1, slider: true, enabledWhen: values => values.autoRouteSemantic }),
   number('autoRouteMaxCandidates', 'routing', { min: 3, max: 16, integer: true }),
   number('autoRouteMaxPerTask', 'routing', { min: 1, integer: true }),
   number('autoRouteMaxPerSession', 'routing', { min: 1, integer: true }),
@@ -226,10 +245,10 @@ export const FIELDS: readonly FieldSpec[] = [
   toggle('autoVerifySubagents', 'routing'),
   toggle('autoWorkspaceEvidence', 'routing'),
   select('autoProcessSelection', 'routing', 'processSelection'),
-  number('maxProcessCyclesPerTask', 'routing', { min: 1, max: 32, integer: true }),
-  toggle('autoProcessFailureContext', 'routing'),
-  text('autoProcessAlternativeModel', 'routing'),
-  number('autoProcessCandidates', 'routing', { min: 2, max: 4, integer: true }),
+  number('maxProcessCyclesPerTask', 'routing', { min: 1, max: 32, integer: true, enabledWhen: values => values.autoProcessSelection === 'every-step' }),
+  { ...toggle('autoProcessFailureContext', 'routing'), enabledWhen: values => values.autoProcessSelection !== 'off' },
+  { ...text('autoProcessAlternativeModel', 'routing'), enabledWhen: values => values.autoProcessSelection !== 'off' },
+  { ...number('autoProcessCandidates', 'routing', { min: 2, max: 4, integer: true }), enabledWhen: values => values.autoProcessSelection !== 'off' },
 
   select('provider', 'model', 'provider', false),
   select('model', 'model', 'model', false),
@@ -273,6 +292,10 @@ export function fieldsOfSection(section: SectionId): FieldSpec[] {
 
 export function isFieldVisible(field: FieldSpec, values: Values): boolean {
   return field.visibleWhen ? field.visibleWhen(values) : true
+}
+
+export function isFieldEnabled(field: FieldSpec, values: Values): boolean {
+  return field.enabledWhen ? field.enabledWhen(values) : true
 }
 
 /** A field the user actually changed away from the plugin default, if it is resettable. */
@@ -664,4 +687,11 @@ export function renderSections(values: Values): { section: SectionSpec; fields: 
     section,
     fields: fieldsOfSection(section.id).filter(field => isFieldVisible(field, values)),
   }))
+}
+
+export function renderTabSections(tab: SettingsTabId, values: Values): { section: SectionSpec; fields: FieldSpec[] }[] {
+  const spec = SETTINGS_TABS.find(candidate => candidate.id === tab)
+  if (!spec) throw new Error('Unknown settings tab: ' + tab)
+  const sections = new Set(spec.sections)
+  return renderSections(values).filter(entry => sections.has(entry.section.id))
 }
