@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+## 0.11.1 - 2026-11-02
 - **[修复] 兼容不支持 `temperature` 参数的模型路由（如 `sub2api/gpt-6-astra` 等固定采样/推理模型）**
   - `top_logprobs` 直连通道：新增 `isTemperatureUnsupportedMessage()` 精确识别上游对 `temperature` 参数的 HTTP 400/422 拒绝，当场省略 `temperature` 重发请求，不再被通用 `unsupported` 规则误判为不支持 `top_logprobs` 而错误降级通道
   - `llm.stream` 显式标签与 `best-of-N` 草稿生成通道：当模型拒绝 `temperature` 时自动省略该参数重试，并将 `temperatureUnsupported` 状态持久化至 `capabilities-v1.json`（共享 24h TTL 与判官自检 `forget()` 重置），后续调用直接省略 `temperature`
