@@ -17,11 +17,12 @@
 | `src/routing/` | 结构化与语义路由、预约状态机、预算估算;验收判定与反馈文案 |
 | `src/gates/` | 三个生命周期门:计划预审、Team 任务验收、工具调用决策 |
 | `src/process/` | 请求级过程选优(`llm/stream` 缓冲、备选生成、胜者回放) |
+| `src/iot/` | DeepSeek 主 Agent 辅助思考:流缓冲、供应商改写路由、辅助调用与内存指标 |
 | `src/telemetry/` | 调用统计、决策快照、看板活动视图 |
 | `src/replay/` | 离线回放:阈值重放、解析器重放、样本评测 |
 | `src/client/view/` | React 设置页与统计看板 |
 | `src/client/model/` | 设置页的字段注册、文案字典、纯函数 |
-| `test/<域>/` | 与 `src/<域>/` 同名的单测,扩展名一律 `.test.ts` |
+| `test/<域>/` | 与 `src/<域>/` 同名的单测,扩展名一律 `.test.ts`;`test/iot/` 覆盖档位解析、供应商路由、流缓冲与 fail-open 回放 |
 | `scripts/` | 构建、类型门禁、离线回放、发版 |
 | `docs/` | 本文档树 |
 | `lib/` | 构建产物,从不手工编辑、从不入库 |
@@ -36,6 +37,17 @@
 
 自动路由走同一条引擎,只是证据由 `transcript/` 从会话快照重建,判据来自配置,并被 `routing/` 的预算与预约状态机包裹。
 
+## 辅助思考旁路
+
+辅助思考是独立可选模块(`src/iot/`),默认关闭,默认只作用于 `deepseek-official`;额外主供应商/模型由 `iotThinkingTargets` 逐项启用:
+
+```
+思考块 → 全局辅助模型(deepseek-official + 主模型 low)→ 匹配生效线路及逐条辅助覆盖→ 一次辅助调用(无主会话 sessionId、无工具、60s)
+      → 改写文本 → 与原流同形回放;超时/报错/空/超限 → 原样回放原始流
+```
+
+它和过程选优共用同一个 `llm/stream` 钩子,顺序固定为重写在前;评分、门控与缓存身份都不在这条路径上。没有 `/iot` 命令或会话覆盖;指标是内存态,重载后清零。
+
 ## 不变量
 
 改动任何一处之前先读:
@@ -47,3 +59,5 @@
 - **判官提示词是安全边界**([D11](adr/D11-prompt-boundary.md)):证据只进确定性分隔块,并声明为只读数据。
 - **缓存身份字段变更必须升 `version`**([D13](adr/D13-cache-identity.md))。
 - **`lib/` 是产物**([D14](adr/D14-sidecar-and-artifacts.md)):由构建写出,不入库。
+- **思考重写是 fail-open 旁路**([D15](adr/D15-deepseek-thinking-rewrite.md)):改写失败一律回放原始流——不改写、不重试、不抛错。
+- **`llm/stream` 只有一个钩子**([D15](adr/D15-deepseek-thinking-rewrite.md)):思考重写与过程选优按"重写 → 选优"挂在同一处,不要再挂第二个。

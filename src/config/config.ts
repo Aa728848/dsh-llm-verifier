@@ -1,6 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from 'schemastery'
 import { CRITERIA_PRESET_IDS, type CriteriaPresetId } from '../scoring/core.ts'
+import { IOT_MODES, type IoTMode, type IoTThinkingTarget } from '../iot/mode.ts'
+export type { IoTThinkingTarget } from '../iot/mode.ts'
 
 /** A configured rubric: a bundled task-class preset, or a markdown file. */
 export type CriteriaPresetSelection = CriteriaPresetId | 'custom'
@@ -61,6 +63,22 @@ export function autoProcessSelectionSchema(): z<AutoProcessSelectionMode | boole
     .transform(z.union([...AUTO_PROCESS_SELECTION_MODES, z.boolean()]).default('off'), (value: AutoProcessSelectionMode | boolean): AutoProcessSelectionMode => normalizeAutoProcessSelection(value) ?? 'off')
     .default('off') as unknown as z<AutoProcessSelectionMode | boolean, AutoProcessSelectionMode>
 }
+
+/**
+ * The single DeepSeek IoT setting: how much auxiliary reasoning one eligible block may buy.
+ *
+ * `off` is the shipped default and the closed path. A non-off mode buys exactly ONE auxiliary call
+ * per eligible reasoning block, for the configured main agent routes. It takes no part in judging or scoring.
+ *
+ * The vocabulary itself lives in `../iot/mode.ts`: exporting it here under the settings name keeps
+ * ONE union in the repository, so a mode the settings page offers can never be one the controller
+ * refuses (or the reverse).
+ */
+export type IotThinkingMode = IoTMode
+export type IotThinkingTarget = IoTThinkingTarget
+
+/** The four legal values, in the order the settings page renders them. */
+export const IOT_THINKING_MODES: readonly IotThinkingMode[] = IOT_MODES
 
 export interface JudgeConfig {
   provider?: string
@@ -157,6 +175,16 @@ export interface Config {
    * `estimateRoutedCalls` — and is therefore opt-in rather than the default.
    */
   autoProcessCandidates?: number
+  /** Auxiliary-thinking level for the main agent. Default OFF. */
+  iotThinking?: IotThinkingMode
+  /** Auxiliary provider; empty defaults to deepseek-official. */
+  iotThinkingProvider?: string
+  /** Auxiliary model; empty follows the main model. */
+  iotThinkingModel?: string
+  /** Auxiliary effort; empty defaults to low. */
+  iotThinkingEffort?: string
+  /** Additional opt-in main routes with optional per-route auxiliary overrides. */
+  iotThinkingTargets?: IotThinkingTarget[]
   autoRouteMaxItemChars?: number
   autoRouteMaxInputChars?: number
   autoMaxModelCallsPerTask?: number
@@ -235,6 +263,11 @@ export interface ResolvedConfig {
   autoProcessFailureContext: boolean
   autoProcessAlternativeModel: string
   autoProcessCandidates: number
+  iotThinking: IotThinkingMode
+  iotThinkingProvider: string
+  iotThinkingModel?: string
+  iotThinkingEffort?: string
+  iotThinkingTargets: IotThinkingTarget[]
   autoRouteMaxItemChars: number
   autoRouteMaxInputChars: number
   autoMaxModelCallsPerTask: number
@@ -447,6 +480,17 @@ export const Config = markVolatile(z.object({
   autoProcessFailureContext: z.boolean().default(true),
   autoProcessAlternativeModel: z.string().default(''),
   autoProcessCandidates: z.number().step(1).min(2).default(2),
+  iotThinking: z.union([...IOT_THINKING_MODES]).default('off'),
+  iotThinkingProvider: z.string().default('deepseek-official'),
+  iotThinkingModel: z.string(),
+  iotThinkingEffort: z.string(),
+  iotThinkingTargets: z.array(z.object({
+    provider: z.string(),
+    model: z.string(),
+    rewriteProvider: z.string(),
+    rewriteModel: z.string(),
+    rewriteEffort: z.string(),
+  })).default([]),
   autoRouteMaxItemChars: z.number().step(1).min(100).default(20000),
   autoRouteMaxInputChars: z.number().step(1).min(1000).default(60000),
   autoMaxModelCallsPerTask: z.number().step(1).min(1).default(96),
@@ -554,6 +598,32 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   if (!Number.isSafeInteger(maxProcessCyclesPerTask) || maxProcessCyclesPerTask < 1 || maxProcessCyclesPerTask > 32) {
     throw new Error('llm-verifier: maxProcessCyclesPerTask must be an integer between 1 and 32')
   }
+  // The one IoT setting. Fails closed on anything outside the four modes: a typo must neither buy the
+  // expensive arm (`full`) nor be quietly downgraded to `off` while the settings row shows a value.
+  const iotThinking = config.iotThinking ?? 'off'
+  if (typeof iotThinking !== 'string' || !(IOT_THINKING_MODES as readonly string[]).includes(iotThinking)) {
+    throw new Error('llm-verifier: iotThinking must be off, compact, balanced, or full')
+  }
+  const iotThinkingProvider = (config.iotThinkingProvider ?? 'deepseek-official').trim() || 'deepseek-official'
+  const iotThinkingModel = config.iotThinkingModel?.trim() || undefined
+  const iotThinkingEffort = config.iotThinkingEffort?.trim() || undefined
+  const rawThinkingTargets = config.iotThinkingTargets ?? []
+  if (!Array.isArray(rawThinkingTargets)) throw new Error('llm-verifier: iotThinkingTargets must be an array')
+  const targetIdentities = new Set<string>()
+  const iotThinkingTargets: IotThinkingTarget[] = rawThinkingTargets.map((target, index) => {
+    if (!target || typeof target !== 'object') throw new Error('llm-verifier: iotThinkingTargets[' + index + '] must be an object')
+    const provider = (target.provider ?? '').trim()
+    if (!provider) throw new Error('llm-verifier: iotThinkingTargets[' + index + '].provider must be non-empty')
+    const model = target.model?.trim() || undefined
+    const identity = provider + '\u0000' + (model ?? '')
+    if (targetIdentities.has(identity)) throw new Error('llm-verifier: duplicate iotThinkingTargets target: ' + provider + '/' + (model ?? '*'))
+    targetIdentities.add(identity)
+    const rewriteProvider = target.rewriteProvider?.trim() || undefined
+    const rewriteModel = target.rewriteModel?.trim() || undefined
+    const rewriteEffort = target.rewriteEffort?.trim() || undefined
+    return { provider, ...(model ? { model } : {}), ...(rewriteProvider ? { rewriteProvider } : {}), ...(rewriteModel ? { rewriteModel } : {}), ...(rewriteEffort ? { rewriteEffort } : {}) }
+  })
+
   const values = {
     autoVerifyRepeats: config.autoVerifyRepeats ?? 1,
     autoTrackRepeats: config.autoTrackRepeats ?? 3,
@@ -677,6 +747,11 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     autoProcessFailureContext: config.autoProcessFailureContext ?? true,
     autoProcessAlternativeModel: alternativeModel,
     autoProcessCandidates: processCandidates,
+    iotThinking,
+    iotThinkingProvider,
+    iotThinkingModel,
+    iotThinkingEffort,
+    iotThinkingTargets,
     criteriaPreset,
     criteriaFile,
     autoVerifyTeamTasks: config.autoVerifyTeamTasks ?? true,

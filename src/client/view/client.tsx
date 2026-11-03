@@ -36,6 +36,7 @@ import {
   verifierActivityText, type ActivityChipView,
 } from '../model/client-i18n.ts'
 import { CRITERIA_PRESETS, DEFAULT_GROUND_TRUTH_NOTE, buildPairwisePrompt } from '../../scoring/core.ts'
+import { IOT_THINKING_MODES, type IotThinkingMode } from '../../config/config.ts'
 import {
   type ExtraJudgeDraft,
   MAX_EXTRA_JUDGES,
@@ -207,6 +208,8 @@ const unitStyle: React.CSSProperties = { flex: '0 0 auto', fontSize: 12, color: 
 const sliderStyle: React.CSSProperties = { width: '100%', margin: 0, accentColor: 'var(--dsw-alias-state-business-primary)' }
 const judgeCard: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 12, padding: 12, borderRadius: 12, border: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-specific-input-major)' }
 const judgeGrid: React.CSSProperties = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(210px, 100%), 1fr))', gap: 10 }
+const auxThinkingGrid: React.CSSProperties = { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }
+const auxThinkingCard: React.CSSProperties = { ...judgeCard, gap: 10, padding: '10px 12px', minHeight: 44, boxSizing: 'border-box' }
 const judgeField: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }
 const judgeFieldLabel: React.CSSProperties = { color: 'var(--dsw-alias-label-tertiary)', fontSize: 12, lineHeight: '18px' }
 /** Every input and select shares one box, including the fields inside judge cards. */
@@ -353,6 +356,10 @@ function SettingsTabIcon({ id }: { id: SettingsTabId }) {
     data: <><ellipse cx="12" cy="5.5" rx="7" ry="3"/><path d="M5 5.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6M5 11.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></>,
   }
   return <svg className="llm-verifier-settings-tab-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round">{paths[id]}</svg>
+}
+
+export function iotThinkingSegments(t: I18nDict): { value: IotThinkingMode; label: string }[] {
+  return IOT_THINKING_MODES.map(id => ({ value: id, label: t[('field.iotThinking.' + id) as keyof I18nDict] as string }))
 }
 
 const PAGE_MOTION_MS = 180
@@ -614,6 +621,21 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
       onChange={event => patch(key, event.target.value as never)}
     />
   }
+  const addThinkingTarget = () => {
+    if (!loaded || !draft) return
+    const used = new Set(draft.iotThinkingTargets.map(target => target.provider + '/' + (target.model ?? '*')))
+    const group = loaded.groups.find(candidate => !used.has(candidate.id + '/*') && candidate.models.length > 0) ?? loaded.groups.find(candidate => candidate.models.length > 0)
+    if (!group) return
+    patch('iotThinkingTargets', [...draft.iotThinkingTargets, { provider: group.id }])
+  }
+  const removeThinkingTarget = (idx: number) => {
+    if (!draft) return
+    patch('iotThinkingTargets', draft.iotThinkingTargets.filter((_target, index) => index !== idx))
+  }
+  const updateThinkingTarget = (idx: number, updates: Partial<Values['iotThinkingTargets'][number]>) => {
+    if (!draft) return
+    patch('iotThinkingTargets', draft.iotThinkingTargets.map((target, index) => index === idx ? { ...target, ...updates } : target))
+  }
   const renderSelect = (field: FieldSpec, enabled: boolean) => {
     if (field.select === 'mode') return renderSegment(inputAria(field), [
       { value: 'manual', label: t['field.autoVerifyMode.manual'] },
@@ -624,6 +646,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
       value: id,
       label: t[('field.autoProcessSelection.' + id) as keyof I18nDict] as string,
     })), draft.autoProcessSelection, value => patch('autoProcessSelection', value), enabled)
+    if (field.select === 'iotThinking') return renderSegment(inputAria(field), iotThinkingSegments(t), draft.iotThinking, value => patch('iotThinking', value), enabled)
     if (field.select === 'criteriaPreset') return <select style={selectStyle} disabled={readOnly || !enabled} aria-label={inputAria(field)} value={draft.criteriaPreset} onChange={event => patch('criteriaPreset', event.target.value as Values['criteriaPreset'])}>
       {(['coding','debug','research','ops','writing','custom'] as const).map(id => <option key={id} value={id}>{t[('field.criteriaPreset.' + id) as keyof I18nDict] as string}</option>)}
     </select>
@@ -732,6 +755,126 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
           </div>
         })}
       </div>}
+    </Fragment>
+  }
+  const renderThinkingRoute = () => {
+    const group = loaded.groups.find(candidate => candidate.id === draft.iotThinkingProvider)
+    const models = group?.models ?? []
+    const selectedModel = models.find(model => model.id === draft.iotThinkingModel)
+    const efforts = selectedModel?.reasoning?.efforts ?? []
+    const summary = draft.iotThinkingProvider + ' · ' + (draft.iotThinkingModel || t['field.reasoningEffort.default']) + ' · ' + (draft.iotThinkingEffort || 'low')
+    return <details style={auxThinkingCard} data-thinking-route>
+      <summary style={{ cursor: 'pointer', listStyle: 'none', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <span style={{ ...fieldTitle, fontSize: 13, fontWeight: 500 }}>{t['field.iotThinkingRoute.title']}</span>
+        <span style={{ ...judgeFieldLabel, maxWidth: '65%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'right' }}>{summary} ▾</span>
+      </summary>
+      <div style={fieldHelp}>{t['field.iotThinkingRoute.help']}</div>
+      <div style={auxThinkingGrid}>
+        <label style={judgeField}>
+          <span style={judgeFieldLabel}>{t['field.provider.title']}</span>
+          <select style={selectStyle} disabled={readOnly} aria-label={t['field.iotThinkingRoute.providerAria']} value={draft.iotThinkingProvider} onChange={event => {
+            const provider = event.target.value
+            const nextGroup = loaded.groups.find(candidate => candidate.id === provider)
+            const model = nextGroup?.models.find(candidate => /deepseek/iu.test(candidate.id + ' ' + candidate.name)) ?? nextGroup?.models[0]
+            const effort = model?.reasoning?.efforts.some(option => option.id === 'low') ? 'low' : undefined
+            setDraft(current => current ? { ...current, iotThinkingProvider: provider, iotThinkingModel: model?.id, iotThinkingEffort: effort } : current)
+          }}>
+            {!loaded.groups.some(candidate => candidate.id === draft.iotThinkingProvider) && draft.iotThinkingProvider && <option value={draft.iotThinkingProvider}>{draft.iotThinkingProvider}</option>}
+            {loaded.groups.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.name} · {candidate.id}</option>)}
+          </select>
+        </label>
+        <label style={judgeField}>
+          <span style={judgeFieldLabel}>{t['field.model.title']}</span>
+          <select style={selectStyle} disabled={readOnly} aria-label={t['field.iotThinkingRoute.modelAria']} value={draft.iotThinkingModel ?? ''} onChange={event => {
+            const model = models.find(candidate => candidate.id === event.target.value)
+            const effort = model?.reasoning?.efforts.some(option => option.id === 'low') ? 'low' : undefined
+            setDraft(current => current ? { ...current, iotThinkingModel: event.target.value || undefined, iotThinkingEffort: effort } : current)
+          }}>
+            <option value="">{t['field.reasoningEffort.default']}</option>
+            {!models.some(model => model.id === draft.iotThinkingModel) && draft.iotThinkingModel && <option value={draft.iotThinkingModel}>{draft.iotThinkingModel}</option>}
+            {models.map(model => <option key={model.id} value={model.id}>{model.name} · {model.id}</option>)}
+          </select>
+        </label>
+        <label style={judgeField}>
+          <span style={judgeFieldLabel}>{t['field.reasoningEffort.title']}</span>
+          <select style={selectStyle} disabled={readOnly} aria-label={t['field.iotThinkingRoute.effortAria']} value={draft.iotThinkingEffort ?? ''} onChange={event => patch('iotThinkingEffort', event.target.value || undefined)}>
+            <option value="">{t['field.reasoningEffort.default']}</option>
+            {efforts.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}
+          </select>
+        </label>
+      </div>
+    </details>
+  }
+  const renderThinkingTargets = () => {
+    const issue = messageFor(FIELDS.find(field => field.key === 'iotThinkingTargets')!)
+    return <Fragment key="iotThinkingTargets">
+      <div style={row}>
+        <div style={labelCell}>
+          <span style={fieldTitle}>{t['field.iotThinkingTargets.title']}</span>
+          <div style={fieldHelp}>{t['field.iotThinkingTargets.help']}</div>
+        </div>
+        <div style={controlCell}><Button variant="outline" disabled={readOnly || loaded.groups.length === 0} onClick={addThinkingTarget}>{t['field.iotThinkingTargets.add']}</Button></div>
+      </div>
+      {issue && <p style={{ ...fullLine, color: 'var(--dsw-alias-state-error-primary)' }}>{issueText(issue)}</p>}
+      {draft.iotThinkingTargets.map((target, idx) => {
+        const mainGroup = loaded.groups.find(group => group.id === target.provider)
+        const mainModels = mainGroup?.models ?? []
+        const rewriteGroup = loaded.groups.find(group => group.id === target.rewriteProvider)
+        const rewriteModels = rewriteGroup?.models ?? []
+        const rewriteModel = rewriteModels.find(model => model.id === target.rewriteModel)
+        const efforts = rewriteModel?.reasoning?.efforts ?? []
+        return <div key={idx} style={judgeCard} data-thinking-target-index={idx}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+            <span style={{ ...fieldTitle, fontSize: 13, fontWeight: 500 }}>{tFormat(t['field.iotThinkingTargets.itemTitle'], { index: idx + 1 })}</span>
+            <button type="button" style={linkButton} disabled={readOnly} aria-label={tFormat(t['field.iotThinkingTargets.remove'], { index: idx + 1 })} onClick={() => removeThinkingTarget(idx)}>{t['field.iotThinkingTargets.remove']}</button>
+          </div>
+          <div style={judgeGrid}>
+            <label style={judgeField}>
+              <span style={judgeFieldLabel}>{t['field.iotThinkingTargets.mainProviderAria']}</span>
+              <select style={selectStyle} disabled={readOnly} aria-label={tFormat(t['field.iotThinkingTargets.mainProviderAria'], { index: idx + 1 })} value={target.provider} onChange={event => updateThinkingTarget(idx, { provider: event.target.value, model: undefined })}>
+                {!loaded.groups.some(group => group.id === target.provider) && target.provider && <option value={target.provider}>{target.provider}</option>}
+                {loaded.groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.id}</option>)}
+              </select>
+            </label>
+            <label style={judgeField}>
+              <span style={judgeFieldLabel}>{t['field.model.title']}</span>
+              <select style={selectStyle} disabled={readOnly} aria-label={tFormat(t['field.iotThinkingTargets.mainModelAria'], { index: idx + 1 })} value={target.model ?? ''} onChange={event => updateThinkingTarget(idx, { model: event.target.value || undefined })}>
+                <option value="">{t['field.iotThinkingTargets.allModels']}</option>
+                {!mainModels.some(model => model.id === target.model) && target.model && <option value={target.model}>{target.model}</option>}
+                {mainModels.map(model => <option key={model.id} value={model.id}>{model.name} · {model.id}</option>)}
+              </select>
+            </label>
+            <label style={judgeField}>
+              <span style={judgeFieldLabel}>{t['field.iotThinkingTargets.rewriteProviderAria']}</span>
+              <select style={selectStyle} disabled={readOnly} aria-label={tFormat(t['field.iotThinkingTargets.rewriteProviderAria'], { index: idx + 1 })} value={target.rewriteProvider ?? ''} onChange={event => {
+                const provider = event.target.value || undefined
+                const group = loaded.groups.find(candidate => candidate.id === provider)
+                const model = group?.models.find(candidate => /deepseek/iu.test(candidate.id + ' ' + candidate.name)) ?? group?.models[0]
+                updateThinkingTarget(idx, { rewriteProvider: provider, rewriteModel: model?.id, rewriteEffort: undefined })
+              }}>
+                <option value="">{t['field.iotThinkingTargets.followGlobal']}</option>
+                {!loaded.groups.some(group => group.id === target.rewriteProvider) && target.rewriteProvider && <option value={target.rewriteProvider}>{target.rewriteProvider}</option>}
+                {loaded.groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.id}</option>)}
+              </select>
+            </label>
+            <label style={judgeField}>
+              <span style={judgeFieldLabel}>{t['field.iotThinkingTargets.rewriteModelAria']}</span>
+              <select style={selectStyle} disabled={readOnly} aria-label={tFormat(t['field.iotThinkingTargets.rewriteModelAria'], { index: idx + 1 })} value={target.rewriteModel ?? ''} onChange={event => updateThinkingTarget(idx, { rewriteModel: event.target.value || undefined, rewriteEffort: undefined })}>
+                <option value="">{t['field.iotThinkingTargets.followGlobal']}</option>
+                {!rewriteModels.some(model => model.id === target.rewriteModel) && target.rewriteModel && <option value={target.rewriteModel}>{target.rewriteModel}</option>}
+                {rewriteModels.map(model => <option key={model.id} value={model.id}>{model.name} · {model.id}</option>)}
+              </select>
+            </label>
+            <label style={judgeField}>
+              <span style={judgeFieldLabel}>{t['field.iotThinkingTargets.rewriteEffortAria']}</span>
+              <select style={selectStyle} disabled={readOnly} aria-label={tFormat(t['field.iotThinkingTargets.rewriteEffortAria'], { index: idx + 1 })} value={target.rewriteEffort ?? ''} onChange={event => updateThinkingTarget(idx, { rewriteEffort: event.target.value || undefined })}>
+                <option value="">{t['field.iotThinkingTargets.followGlobal']}</option>
+                {efforts.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}
+              </select>
+            </label>
+          </div>
+        </div>
+      })}
     </Fragment>
   }
   const renderRow = (field: FieldSpec) => {
@@ -844,7 +987,9 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
           {advanced
             ? <button type="button" style={{ ...sectionTitle, cursor: 'pointer' }} aria-expanded={open} aria-label={tFormat(translate(open ? 'settings.sectionCollapse' : 'settings.sectionExpand') ?? '', { title })} onClick={() => setSectionOpen(entry.section.id, !open)}>{heading}</button>
             : <div style={sectionTitle}>{heading}</div>}
-          {open && entry.fields.map(field => (field.kind === 'custom' ? renderJudges() : renderRow(field)))}
+          {open && entry.fields.map(field => (field.kind === 'custom'
+            ? field.key === 'extraJudges' ? renderJudges() : field.key === 'iotThinkingProvider' ? renderThinkingRoute() : field.key === 'iotThinkingTargets' ? renderThinkingTargets() : null
+            : renderRow(field)))}
           {open && entry.section.id === 'tools' && !draft.enabled && <p style={{ margin: '8px 0 0', fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-warn-label)' }}>{t['field.enabled.warnDisabled']}</p>}
           {open && entry.section.id === 'autoVerify' && draft.autoVerifyMode !== 'manual' && <div style={{ padding: '10px 0', borderBottom: '1px solid var(--dsw-alias-border-l2)', fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' }}>
             <p style={{ margin: 0 }}>{t['field.autoVerify.warnNotice']}</p>

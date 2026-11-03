@@ -19,6 +19,7 @@ import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedA
 import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanticRouteView, estimateRoutedCalls, inspectDeliveryPhase, inspectRecoverySignal, latestDirectUserSeq, nextDiagnosticCycleId, parseSemanticRoute, routedRepeats, semanticDecision, semanticReferencesVisible, semanticRouteHint, type CandidateArtifact, type Reservation, type RouteDecision, type RoutedAgent, type RoutedVerifierKind, type SemanticRouteView } from '../routing/router.ts'
 import { VerifierActivities, createActivityObserver, type ActivityView } from '../telemetry/verifier-activity.ts'
 import { ProcessCycleStore, ProcessSelector, resolveProcessFile, type ProcessCycleReport } from '../process/process-selection.ts'
+import { IoTController } from '../iot/index.ts'
 import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, PROPOSAL_CRITERIA, buildGenerationPrompt, buildPairwisePrompt, extractScore, renderDiagnostics, renderReferenceContext, type Diagnostic, type ReviewStage } from '../scoring/core.ts'
 import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from '../gates/plan-gate.ts'
 import { cancelledCall, denyWithInfo } from '../gates/tool-decision.ts'
@@ -1039,6 +1040,31 @@ export function apply(ctx: Context, config: Config = {}): void {
   clearProcessIntents = () => processSelector.clearAll()
 
   /**
+   * Auxiliary thinking: one compaction call per finished reasoning block of an enabled main route.
+   *
+   * ONE controller per plugin instance, created here — after the settings reader and the selector —
+   * because it owns per-session metrics. Settings are read live through
+   * `current()`, so switching the feature on or changing the level applies to the very next request
+   * without touching this object; a disabled setting is the controller's own closed path, which is why
+   * the wiring below needs no second gate.
+   */
+  const iot = new IoTController({
+    llm: ctx.llm,
+    settings: () => {
+      const selected = current()
+      return {
+        enabled: selected.enabled,
+        iotThinking: selected.iotThinking,
+        iotThinkingProvider: selected.iotThinkingProvider,
+        iotThinkingModel: selected.iotThinkingModel,
+        iotThinkingEffort: selected.iotThinkingEffort,
+        iotThinkingTargets: selected.iotThinkingTargets,
+      }
+    },
+    logger: { warn: message => ctx.logger.warn(message), info: message => ctx.logger.info(message) },
+  })
+
+  /**
    * Arm one process-selection intent for the task's next real main request.
    *
    * Registration buys nothing by itself: it records that the NEXT real main request of this task
@@ -1274,16 +1300,32 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   }
 
-  ctx.on('agent/disposed', ({ agent }) => { autoRouter.release(agent); topics.delete(String(agent.id)); processSelector.clear(String(agent.id)) })
+  // Disposal releases everything this plugin holds for the session, including its metrics:
+  // a reused session id must not inherit the previous session's counters.
+  ctx.on('agent/disposed', ({ agent }) => {
+    autoRouter.release(agent)
+    topics.delete(String(agent.id))
+    processSelector.clear(String(agent.id))
+    iot.clear(String(agent.id))
+  })
 
-  // P06: the host's ONE request-level interception point. The handler binds a registered intent to
-  // a real main-loop request (host marker + session id) and otherwise delegates untouched; the
-  // alternative reply is dispatched as a fresh request that is not an agent-loop request, so this
-  // listener can never recurse into itself.
+  // The host's ONE request-level interception point, shared by both request-level features. A second
+  // listener is not an option: the two would each take an independent, unordered turn at the same
+  // request, and the P06 hand-over (`internal` marking, replay bookkeeping) assumes it owns the
+  // stream it returns. The order is the contract — IoT compacts the ORIGINAL reply first, and P06 may
+  // then replace the compacted result with an alternative:
+  //   - no intent: the stream is exactly what IoT produced (with IoT ineligible, exactly `next()`);
+  //   - intent: P06 receives that same stream as its original arm, and its alternative reply is
+  //     dispatched through the selector's own `stream` seam (raw `ctx.llm`), so the alternative is
+  //     never routed through this hook and can neither be compacted nor recurse.
   ctx.on('llm/stream', (options, next) => {
     const intent = processSelector.take(options)
-    if (intent === undefined) return next()
-    return processSelector.handle(options, next, intent)
+    // The stream is built ONCE and handed over as a thunk: the selector consumes this exact stream as
+    // its original arm instead of calling the downstream waterfall a second time, so one host request
+    // stays one dispatch and one bill.
+    const stream = iot.stream(options, next)
+    if (intent === undefined) return stream
+    return processSelector.handle(options, () => stream, intent)
   })
 
   // Plan pre-review: judge exit_plan_mode BEFORE the tool asks the human, so a

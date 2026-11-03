@@ -20,3 +20,4 @@
 | [D12](D12-host-seams.md) | 宿主形态差异只有一个读取点 |
 | [D13](D13-cache-identity.md) | 缓存身份与四层定价 |
 | [D14](D14-sidecar-and-artifacts.md) | 侧车留在话题目录,构建产物不入库 |
+| [D15](D15-deepseek-thinking-rewrite.md) | DeepSeek 辅助思考是可选旁路,失败即回放原流 |

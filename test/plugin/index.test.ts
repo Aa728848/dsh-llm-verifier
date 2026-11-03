@@ -32,8 +32,11 @@ function assemble(config: Record<string, unknown> = {}, options: { root?: string
   // The lifecycle hooks are the highest-risk wiring in the plugin and `on() {}` never ran
   // them. Capturing the callbacks lets a focused test drive the real turn-stopping gate.
   const handlers = new Map<string, (payload: unknown, next?: () => unknown) => unknown>()
+  // Optional service injections are captured instead of ignored: the /iot command is registered that
+  // way, and an empty inject() stub would leave the whole command seam unexercised.
+  const injections: Array<{ deps: unknown; callback: (ready: unknown) => void }> = []
   const ctx = {
-    inject() {}, on(name: string, handler: (payload: unknown, next?: () => unknown) => unknown) { handlers.set(name, handler) }, effect() {},
+    inject(deps: unknown, callback: (ready: unknown) => void) { injections.push({ deps, callback }) }, on(name: string, handler: (payload: unknown, next?: () => unknown) => unknown) { handlers.set(name, handler) }, effect() {},
     get(name: string) { return name === 'workspaceChanges' ? options.workspace : undefined },
     logger: { warn(value: unknown) { warnings.push(String(value)) }, info() {}, error() {}, debug() {} },
     tools: { register(definition: never) { tools.set((definition as unknown as { name: string }).name, definition as never) } },
@@ -46,7 +49,7 @@ function assemble(config: Record<string, unknown> = {}, options: { root?: string
     connection: { rpc: { handle(channel: string, handler: (endpoint: string, payload: unknown) => unknown) { rpc.set(channel, handler) } } },
   } as unknown as Context
   apply(ctx, config as never)
-  return { tools, warnings, rpc, handlers }
+  return { tools, warnings, rpc, handlers, injections }
 }
 
 /** A session whose model is already logged: the normal case for best-of-N. */
@@ -2036,4 +2039,267 @@ describe('early candidate review through agent/pre-step', () => {
     expect(warnings.some(warning => warning.includes('early candidate review failed'))).toBe(true)
   })
 })
+
+/**
+ * IoT-Lite through the REAL hooks.
+ *
+ * The setting is off by default, so the closed path has to be indistinguishable from not having the
+ * feature at all: no auxiliary call, and the exact stream the host would otherwise have received.
+ * When it is on, one finished reasoning block of a DeepSeek main request is replaced by one validated
+ * auxiliary answer, every failure keeps the original block, and the command, the session disposal and
+ * the P06 hand-over all act on that ONE controller.
+ */
+describe('IoT-Lite through the real hooks', () => {
+  /** Comfortably above IOT_MIN_CHARS, so the block is eligible. */
+  const LONG = 'Inspect the parser and the failing fixture first, then decide what to change. '.repeat(10)
+  const COMPACTED = '- [goal] Fix the parser\n- [open] Whether a retry is needed'
+
+  /** One main reply: a long reasoning block, then the deliverable text. */
+  const mainChunks = () => [
+    { type: 'block-start', index: 0, blockType: 'reasoning' },
+    { type: 'reasoning-delta', index: 0, text: LONG },
+    { type: 'block-end', index: 0, block: { type: 'reasoning', text: LONG } },
+    { type: 'block-start', index: 1, blockType: 'text' },
+    { type: 'text-delta', index: 1, text: 'MAIN-REPLY' },
+    { type: 'block-end', index: 1, block: { type: 'text', text: 'MAIN-REPLY' } },
+    { type: 'usage', usage: { inputTokens: 100, outputTokens: 40 } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+
+  /** The one auxiliary answer shape assessCompaction accepts for every strategy. */
+  const auxChunks = (text = COMPACTED) => [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'text-delta', index: 0, text },
+    { type: 'block-end', index: 0, block: { type: 'text', text } },
+    { type: 'usage', usage: { inputTokens: 30, outputTokens: 12 } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+
+  type AuxRequest = { provider?: string; model?: string; reasoningEffort?: string; purpose?: string; sessionId?: string; tools?: unknown; maxTokens?: number; messages: readonly unknown[] }
+
+  async function* streamOf(chunks: readonly unknown[]): AsyncIterable<unknown> {
+    for (const chunk of chunks) yield chunk
+  }
+
+  async function collect(iterable: AsyncIterable<unknown>): Promise<Array<Record<string, unknown>>> {
+    const chunks: Array<Record<string, unknown>> = []
+    for await (const chunk of iterable) chunks.push(chunk as Record<string, unknown>)
+    return chunks
+  }
+
+  /** The auxiliary dispatch seam: every model call that is NOT the main request lands here. */
+  function auxStream(calls: AuxRequest[], reply: (call: number) => readonly unknown[] | never = () => auxChunks()) {
+    return (request: AuxRequest) => {
+      calls.push(request)
+      const chunks = reply(calls.length)
+      return streamOf(chunks)
+    }
+  }
+
+  /** A real main-loop request on the only route IoT is eligible for. */
+  const mainRequest = (overrides: Record<string, unknown> = {}) => markAgentLoopRequest({ provider: 'deepseek-official', model: 'deepseek-reasoner', messages: [], sessionId: 'iot-session' as never, ...overrides })
+
+  const reasoningOf = (chunks: readonly Record<string, unknown>[]): string => chunks.filter(chunk => chunk.type === 'reasoning-delta').map(chunk => String(chunk.text)).join('')
+  const textOf = (chunks: readonly Record<string, unknown>[]): string => chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => String(chunk.text)).join('')
+
+  it('is a closed path by default: no auxiliary call, and the host receives exactly next()', async () => {
+    const aux: AuxRequest[] = []
+    const { handlers } = assemble({ ...JUDGE }, { stream: auxStream(aux) })
+    const chunks = await collect(handlers.get('llm/stream')!(mainRequest(), () => streamOf(mainChunks())) as AsyncIterable<unknown>)
+    expect(aux).toEqual([])
+    expect(chunks).toEqual(mainChunks())
+  })
+
+  it('replaces one finished reasoning block of the DeepSeek main request', async () => {
+    const aux: AuxRequest[] = []
+    const { handlers } = assemble({ ...JUDGE, iotThinking: 'compact' }, { stream: auxStream(aux) })
+    const chunks = await collect(handlers.get('llm/stream')!(mainRequest(), () => streamOf(mainChunks())) as AsyncIterable<unknown>)
+
+    expect(reasoningOf(chunks)).toBe(COMPACTED)
+    expect(chunks.find(chunk => chunk.type === 'block-end' && chunk.index === 0)?.block).toEqual({ type: 'reasoning', text: COMPACTED })
+    // Only the reasoning block is rewritten: the deliverable text reaches the host untouched.
+    expect(textOf(chunks)).toBe('MAIN-REPLY')
+
+    // Exactly one auxiliary call, and it is a hand-built request with NONE of the main identity —
+    // which is what makes it ineligible for compaction itself (no recursion).
+    expect(aux).toHaveLength(1)
+    expect(aux[0]).toMatchObject({ provider: 'deepseek-official', model: 'deepseek-reasoner', reasoningEffort: 'low', purpose: 'compaction', maxTokens: 800 })
+    expect(aux[0]?.sessionId).toBeUndefined()
+    expect(aux[0]?.tools).toBeUndefined()
+    // The trace is quoted as data behind the instruction marker, never merged into the instructions.
+    expect(promptText(aux[0]!)).toContain('[iot-compaction]')
+  })
+
+  it('keeps the original block when the auxiliary answer is truncated, and when the call fails', async () => {
+    const truncated: AuxRequest[] = []
+    const truncatedReply = () => [
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text: '- [goal] Fix it' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: '- [goal] Fix it' } },
+      { type: 'finish', reason: { kind: 'max-tokens' } },
+    ]
+    const first = assemble({ ...JUDGE, iotThinking: 'compact' }, { stream: auxStream(truncated, truncatedReply) })
+    const kept = await collect(first.handlers.get('llm/stream')!(mainRequest(), () => streamOf(mainChunks())) as AsyncIterable<unknown>)
+    expect(kept).toEqual(mainChunks())
+    expect(truncated).toHaveLength(1)
+    // The refusal is a diagnostic, not a silent rewrite and not a thrown request.
+    expect(first.warnings.some(warning => warning.includes('llm-iot'))).toBe(true)
+
+    const exploding: AuxRequest[] = []
+    const thrown = () => { throw new Error('provider said no') }
+    const second = assemble({ ...JUDGE, iotThinking: 'compact' }, { stream: auxStream(exploding, thrown) })
+    const recovered = await collect(second.handlers.get('llm/stream')!(mainRequest(), () => streamOf(mainChunks())) as AsyncIterable<unknown>)
+    expect(recovered).toEqual(mainChunks())
+    expect(exploding).toHaveLength(1)
+  })
+
+  it('preserves the terminal replay state, the full usage accounting and the block index', async () => {
+    const aux: AuxRequest[] = []
+    const replayState = { response: { id: 'native-1', stopReason: 'stop' }, blocks: [{ signature: 'sig-0' }] }
+    const usage = { inputTokens: 120, outputTokens: 40, cacheReadTokens: 7, cacheWriteTokens: 3, reasoningTokens: 9, totalTokens: 170 }
+    // An adapter-private field on the reasoning block: the replacement must carry every field over,
+    // not just the text it rewrote.
+    const signed = { type: 'reasoning', text: LONG, signature: 'provider-signature' }
+    const signedMain = () => [
+      { type: 'block-start', index: 3, blockType: 'reasoning' },
+      { type: 'reasoning-delta', index: 3, text: LONG },
+      { type: 'block-end', index: 3, block: signed },
+      { type: 'usage', usage },
+      { type: 'finish', reason: { kind: 'stop' }, replayState },
+    ]
+    const { handlers } = assemble({ ...JUDGE, iotThinking: 'balanced' }, { stream: auxStream(aux) })
+    const chunks = await collect(handlers.get('llm/stream')!(mainRequest(), () => streamOf(signedMain())) as AsyncIterable<unknown>)
+    expect(chunks.find(chunk => chunk.type === 'block-end')).toEqual({ type: 'block-end', index: 3, block: { type: 'reasoning', text: COMPACTED, signature: 'provider-signature' } })
+    expect(chunks.find(chunk => chunk.type === 'usage')).toEqual({ type: 'usage', usage })
+    // A replay envelope belongs to the RESPONSE, so it has to survive a rewritten block unchanged.
+    expect(chunks.find(chunk => chunk.type === 'finish')).toEqual({ type: 'finish', reason: { kind: 'stop' }, replayState })
+    expect(aux).toHaveLength(1)
+  })
+
+  it('uses a provider-specific DeepSeek model for the auxiliary rewrite', async () => {
+    const aux: AuxRequest[] = []
+    const { handlers, injections, tools } = assemble({
+      ...JUDGE,
+      iotThinking: 'compact',
+      iotThinkingProvider: 'opendesign',
+      iotThinkingModel: 'deepseek-v4.1-flash',
+      iotThinkingEffort: 'high',
+    }, { stream: auxStream(aux) })
+    const chunks = await collect(handlers.get('llm/stream')!(mainRequest(), () => streamOf(mainChunks())) as AsyncIterable<unknown>)
+    expect(reasoningOf(chunks)).toBe(COMPACTED)
+    expect(aux).toHaveLength(1)
+    expect(aux[0]).toMatchObject({ provider: 'opendesign', model: 'deepseek-v4.1-flash', reasoningEffort: 'high', purpose: 'compaction', maxTokens: 800 })
+    expect(aux[0]?.sessionId).toBeUndefined()
+    expect(aux[0]?.tools).toBeUndefined()
+    // The command plane was deliberately removed: no /iot registration and no hidden session override.
+    expect(injections.filter(entry => typeof entry.deps === 'object' && entry.deps !== null && !Array.isArray(entry.deps) && 'commands' in entry.deps)).toEqual([])
+    expect(tools.size).toBe(5)
+  })
+
+  it('enables a configured additional main provider and applies its auxiliary override', async () => {
+    const aux: AuxRequest[] = []
+    const { handlers } = assemble({
+      ...JUDGE,
+      iotThinking: 'balanced',
+      iotThinkingTargets: [{ provider: 'opendesign', model: 'deepseek-v4.1-flash', rewriteProvider: 'kimi-code', rewriteModel: 'k3', rewriteEffort: 'max' }],
+    }, { stream: auxStream(aux) })
+    const chunks = await collect(handlers.get('llm/stream')!(mainRequest({ provider: 'opendesign', model: 'deepseek-v4.1-flash' }), () => streamOf(mainChunks())) as AsyncIterable<unknown>)
+    expect(reasoningOf(chunks)).toBe(COMPACTED)
+    expect(aux).toHaveLength(1)
+    expect(aux[0]).toMatchObject({ provider: 'kimi-code', model: 'k3', reasoningEffort: 'max', purpose: 'compaction', maxTokens: 1200 })
+  })
+
+  /**
+   * One host request stays one dispatch.
+   *
+   * The selector consumes the stream the hook already built; it must not reach back into the
+   * downstream waterfall for a second one, which would buy the original reply twice.
+   */
+  it('dispatches the original request exactly once when a P06 intent meets an ineligible request', async () => {
+    let dispatched = 0
+    const stub = (request: AuxRequest) => {
+      const prompt = promptText(request)
+      if (prompt.includes('**Evaluation Guideline')) return textStream('reasoning\n<score_A> A </score_A>\n<score_B> T </score_B>')
+      return textStream('ALTERNATIVE-REPLY')
+    }
+    const { handlers } = assemble({ ...JUDGE, autoProcessSelection: true }, { stream: stub, sessions: [{ id: 'agent-p06', createdAt: 1 }] })
+    const target = {
+      id: 'agent-p06',
+      session: { header: { id: 'agent-p06' }, snapshotEvents: () => stuckEvents(), requestHeader: () => ({ config: { provider: 'session-provider', model: 'session-model' } }) },
+      steer() {},
+    }
+    await handlers.get('agent/pre-step')!({ agent: target, signal: new AbortController().signal, messages: [], step: 2 }, () => ({ kind: 'enter', messages: [] }))
+    const main = () => { dispatched += 1; return streamOf(mainChunks()) }
+    await collect(handlers.get('llm/stream')!(mainRequest({ sessionId: 'agent-p06' as never }), main) as AsyncIterable<unknown>)
+    expect(dispatched).toBe(1)
+  })
+
+  /**
+   * The one place the two request-level features meet.
+   *
+   * Both rewrite the SAME main request, so their order is the contract: IoT compacts the original
+   * reply first, then P06 decides whether the compacted original or a generated alternative reaches the
+   * host. The alternative must stay untouched — it is dispatched through the selector's own raw seam,
+   * never through the hook — or a compaction could feed on its own output.
+   */
+  it('lets P06 replay an IoT-compacted original while the alternative stays unmodified', async () => {
+    const calls: string[] = []
+    const aux: AuxRequest[] = []
+    const stub = (request: AuxRequest) => {
+      const prompt = promptText(request)
+      if (prompt.includes('[iot-compaction]')) {
+        aux.push(request)
+        return streamOf(auxChunks())
+      }
+      if (prompt.includes('**Evaluation Guideline')) {
+        calls.push('judge')
+        const letter = (block: string) => block.includes('ORIGINAL-REPLY') ? 'A' : 'T'
+        return textStream('reasoning\n<score_A> ' + letter(section(prompt, 'PROPOSAL_A')) + ' </score_A>\n<score_B> ' + letter(section(prompt, 'PROPOSAL_B')) + ' </score_B>')
+      }
+      calls.push('generation')
+      return textStream('ALTERNATIVE-REPLY')
+    }
+    const { handlers, rpc } = assemble({ ...JUDGE, autoProcessSelection: true, iotThinking: 'compact' }, { stream: stub, sessions: [{ id: 'agent-p06', createdAt: 1 }] })
+    const target = {
+      id: 'agent-p06',
+      session: { header: { id: 'agent-p06' }, snapshotEvents: () => stuckEvents(), requestHeader: () => ({ config: { provider: 'session-provider', model: 'session-model' } }) },
+      steer() {},
+    }
+    await handlers.get('agent/pre-step')!({ agent: target, signal: new AbortController().signal, messages: [], step: 2 }, () => ({ kind: 'enter', messages: [] }))
+    const chunks = await collect(handlers.get('llm/stream')!(
+      mainRequest({ sessionId: 'agent-p06' as never }),
+      () => streamOf([
+        { type: 'block-start', index: 0, blockType: 'reasoning' },
+        { type: 'reasoning-delta', index: 0, text: LONG },
+        { type: 'block-end', index: 0, block: { type: 'reasoning', text: LONG } },
+        { type: 'block-start', index: 1, blockType: 'text' },
+        { type: 'text-delta', index: 1, text: 'ORIGINAL-REPLY' },
+        { type: 'block-end', index: 1, block: { type: 'text', text: 'ORIGINAL-REPLY' } },
+        { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ]),
+    ) as AsyncIterable<unknown>)
+    // The original arm the selector buffered and replayed is the COMPACTED one.
+    expect(reasoningOf(chunks)).toBe(COMPACTED)
+    expect(textOf(chunks)).toBe('ORIGINAL-REPLY')
+    expect(textOf(chunks)).not.toContain('ALTERNATIVE-REPLY')
+    // One auxiliary call in total: the generated alternative never passed through the compaction hook.
+    expect(aux).toHaveLength(1)
+    expect(calls.filter(entry => entry === 'generation')).toHaveLength(1)
+    expect(calls.filter(entry => entry === 'judge')).toHaveLength(6)
+    const overview = await rpc.get('/llm-verifier')!('statistics', { fromMs: 0, toMs: Date.now() + 60_000 }) as { value: { recent: Array<{ toolName?: string; route?: { trigger?: string; replayed?: string; generatedCalls?: number; judgeCalls?: number } }> } }
+    const cycle = overview.value.recent.find(row => row.route?.trigger === 'llm-stream')
+    expect(cycle?.route?.replayed).toBe('original')
+    expect(cycle?.route?.generatedCalls).toBe(1)
+    expect(cycle?.route?.judgeCalls).toBe(6)
+  })
+})
+
+/** Two consecutive FAILED verification runs: the only P06 recovery trigger. */
+function stuckEvents() {
+  const user = { type: 'user/message', seq: 0, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix the failing parser test.' }] } }
+  const call = (seq: number, id: string) => ({ type: 'tool/call', seq, data: { turn: 1, step: 1, callId: id, name: 'pwsh', arguments: '{}' } })
+  const failed = (seq: number, id: string, text: string) => ({ type: 'tool/result', seq, data: { turn: 1, step: 1, message: { source: { callId: id }, content: [{ type: 'text', text, isError: true }] } } })
+  return [user, call(1, 't1'), failed(2, 't1', 'Tests 1 failed'), call(3, 't2'), failed(4, 't2', 'Tests 2 failed')]
+}
 

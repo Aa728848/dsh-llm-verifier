@@ -16,6 +16,7 @@ import {
   isFieldVisible,
   issueMap,
   issueMessageKey,
+  normalizeIotThinkingTargets,
   recommendedBudgets,
   resetField,
   renderSections,
@@ -235,6 +236,76 @@ describe('P06 settings mirror resolveConfig', () => {
   })
 })
 
+describe('DeepSeek IoT settings mirror resolveConfig', () => {
+  it('offers the four levels as a select inside the visible routing section, next to the P06 rows', () => {
+    const entry = field('iotThinking')
+    expect(entry.kind).toBe('select')
+    expect(entry.select).toBe('iotThinking')
+    expect(entry.section).toBe('routing')
+    expect(CONFIG_DEFAULTS.iotThinking).toBe('off')
+    // Adjacency is the requirement, not decoration: the row must sit beside the P06 rows in the
+    // visible routing section rather than in one of the collapsed advanced sections.
+    const keys = FIELDS.map(candidate => candidate.key)
+    expect(keys.indexOf('iotThinking')).toBe(keys.indexOf('autoProcessCandidates') + 1)
+    expect(isFieldVisible(entry, base)).toBe(true)
+    expect(isFieldEnabled(entry, base)).toBe(true)
+  })
+
+  it('labels the title, the help and every level in both dictionaries', () => {
+    for (const key of ['title', 'help']) {
+      expect(typeof zhT('field.iotThinking.' + key), key).toBe('string')
+      expect(typeof enT('field.iotThinking.' + key), key).toBe('string')
+    }
+    for (const mode of ['off', 'compact', 'balanced', 'full']) {
+      expect(typeof zhT('field.iotThinking.' + mode), mode).toBe('string')
+      expect(typeof enT('field.iotThinking.' + mode), mode).toBe('string')
+    }
+  })
+
+  it('reads an unknown saved level as off and preserves all four legal ones', () => {
+    expect(valuesFromView({}).iotThinking).toBe('off')
+    expect(valuesFromView(undefined).iotThinking).toBe('off')
+    for (const mode of ['off', 'compact', 'balanced', 'full'] as const) {
+      expect(valuesFromView({ iotThinking: mode }).iotThinking).toBe(mode)
+    }
+    for (const raw of ['nonsense', 'Compact', 'FULL', '', true, false, 3, null, {}]) {
+      expect(valuesFromView({ iotThinking: raw }).iotThinking, String(raw)).toBe('off')
+    }
+    // A discarded member must not leak into the draft and block a save the host accepts.
+    expect(validateValues(valuesFromView({ provider: 'p', model: 'm', iotThinking: 'nonsense' }))).toEqual([])
+  })
+
+  it('needs no cross-field rule: every level is saveable on its own', () => {
+    for (const mode of ['off', 'compact', 'balanced', 'full'] as const) {
+      expect(validateValues({ ...base, iotThinking: mode }), mode).toEqual([])
+    }
+  })
+
+  it('resets with the row and is owned by every profile, so an expensive arm cannot survive one', () => {
+    const entry = field('iotThinking')
+    expect(isFieldChanged(entry, base)).toBe(false)
+    expect(isFieldChanged(entry, { ...base, iotThinking: 'full' })).toBe(true)
+    expect(resetField({ ...base, iotThinking: 'full' }, 'iotThinking').iotThinking).toBe('off')
+    for (const id of PROFILE_IDS) expect(applyProfile({ ...base, iotThinking: 'full' }, id).iotThinking, id).toBe('off')
+    // A hand-tuned arm is 'custom' rather than a profile it no longer matches.
+    expect(activeProfile({ ...base, iotThinking: 'balanced' })).toBe('custom')
+    expect(activeProfile(base)).toBe('balanced')
+  })
+
+  it('states the level in the collapsed routing summary, so a non-off arm cannot hide', () => {
+    expect(sectionSummary('routing', base, zhT, format)).toContain(zhT('field.iotThinking.off'))
+    expect(sectionSummary('routing', { ...base, iotThinking: 'full' }, zhT, format)).toContain(zhT('field.iotThinking.full'))
+    expect(sectionSummary('routing', { ...base, iotThinking: 'compact' }, enT, format)).toContain(enT('field.iotThinking.compact'))
+    // Every placeholder the template declares is filled by sectionSummary: a leftover brace would
+    // be printed literally in the header.
+    for (const dictionary of [zhT, enT]) {
+      const rendered = format(dictionary('settings.summary.routing') ?? '', { state: '', task: 0, session: 0, selection: '', iot: 'level' })
+      expect(rendered).not.toContain('{')
+      expect(rendered).toContain('level')
+    }
+  })
+})
+
 describe('settings validation', () => {
   it('mirrors the resolveConfig bounds that a text box can violate', () => {
     expect(codesFor({ ...base, autoVerifyThreshold: 1.5 }, 'autoVerifyThreshold')).toEqual(['range'])
@@ -413,5 +484,46 @@ describe('settings navigation', () => {
 
   it('keeps every section reachable through its own fields', () => {
     for (const section of SECTIONS) expect(fieldsOfSection(section.id).length).toBeGreaterThan(0)
+  })
+})
+
+
+describe('auxiliary-thinking global model and targets', () => {
+  it('defaults to deepseek-official and normalizes global fields and targets', () => {
+    const defaults = valuesFromView(undefined)
+    expect(defaults.iotThinkingProvider).toBe('deepseek-official')
+    expect(defaults.iotThinkingModel).toBeUndefined()
+    expect(defaults.iotThinkingEffort).toBeUndefined()
+    expect(defaults.iotThinkingTargets).toEqual([])
+    expect(valuesFromView({ iotThinkingProvider: ' opendesign ', iotThinkingModel: ' deepseek-v4.1-flash ', iotThinkingEffort: ' high ' })).toMatchObject({
+      iotThinkingProvider: 'opendesign', iotThinkingModel: 'deepseek-v4.1-flash', iotThinkingEffort: 'high',
+    })
+    expect(normalizeIotThinkingTargets([
+      { provider: ' opendesign ', rewriteProvider: ' kimi-code ', rewriteModel: ' k3 ', rewriteEffort: ' max ' },
+      { provider: 'opendesign', model: 'deepseek-v4.1-flash' },
+      { provider: '' },
+      null,
+    ])).toEqual([
+      { provider: 'opendesign', rewriteProvider: 'kimi-code', rewriteModel: 'k3', rewriteEffort: 'max' },
+      { provider: 'opendesign', model: 'deepseek-v4.1-flash' },
+    ])
+  })
+
+  it('registers global and target editors and resets targets with every quick profile', () => {
+    expect(field('iotThinkingProvider').kind).toBe('custom')
+    expect(field('iotThinkingTargets').kind).toBe('custom')
+    const withTarget = { ...base, iotThinkingTargets: [{ provider: 'opendesign', model: 'deepseek-v4.1-flash' }] }
+    expect(validateValues(withTarget)).toEqual([])
+    expect(activeProfile(withTarget)).toBe('custom')
+    for (const id of PROFILE_IDS) expect(applyProfile(withTarget, id).iotThinkingTargets).toEqual([])
+  })
+
+  it('rejects duplicate provider/model targets with a translated issue', () => {
+    const target = { provider: 'opendesign', model: 'deepseek-v4.1-flash' }
+    const issues = validateValues({ ...base, iotThinkingTargets: [target, target] })
+    expect(issues).toContainEqual({ key: 'iotThinkingTargets', code: 'duplicateThinkingTarget', params: { provider: 'opendesign/deepseek-v4.1-flash' } })
+    const issue = issues.find(row => row.key === 'iotThinkingTargets')!
+    expect(zh[issueMessageKey(issue)]).toContain('{provider}')
+    expect(en[issueMessageKey(issue)]).toContain('{provider}')
   })
 })

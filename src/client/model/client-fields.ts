@@ -1,6 +1,6 @@
 import { normalizeExtraJudges, type ExtraJudgeDraft } from './client-judges.ts'
 import { computeJudgeCount, computeWorstCaseBudget, WORST_CASE_CRITERIA_PER_COMPARISON } from './client-i18n.ts'
-import { normalizeAutoProcessSelection, type AutoProcessSelectionMode } from '../../config/config.ts'
+import { IOT_THINKING_MODES, normalizeAutoProcessSelection, type AutoProcessSelectionMode, type IotThinkingMode, type IotThinkingTarget } from '../../config/config.ts'
 
 /**
  * The settings form's single source of truth.
@@ -23,6 +23,11 @@ export interface Values {
   autoProcessFailureContext: boolean
   autoProcessAlternativeModel: string
   autoProcessCandidates: number
+  iotThinking: IotThinkingMode
+  iotThinkingProvider: string
+  iotThinkingModel?: string
+  iotThinkingEffort?: string
+  iotThinkingTargets: IotThinkingTarget[]
   autoVerifyMode: 'manual' | 'smart' | 'strict'
   autoVerifyThreshold: number
   autoVerifyRepeats: number
@@ -85,6 +90,11 @@ export const CONFIG_DEFAULTS: Values = {
   autoProcessFailureContext: true,
   autoProcessAlternativeModel: '',
   autoProcessCandidates: 2,
+  iotThinking: 'off',
+  iotThinkingProvider: 'deepseek-official',
+  iotThinkingModel: undefined,
+  iotThinkingEffort: undefined,
+  iotThinkingTargets: [],
   autoVerifyMode: 'smart',
   autoVerifyThreshold: 0.65,
   autoVerifyRepeats: 1,
@@ -173,7 +183,7 @@ export const SETTINGS_TABS: readonly SettingsTabSpec[] = [
 ]
 
 export type FieldKind = 'toggle' | 'number' | 'text' | 'select' | 'custom'
-export type SelectSource = 'mode' | 'criteriaPreset' | 'processSelection' | 'provider' | 'model' | 'effort'
+export type SelectSource = 'mode' | 'criteriaPreset' | 'processSelection' | 'iotThinking' | 'provider' | 'model' | 'effort'
 export type UnitKey = 'settings.unit.ms' | 'settings.unit.chars' | 'settings.unit.calls' | 'settings.unit.tokens'
 
 export interface FieldSpec {
@@ -249,6 +259,11 @@ export const FIELDS: readonly FieldSpec[] = [
   { ...toggle('autoProcessFailureContext', 'routing'), enabledWhen: values => values.autoProcessSelection !== 'off' },
   { ...text('autoProcessAlternativeModel', 'routing'), enabledWhen: values => values.autoProcessSelection !== 'off' },
   { ...number('autoProcessCandidates', 'routing', { min: 2, max: 4, integer: true }), enabledWhen: values => values.autoProcessSelection !== 'off' },
+  // One row, deliberately inside the visible routing section: it is the only IoT setting this page
+  // carries, and the collapsed header repeats its value so 'full' cannot hide.
+  select('iotThinking', 'routing', 'iotThinking'),
+  { key: 'iotThinkingProvider', section: 'routing', kind: 'custom', titleKey: 'field.iotThinkingRoute.title', helpKey: 'field.iotThinkingRoute.help' },
+  { key: 'iotThinkingTargets', section: 'routing', kind: 'custom', titleKey: 'field.iotThinkingTargets.title', helpKey: 'field.iotThinkingTargets.help' },
 
   select('provider', 'model', 'provider', false),
   select('model', 'model', 'model', false),
@@ -319,6 +334,23 @@ export function resetField<K extends keyof Values>(values: Values, key: K): Valu
  * means. Only the shape handling (booleans default to their documented value,
  * enums fall back to the safe member, empty text clears an override) lives here.
  */
+export function normalizeIotThinkingTargets(value: unknown): IotThinkingTarget[] {
+  if (!Array.isArray(value)) return []
+  const targets: IotThinkingTarget[] = []
+  for (const raw of value) {
+    if (typeof raw !== 'object' || raw === null) continue
+    const row = raw as Record<string, unknown>
+    const provider = typeof row.provider === 'string' ? row.provider.trim() : ''
+    if (!provider) continue
+    const model = typeof row.model === 'string' && row.model.trim() ? row.model.trim() : undefined
+    const rewriteProvider = typeof row.rewriteProvider === 'string' && row.rewriteProvider.trim() ? row.rewriteProvider.trim() : undefined
+    const rewriteModel = typeof row.rewriteModel === 'string' && row.rewriteModel.trim() ? row.rewriteModel.trim() : undefined
+    const rewriteEffort = typeof row.rewriteEffort === 'string' && row.rewriteEffort.trim() ? row.rewriteEffort.trim() : undefined
+    targets.push({ provider, ...(model ? { model } : {}), ...(rewriteProvider ? { rewriteProvider } : {}), ...(rewriteModel ? { rewriteModel } : {}), ...(rewriteEffort ? { rewriteEffort } : {}) })
+  }
+  return targets
+}
+
 export function valuesFromView(view: Record<string, unknown> | undefined): Values {
   const v = view ?? {}
   const numberOr = (key: keyof Values): number => {
@@ -346,6 +378,15 @@ export function valuesFromView(view: Record<string, unknown> | undefined): Value
     autoProcessFailureContext: v.autoProcessFailureContext !== false,
     autoProcessAlternativeModel: typeof v.autoProcessAlternativeModel === 'string' ? v.autoProcessAlternativeModel.trim() : '',
     autoProcessCandidates: numberOr('autoProcessCandidates'),
+    // Same rule as the two history-bearing enums above: an unknown saved value degrades to `off`
+    // instead of leaking into the draft and blocking a save the host would accept.
+    iotThinking: (IOT_THINKING_MODES as readonly string[]).includes(v.iotThinking as string)
+      ? v.iotThinking as IotThinkingMode
+      : 'off',
+    iotThinkingProvider: typeof v.iotThinkingProvider === 'string' && v.iotThinkingProvider.trim() ? v.iotThinkingProvider.trim() : 'deepseek-official',
+    iotThinkingModel: typeof v.iotThinkingModel === 'string' && v.iotThinkingModel.trim() ? v.iotThinkingModel.trim() : undefined,
+    iotThinkingEffort: typeof v.iotThinkingEffort === 'string' && v.iotThinkingEffort.trim() ? v.iotThinkingEffort.trim() : undefined,
+    iotThinkingTargets: normalizeIotThinkingTargets(v.iotThinkingTargets),
     autoVerifyMode: mode,
     autoVerifyThreshold: numberOr('autoVerifyThreshold'),
     autoVerifyRepeats: numberOr('autoVerifyRepeats'),
@@ -432,7 +473,7 @@ export function acceptsNumber(field: FieldSpec, raw: string): boolean {
 
 export interface FieldIssue {
   key: keyof Values
-  code: 'required' | 'range' | 'min' | 'max' | 'integer' | 'cacheDirRelative' | 'routeBudget' | 'altModelList'
+  code: 'required' | 'range' | 'min' | 'max' | 'integer' | 'cacheDirRelative' | 'routeBudget' | 'altModelList' | 'duplicateThinkingTarget'
   params?: Record<string, string | number>
 }
 
@@ -498,6 +539,12 @@ export function validateValues(values: Values): FieldIssue[] {
   if (alternativePool.some(entry => !/^[^\s/]+\/[^\s]+$/u.test(entry))) {
     issues.push({ key: 'autoProcessAlternativeModel', code: 'altModelList' })
   }
+  const thinkingTargets = new Set<string>()
+  for (const target of values.iotThinkingTargets) {
+    const identity = target.provider + '/' + (target.model ?? '*')
+    if (thinkingTargets.has(identity)) issues.push({ key: 'iotThinkingTargets', code: 'duplicateThinkingTarget', params: { provider: identity } })
+    thinkingTargets.add(identity)
+  }
   if (!values.provider.trim()) issues.push({ key: 'provider', code: 'required' })
   if (!values.model.trim()) issues.push({ key: 'model', code: 'required' })
   return issues
@@ -562,6 +609,11 @@ const POLICY_KEYS = [
   'maxProcessCyclesPerTask',
   'autoProcessFailureContext',
   'autoProcessCandidates',
+  'iotThinking',
+  'iotThinkingProvider',
+  'iotThinkingModel',
+  'iotThinkingEffort',
+  'iotThinkingTargets',
 ] as const satisfies readonly (keyof Values)[]
 
 function policyDefaults(values: Values): Values {
@@ -661,6 +713,9 @@ export function sectionSummary(id: SectionId, values: Values, t: Translate, form
         // The collapsed header states the P06 arm too: 'every-step' is the one setting on this page
         // that can multiply spend per step, and it must be visible without expanding the section.
         selection: label('field.autoProcessSelection.' + values.autoProcessSelection),
+        // The IoT arm is stated here for the same reason: a non-off level spends an auxiliary call
+        // per reasoning block, and a collapsed section must not be able to hide that.
+        iot: label('field.iotThinking.' + values.iotThinking),
       })
     case 'budgets':
       return format('settings.summary.budgets', {

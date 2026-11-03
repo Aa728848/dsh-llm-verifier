@@ -23,6 +23,12 @@ import {
   type VerdictSummary,
 } from '../../src/client/model/client-i18n.ts'
 import {
+  FIELDS,
+  validateValues,
+  valuesFromView,
+} from '../../src/client/model/client-fields.ts'
+import { IOT_THINKING_MODES } from '../../src/config/config.ts'
+import {
   type ExtraJudgeDraft,
   MAX_EXTRA_JUDGES,
   normalizeExtraJudges,
@@ -94,6 +100,38 @@ describe('client i18n dictionaries', () => {
     }
   })
 
+  it('keeps the IoT settings copy complete in both dictionaries', () => {
+    // The four levels plus the row's own title and help, present and non-empty in BOTH languages.
+    // 'I18nDict = typeof zh' already makes a missing English key a compile error; this keeps the
+    // level list from drifting away from 'IOT_THINKING_MODES'.
+    const keys = ['title', 'help', 'off', 'compact', 'balanced', 'full'] as const
+    for (const suffix of keys) {
+      const key = ('field.iotThinking.' + suffix) as keyof typeof zh
+      expect(zh[key], 'zh ' + key).toBeTruthy()
+      expect(en[key], 'en ' + key).toBeTruthy()
+      expect(en[key].trim().length, 'en ' + key).toBeGreaterThan(0)
+    }
+    // DeepSeek main Agent only, one auxiliary call per block, provider-specific rewrite models,
+    // and NOT a judge. The removed slash command must not reappear in visible copy.
+    for (const copy of [zh['field.iotThinking.help'], en['field.iotThinking.help']]) {
+      expect(copy).not.toContain('/iot')
+      expect(copy).toMatch(/供应商|provider/u)
+      expect(copy).toMatch(/Agent/u)
+      expect(copy).toMatch(/推理块|reasoning block/u)
+      expect(copy).toMatch(/评分|scor/u)
+    }
+    expect(zh['field.iotThinking.help']).toContain('主 Agent')
+    expect(en['field.iotThinking.help']).toContain('main Agent')
+    // The collapsed routing header must mention the level, and visible copy uses Auxiliary Thinking, not IoT.
+    expect(zh['settings.summary.routing']).toContain('{iot}')
+    expect(en['settings.summary.routing']).toContain('{iot}')
+    expect(zh['settings.summary.routing']).toContain('辅助思考')
+    expect(en['settings.summary.routing']).toContain('Auxiliary thinking')
+    expect(zh['settings.summary.routing']).not.toContain('IoT')
+    expect(en['settings.summary.routing']).not.toContain('IoT')
+    expect(zh['field.iotThinkingTargets.title']).toBe('生效线路与逐条覆盖')
+  })
+
   it('covers all core verifier tools in toolLabels for both zh and en', () => {
     const expectedTools = [
       'verifier_route_classify',
@@ -110,6 +148,66 @@ describe('client i18n dictionaries', () => {
       expect(toolLabels.en[tool], `en label for ${tool}`).toBeDefined()
       expect(toolLabels.en[tool]!.trim().length).toBeGreaterThan(0)
     }
+  })
+})
+
+/**
+ * The IoT level control on the settings page.
+ *
+ * The page itself cannot be rendered in this suite — the client bundle needs the host UI packages and
+ * a DOM — so the split is: everything that is pure DATA is executed here (the four segment labels, and
+ * that each of them lands in a draft the page accepts), and the rendering WIRING is pinned as source,
+ * the same way every other control in this file is pinned. A missing branch, a fifth level without a
+ * label, or a native select sneaking in all fail below.
+ */
+describe('client IoT level control', () => {
+  const read = (): string => readFileSync(fileURLToPath(new URL('../../src/client/view/client.tsx', import.meta.url)), 'utf8')
+
+  it('labels all four levels in both languages, from the one mode vocabulary', () => {
+    // The list the controller validates /iot against IS the list the page renders.
+    expect(IOT_THINKING_MODES).toEqual(['off', 'compact', 'balanced', 'full'])
+    for (const dictionary of [zh, en]) {
+      const labels = IOT_THINKING_MODES.map(mode => dictionary[('field.iotThinking.' + mode) as keyof typeof zh])
+      for (const mode of IOT_THINKING_MODES) {
+        expect(dictionary[('field.iotThinking.' + mode) as keyof typeof zh], mode).toBeTruthy()
+      }
+      // Four visible, distinguishable words: a copy-paste that left two levels sharing a label would
+      // make the control unusable without ever failing a type check.
+      expect(new Set(labels).size).toBe(IOT_THINKING_MODES.length)
+    }
+    // English and Chinese must actually differ, or one language was never translated.
+    expect(IOT_THINKING_MODES.map(mode => zh[('field.iotThinking.' + mode) as keyof typeof zh]))
+      .not.toEqual(IOT_THINKING_MODES.map(mode => en[('field.iotThinking.' + mode) as keyof typeof en]))
+  })
+
+  it('lands every level in a draft the page keeps and accepts', () => {
+    // What picking a segment does: writes that value into the draft. Anything the page would silently
+    // degrade (or refuse to save) is unusable as a segment, so each level is round-tripped through the
+    // page's own normalization and validation.
+    for (const mode of IOT_THINKING_MODES) {
+      const draft = { ...valuesFromView({}), iotThinking: mode }
+      expect(valuesFromView({ iotThinking: mode }).iotThinking, mode).toBe(mode)
+      expect(draft.iotThinking, mode).toBe(mode)
+      expect(validateValues(draft).filter(issue => issue.key === 'iotThinking'), mode).toEqual([])
+    }
+    // An unknown saved value still degrades to the closed path instead of leaking into the control.
+    expect(valuesFromView({ iotThinking: 'aggressive' }).iotThinking).toBe('off')
+    // The row exists in the registry, so renderSelect is actually reached with this source.
+    const field = FIELDS.find(entry => entry.key === 'iotThinking')
+    expect(field?.kind).toBe('select')
+    expect(field?.select).toBe('iotThinking')
+  })
+
+  it('renders the level as the shared segmented control, wired to the draft', () => {
+    const source = read()
+    // The branch sits next to the other two segmented enums and uses the same control.
+    expect(source).toContain("if (field.select === 'iotThinking') return renderSegment(")
+    expect(source).toContain("iotThinkingSegments(t), draft.iotThinking, value => patch('iotThinking', value)")
+    // The labels come from the mode list, never from a second literal copy of it.
+    expect(source).toContain('export function iotThinkingSegments(t: I18nDict)')
+    expect(source).toContain('IOT_THINKING_MODES.map(id => ({ value: id, label:')
+    // A segmented control must not become a native select: the existing count stays at 7.
+    expect(source.match(/<select/g)?.length).toBe(15)
   })
 })
 
@@ -961,7 +1059,7 @@ describe('client settings layout', () => {
     const selects = source.match(/<select/g)?.length ?? 0
     const styledSelects = (source.match(/style=\{selectStyle\}/g)?.length ?? 0)
       + (source.match(/style=\{\{ \.\.\.selectStyle/g)?.length ?? 0)
-    expect(selects).toBe(7)
+    expect(selects).toBe(15)
     expect(styledSelects).toBe(selects)
     expect(source).toContain("if (field.select === 'mode') return renderSegment(")
     expect(source).toContain("if (field.select === 'processSelection') return renderSegment(")
@@ -1033,3 +1131,29 @@ describe('client settings layout', () => {
 
 
 
+
+
+describe('auxiliary-thinking global model and target editors', () => {
+  const source = readFileSync(new URL('../../src/client/view/client.tsx', import.meta.url), 'utf8')
+  it('renders global model settings and add/remove target controls', () => {
+    expect(source).toContain('const renderThinkingRoute = () =>')
+    expect(source).toContain('const renderThinkingTargets = () =>')
+    expect(source).toContain('data-thinking-route')
+    expect(source).toContain('<details style={auxThinkingCard} data-thinking-route>')
+    expect(source).toContain("padding: '10px 12px'")
+    expect(source).toContain('minHeight: 44')
+    expect(source).toContain('<summary')
+    expect(source).toContain("gridTemplateColumns: 'repeat(3, minmax(0, 1fr))'")
+    expect(source).toContain('data-thinking-target-index={idx}')
+    expect(source).toContain('addThinkingTarget')
+    expect(source).toContain('removeThinkingTarget(idx)')
+    for (const suffix of ['title', 'help', 'add', 'remove', 'itemTitle', 'mainProviderAria', 'mainModelAria', 'rewriteProviderAria', 'rewriteModelAria', 'rewriteEffortAria', 'duplicate', 'allModels', 'followGlobal']) {
+      expect(zh[('field.iotThinkingTargets.' + suffix) as keyof typeof zh], suffix).toBeTruthy()
+      expect(en[('field.iotThinkingTargets.' + suffix) as keyof typeof en], suffix).toBeTruthy()
+    }
+    expect(zh['field.iotThinkingRoute.title']).toBe('辅助思考模型')
+    expect(en['field.iotThinkingRoute.title']).toBe('Auxiliary-thinking model')
+    expect(zh['field.iotThinking.title']).toBe('辅助思考')
+    expect(en['field.iotThinking.title']).toBe('Auxiliary Thinking')
+  })
+})

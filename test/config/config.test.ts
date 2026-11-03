@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AUTO_PROCESS_SELECTION_MODES, Config, isVolatileConfigRef, markVolatile, MAX_EXTRA_JUDGES, normalizeAutoProcessSelection, resolveConfig, unwrapVolatileConfig } from '../../src/config/config.ts'
+import { AUTO_PROCESS_SELECTION_MODES, Config, IOT_THINKING_MODES, isVolatileConfigRef, markVolatile, MAX_EXTRA_JUDGES, normalizeAutoProcessSelection, resolveConfig, unwrapVolatileConfig } from '../../src/config/config.ts'
 
 /** The cross-copy identity cosmokit publishes for the volatile write hook. */
 const VOLATILE_WRITE = Symbol.for('cosmokit.volatile.write')
@@ -688,5 +688,95 @@ describe('config - volatile schema and reference unwrapping', () => {
     expect(resolved.provider).toBe('openai')
     expect(resolved.model).toBe('gpt-4o')
     expect(resolved.temperature).toBe(0.5)
+  })
+})
+
+describe('config - the single DeepSeek IoT setting', () => {
+  it('defaults to off in both resolution paths, and does not disturb its neighbours', () => {
+    // OFF is the shipped default: a new install and a section saved before the key existed must
+    // both resolve to the closed path. The schema is what the host validates the stored user layer
+    // with, so the two paths have to agree.
+    expect(resolveConfig({}).iotThinking).toBe('off')
+    expect(Config({}).iotThinking).toBe('off')
+    expect([...IOT_THINKING_MODES]).toEqual(['off', 'compact', 'balanced', 'full'])
+    // Adding the key must not shift a single existing default.
+    expect(resolveConfig({})).toMatchObject({
+      autoProcessSelection: 'off',
+      maxProcessCyclesPerTask: 4,
+      autoProcessCandidates: 2,
+      criteriaPreset: 'coding',
+      enabled: true,
+    })
+  })
+
+  it('accepts all four levels through resolveConfig and through the schema', () => {
+    for (const mode of IOT_THINKING_MODES) {
+      expect(resolveConfig({ iotThinking: mode }).iotThinking).toBe(mode)
+      expect(Config({ iotThinking: mode }).iotThinking).toBe(mode)
+      // A saved level survives resolution and re-serialization through the schema, which is the
+      // round trip the live settings section performs on every autosave.
+      const roundTripped = Config({ ...Config({}), iotThinking: mode } as never) as { iotThinking?: string }
+      expect(roundTripped.iotThinking).toBe(mode)
+      expect(resolveConfig(Config({ iotThinking: mode }) as never).iotThinking).toBe(mode)
+    }
+  })
+
+  it('carries the level across the settings JSON boundary and rejects a smuggled one', () => {
+    const saved = JSON.parse(JSON.stringify(Config({ iotThinking: 'full' }))) as { iotThinking?: string }
+    expect(saved.iotThinking).toBe('full')
+    expect(resolveConfig(saved as never).iotThinking).toBe('full')
+    expect(() => resolveConfig({ iotThinking: 'turbo' } as never))
+      .toThrow('llm-verifier: iotThinking must be off, compact, balanced, or full')
+  })
+
+  it('fails closed on an illegal level instead of choosing one', () => {
+    // A typo must neither be read as the expensive arm nor be quietly downgraded to 'off' while the
+    // settings row still shows what the operator typed.
+    for (const bad of ['on', 'true', 'compact ', 'Compact', 'FULL', 'every-step', '', 0, 1, true, {}, []] as unknown[]) {
+      expect(() => resolveConfig({ iotThinking: bad as never }), String(bad))
+        .toThrow('llm-verifier: iotThinking must be off, compact, balanced, or full')
+    }
+  })
+})
+
+
+describe('config - auxiliary-thinking global model and targets', () => {
+  it('defaults to deepseek-official, main-model low and no additional targets', () => {
+    const resolved = resolveConfig({})
+    expect(resolved.iotThinkingProvider).toBe('deepseek-official')
+    expect(resolved.iotThinkingModel).toBeUndefined()
+    expect(resolved.iotThinkingEffort).toBeUndefined()
+    expect(resolved.iotThinkingTargets).toEqual([])
+    expect(Config({}).iotThinkingTargets).toEqual([])
+  })
+
+  it('normalizes global model settings and target overrides', () => {
+    const resolved = resolveConfig({
+      iotThinkingProvider: ' opendesign ',
+      iotThinkingModel: ' deepseek-v4.1-flash ',
+      iotThinkingEffort: ' high ',
+      iotThinkingTargets: [
+        { provider: ' opendesign ', rewriteProvider: ' kimi-code ', rewriteModel: ' k3 ', rewriteEffort: ' max ' },
+        { provider: 'opendesign', model: 'deepseek-v4.1-flash' },
+      ],
+    })
+    expect(resolved.iotThinkingProvider).toBe('opendesign')
+    expect(resolved.iotThinkingModel).toBe('deepseek-v4.1-flash')
+    expect(resolved.iotThinkingEffort).toBe('high')
+    expect(resolved.iotThinkingTargets).toEqual([
+      { provider: 'opendesign', rewriteProvider: 'kimi-code', rewriteModel: 'k3', rewriteEffort: 'max' },
+      { provider: 'opendesign', model: 'deepseek-v4.1-flash' },
+    ])
+    expect(resolveConfig({ iotThinkingProvider: ' ', iotThinkingModel: ' ', iotThinkingEffort: ' ' })).toMatchObject({
+      iotThinkingProvider: 'deepseek-official', iotThinkingModel: undefined, iotThinkingEffort: undefined,
+    })
+  })
+
+  it('rejects duplicate provider/model targets and empty main providers', () => {
+    expect(() => resolveConfig({ iotThinkingTargets: [{ provider: 'opendesign' }, { provider: 'opendesign' }] })).toThrow('duplicate iotThinkingTargets target')
+    expect(() => resolveConfig({ iotThinkingTargets: [{ provider: 'opendesign', model: 'deepseek-v4.1-flash' }, { provider: 'opendesign', model: 'deepseek-v4.1-flash' }] })).toThrow('duplicate iotThinkingTargets target')
+    expect(() => resolveConfig({ iotThinkingTargets: [{ provider: 'opendesign' }, { provider: 'opendesign', model: 'deepseek-v4.1-flash' }] })).not.toThrow()
+    expect(() => resolveConfig({ iotThinkingTargets: [{ provider: ' ' }] })).toThrow('provider must be non-empty')
+    expect(() => resolveConfig({ iotThinkingTargets: {} as never })).toThrow('must be an array')
   })
 })

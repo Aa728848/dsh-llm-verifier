@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- **[文档] 记录 DeepSeek 思考重写旁路（D15）**
+  - 新增 ADR D15：独立可选模块、默认关闭、只作用于 `deepseek-official` 主循环、`compact` / `balanced` / `full` 三档固定强度；每块一次低投入辅助调用（不携带主会话 `sessionId`、不挂工具、60 秒超时），失败即原样回放原始流
+  - 全局设置经既有设置系统持久化；已删除 `/iot` 及会话覆盖。全局辅助模型默认 `deepseek-official + 主模型 low`，`iotThinkingTargets` 支持增加其他主供应商/模型并逐条覆盖辅助供应商、模型和推理档位；指标是进程内内存态，重载即重置
+  - 复用既有的唯一 `llm/stream` 钩子，顺序为重写 → 过程选优；不介入评分、门控与缓存身份（`cache.ts` 的 `version` 不变）
+  - 边界如实写出：签名沿用既有回放形状、端点接受，属用户提供的端点事实，本仓库不复验线上签名；无自定义预设、不归档原始 CoT、无真实网络测试、不承诺节省缓存
+  - README 补「辅助思考」、全局辅助模型与生效线路配置，ARCHITECTURE 补 `src/iot/` 模块表行与 `test/iot/` 归属、旁路数据流与两条不变量，ADR 索引补 D15；UI 不出现 IoT 字样，无版本号变更
 
 ## 0.11.1 - 2026-11-02
 - **[修复] 兼容不支持 `temperature` 参数的模型路由（如 `sub2api/gpt-6-astra` 等固定采样/推理模型）**
