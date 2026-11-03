@@ -15,6 +15,8 @@
 | `tool/ptc-dispatch` 与旧的 `tool/code-dispatch` | 同上,事件分发处 |
 | 宿主设置 `settings.get(ns)` 与 `SettingsForms.describe()` | `judge/top-logprobs.ts` 的 `settingsNamespace()` |
 | 图标导出名(尺寸后缀 → 笔画后缀) | `client/view/client.tsx` 顶部按名探测 |
+| `dsh-claude-style` 的可选外部选择器、DSH 原生选择器与旧控件 | `client/view/host-model-select.tsx` 按能力探测,共用同一受控目录 |
+| DSH 原生模型选择器未从包入口导出,旧宿主又可能缺少其注册形态 | `client/model/client-native-model.ts` 的 `captureNativeModelSelect()`;失败时退回旧控件 |
 
 ## 后果
 

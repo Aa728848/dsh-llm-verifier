@@ -182,7 +182,7 @@ export const SETTINGS_TABS: readonly SettingsTabSpec[] = [
   { id: 'data', titleKey: 'settings.tab.data', sections: ['storage', 'cost'] },
 ]
 
-export type FieldKind = 'toggle' | 'number' | 'text' | 'select' | 'custom'
+export type FieldKind = 'toggle' | 'number' | 'text' | 'select' | 'model' | 'custom'
 export type SelectSource = 'mode' | 'criteriaPreset' | 'processSelection' | 'iotThinking' | 'provider' | 'model' | 'effort'
 export type UnitKey = 'settings.unit.ms' | 'settings.unit.chars' | 'settings.unit.calls' | 'settings.unit.tokens'
 
@@ -265,9 +265,7 @@ export const FIELDS: readonly FieldSpec[] = [
   { key: 'iotThinkingProvider', section: 'routing', kind: 'custom', titleKey: 'field.iotThinkingRoute.title', helpKey: 'field.iotThinkingRoute.help' },
   { key: 'iotThinkingTargets', section: 'routing', kind: 'custom', titleKey: 'field.iotThinkingTargets.title', helpKey: 'field.iotThinkingTargets.help' },
 
-  select('provider', 'model', 'provider', false),
-  select('model', 'model', 'model', false),
-  select('reasoningEffort', 'model', 'effort', false),
+  { key: 'provider', section: 'model', kind: 'model', titleKey: 'field.judgeModel.title', helpKey: 'field.judgeModel.help', resettable: false },
   number('maxTokens', 'model', { min: 1, integer: true, unitKey: 'settings.unit.tokens' }),
   number('temperature', 'model', { min: 0, max: 2 }),
   text('label', 'model', true),

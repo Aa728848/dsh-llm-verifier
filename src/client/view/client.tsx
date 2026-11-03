@@ -48,6 +48,9 @@ import {
   serializeExtraJudges,
 } from '../model/client-judges.ts'
 import { buildProcessCycles, type ProcessCycleTone } from '../model/client-process-cycles.ts'
+import { startSettingsPageLoad } from '../model/client-loading.ts'
+import type { ModelCatalogFailureView, ModelProviderGroupView } from '../model/client-native-model.ts'
+import { HostModelSelect } from './host-model-select.tsx'
 import {
   FIELDS,
   PROFILES,
@@ -89,7 +92,13 @@ const NS = 'llm-verifier'
 interface DecisionCallView { label: string; channel: string; prompt: string; output: string; score?: number }
 interface DecisionRecordView { id: string; toolName: string; phase: string; provider: string; model: string; startedAt: number; calls: DecisionCallView[] }
 
-export interface Loaded { groups: readonly ModelProviderGroupView[]; settings: SettingsNamespaceView; writable: boolean; failures: string[] }
+export interface Loaded { settings: SettingsNamespaceView; writable: boolean }
+interface ModelCatalogState {
+  groups: readonly ModelProviderGroupView[]
+  failures: readonly ModelCatalogFailureView[]
+  status: 'idle' | 'loading' | 'ready' | 'error'
+  error: string | null
+}
 export interface RunStats { calls: number; attempts: number; retries: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningTokens: number; cacheHits: number; cacheMisses: number; estimatedCostUsd: number; topLogprobScores: number; explicitTagScores: number; usageIncomplete?: boolean; channelFallbacks?: number }
 /** S05-A routing-cycle observation, as persisted on the record (all fields optional/lenient). */
 export interface RouteObservationView { cycleId: string; trigger: string; stage: string; destination: string; attempt?: number; reservedCalls?: number; skipReason?: string; canceled?: boolean; usageIncomplete?: boolean; evidenceKept?: number; evidenceOmitted?: number; evidenceChars?: number; replayed?: string; generatedCalls?: number; judgeCalls?: number; sameCandidate?: boolean; alternativeAugmented?: boolean; alternativeModel?: string }
@@ -99,24 +108,6 @@ interface ToolStatistics { toolName: string; invocations: number; successes: num
 interface ModelStatistics { provider: string; model: string; invocations: number; calls: number; tokens: number; estimatedCostUsd: number }
 interface Totals extends RunStats { invocations: number; successes: number; failures: number; successRate: number; averageDurationMs: number; tokens: number; cacheHitRate: number; prefixCacheHitRate: number }
 interface StatisticsOverview { generatedAt: number; fromMs: number; toMs: number; sessionId?: string; totals: Totals; daily: DailyStatistics[]; tools: ToolStatistics[]; models: ModelStatistics[]; recent: InvocationRecord[] }
-/**
- * Provider/model catalog as this page reads it.
- *
- * The host owns this vocabulary, but DSH 0.1.7 stopped re-exporting its `ModelProviderGroup`
- * through the remotes client barrel, and reaching it now means installing the whole session
- * controller dependency graph. The page reads exactly the four fields below, so it declares the
- * part of the wire shape it consumes — the same treatment every other response in this interface
- * already gets.
- */
-interface ModelProviderGroupView {
-  id: string
-  name: string
-  models: readonly {
-    id: string
-    name: string
-    reasoning?: { efforts: readonly { id: string; name: string }[]; defaultEffort?: string }
-  }[]
-}
 interface VerifierRemote {
   session: {
     modelCatalog(): Promise<{
@@ -368,6 +359,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
   const lang = useLanguage()
   const t = dictionaries[lang]
   const [loaded,setLoaded]=useState<Loaded|null>(null); const [draft,setDraft]=useState<Values|null>(null); const [error,setError]=useState<string|null>(null); const [editing,setEditing]=useState<Record<string,string>>({})
+  const [catalog,setCatalog]=useState<ModelCatalogState>({ groups: [], failures: [], status: 'idle', error: null })
   const [saveState,setSaveState]=useState<'saving'|'saved'|null>(null)
   const [openSections,setOpenSections]=useState<Record<string,boolean>>(()=>Object.fromEntries(SECTIONS.map(section=>[section.id,section.open])))
   const [activeTab,setActiveTab]=useState<SettingsTabId>('general')
@@ -379,8 +371,42 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
   const writtenVersion=useRef(0)
   const saveInFlight=useRef(false)
   const persistRef=useRef<(version:number)=>Promise<void>>(async()=>{})
-  const load=async()=>{setError(null);try{const [m,s]=await Promise.all([remote.session.modelCatalog(),remote.settings.describe()]);if(!m.ok)throw new Error(m.error.message);if(!s.ok)throw new Error(s.error.message);const view=s.value.namespaces.find((x:SettingsNamespaceView)=>x.ns===NS);if(!view)throw new Error(t['settings.nsUnregistered']);const next={groups:m.value.groups,settings:view,writable:s.value.writable,failures:m.value.failures.map((f: { id?: string; provider?: string; name?: string; message: string })=>(f.id??f.provider??f.name??'unknown')+': '+f.message)};setLoaded(next);setDraft(values(view));setEditing({})}catch(e){setError(message(e))}}
-  useEffect(()=>{void load()},[])
+  const readSettings=async():Promise<Loaded>=>{
+    const s=await remote.settings.describe()
+    if(!s.ok)throw new Error(s.error.message)
+    const view=s.value.namespaces.find((x:SettingsNamespaceView)=>x.ns===NS)
+    if(!view)throw new Error(t['settings.nsUnregistered'])
+    return {settings:view,writable:s.value.writable}
+  }
+  const readCatalog=async():Promise<Pick<ModelCatalogState,'groups'|'failures'>>=>{
+    const m=await remote.session.modelCatalog()
+    if(!m.ok)throw new Error(m.error.message)
+    return {
+      groups:m.value.groups,
+      failures:m.value.failures.map(f=>({
+        id:f.id??f.provider??f.name??'unknown',
+        name:f.name??f.id??f.provider??'unknown',
+        message:f.message,
+      })),
+    }
+  }
+  const catalogLoaded=(next:Pick<ModelCatalogState,'groups'|'failures'>)=>setCatalog({...next,status:'ready',error:null})
+  const catalogFailed=(cause:unknown)=>setCatalog(current=>({...current,status:'error',error:message(cause)}))
+  const loadCatalog=()=>{
+    setCatalog(current=>({...current,status:'loading',error:null}))
+    void readCatalog().then(catalogLoaded,catalogFailed)
+  }
+  const load=()=>{
+    setError(null)
+    setCatalog(current=>({...current,status:'loading',error:null}))
+    startSettingsPageLoad(readSettings,readCatalog,{
+      settings:next=>{setLoaded(next);setDraft(values(next.settings));setEditing({})},
+      catalog:catalogLoaded,
+      settingsError:cause=>setError(message(cause)),
+      catalogError:catalogFailed,
+    })
+  }
+  useEffect(()=>{load()},[])
   // Another writer — the settings shell's reset, a second window, an edit to
   // settings.yaml — can move this namespace under a page that never re-reads
   // it, and the stale draft would then be written straight back on the next
@@ -411,13 +437,21 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     document.addEventListener('visibilitychange',sync)
     return ()=>{window.removeEventListener('focus',sync);document.removeEventListener('visibilitychange',sync)}
   },[remote])
-  const models=useMemo(()=>loaded?.groups.find(g=>g.id===draft?.provider)?.models??[],[loaded,draft?.provider])
-  const selected=models.find(m=>m.id===draft?.model); const efforts=selected?.reasoning?.efforts??[]
   const patch=<K extends keyof Values>(key:K,value:Values[K])=>{setSaveState(null);setDraft(v=>v?{...v,[key]:value}:v)}
+  const selectJudgeModel=(selection:{provider:string;model:string;reasoningEffort?:string})=>{
+    setSaveState(null)
+    setDraft(current=>{
+      if(!current)return current
+      const next={...current,provider:selection.provider,model:selection.model}
+      if(selection.reasoningEffort)next.reasoningEffort=selection.reasoningEffort
+      else delete next.reasoningEffort
+      return next
+    })
+  }
   const conflict = useMemo(() => (draft ? judgeConflict({ provider: draft.provider, model: draft.model }, draft.extraJudges) : undefined), [draft?.provider, draft?.model, draft?.extraJudges])
   const addJudge = () => {
     if (!loaded || !draft || draft.extraJudges.length >= MAX_EXTRA_JUDGES) return
-    const firstGroup = loaded.groups[0]
+    const firstGroup = catalog.groups[0]
     const firstProvider = firstGroup?.id ?? ''
     const firstModelObj = firstGroup?.models[0]
     const firstModel = firstModelObj?.id ?? ''
@@ -537,13 +571,14 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     setActiveTab(next)
   }
   const jumpTo = (key: keyof Values) => {
-    const field = FIELDS.find(candidate => candidate.key === key)
+    const targetKey = key === 'model' || key === 'reasoningEffort' ? 'provider' : key
+    const field = FIELDS.find(candidate => candidate.key === targetKey)
     if (!field) return
     const tab = SETTINGS_TABS.find(candidate => candidate.sections.includes(field.section))
     if (tab) pickTab(tab.id)
     setSectionOpen(field.section, true)
     window.requestAnimationFrame(() => {
-      const node = document.querySelector('[data-field="' + String(key) + '"]')
+      const node = document.querySelector('[data-field="' + String(targetKey) + '"]')
       if (!(node instanceof HTMLElement)) return
       node.scrollIntoView({ block: 'center', behavior: 'smooth' })
       const focusable = node.querySelector('input, select, button, textarea')
@@ -560,7 +595,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     setDraft(current => (current ? { ...current, ...recommendedBudgets(computeJudgeCount(current.extraJudges.length), criteriaCount) } : current))
   }
   const messageFor = (field: FieldSpec): FieldIssue | null => {
-    const issue = issuesByField.get(field.key)
+    const issue = field.kind === 'model' ? issuesByField.get('provider') ?? issuesByField.get('model') : issuesByField.get(field.key)
     if (issue) return issue
     if (field.kind === 'number' && editing[field.key] !== undefined) return textIssue(field, editing[field.key])
     return null
@@ -624,7 +659,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
   const addThinkingTarget = () => {
     if (!loaded || !draft) return
     const used = new Set(draft.iotThinkingTargets.map(target => target.provider + '/' + (target.model ?? '*')))
-    const group = loaded.groups.find(candidate => !used.has(candidate.id + '/*') && candidate.models.length > 0) ?? loaded.groups.find(candidate => candidate.models.length > 0)
+    const group = catalog.groups.find(candidate => !used.has(candidate.id + '/*') && candidate.models.length > 0) ?? catalog.groups.find(candidate => candidate.models.length > 0)
     if (!group) return
     patch('iotThinkingTargets', [...draft.iotThinkingTargets, { provider: group.id }])
   }
@@ -650,26 +685,6 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     if (field.select === 'criteriaPreset') return <select style={selectStyle} disabled={readOnly || !enabled} aria-label={inputAria(field)} value={draft.criteriaPreset} onChange={event => patch('criteriaPreset', event.target.value as Values['criteriaPreset'])}>
       {(['coding','debug','research','ops','writing','custom'] as const).map(id => <option key={id} value={id}>{t[('field.criteriaPreset.' + id) as keyof I18nDict] as string}</option>)}
     </select>
-    if (field.select === 'provider') return <select style={selectStyle} disabled={readOnly || !enabled} aria-label={inputAria(field)} value={draft.provider} onChange={event => {
-      const provider = event.target.value
-      const first = loaded.groups.find(group => group.id === provider)?.models[0]
-      setSaveState(null)
-      setDraft({ ...draft, provider, ...(first ? { model: first.id, reasoningEffort: first.reasoning?.defaultEffort } : {}) })
-    }}>
-      {loaded.groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.id}</option>)}
-    </select>
-    if (field.select === 'model') return <select style={selectStyle} disabled={readOnly || !enabled} aria-label={inputAria(field)} value={draft.model} onChange={event => {
-      const model = event.target.value
-      const found = models.find(entry => entry.id === model)
-      setSaveState(null)
-      setDraft({ ...draft, model, ...(found?.reasoning?.defaultEffort ? { reasoningEffort: found.reasoning.defaultEffort } : { reasoningEffort: undefined }) })
-    }}>
-      {models.map(entry => <option key={entry.id} value={entry.id}>{entry.name} · {entry.id}</option>)}
-    </select>
-    if (field.select === 'effort') return <select style={selectStyle} disabled={readOnly || !enabled} aria-label={inputAria(field)} value={draft.reasoningEffort ?? ''} onChange={event => patch('reasoningEffort', event.target.value || undefined)}>
-      <option value="">{t['field.reasoningEffort.default']}</option>
-      {efforts.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}
-    </select>
     return null
   }
   const renderControl = (field: FieldSpec) => {
@@ -681,6 +696,17 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     if (field.kind === 'number') return renderNumber(field, enabled)
     if (field.kind === 'text') return renderText(field, enabled)
     if (field.kind === 'select') return renderSelect(field, enabled)
+    if (field.kind === 'model') return <HostModelSelect
+      lang={lang}
+      selection={{ provider: draft.provider, model: draft.model, ...(draft.reasoningEffort ? { reasoningEffort: draft.reasoningEffort } : {}) }}
+      groups={catalog.groups}
+      failures={catalog.failures}
+      status={catalog.status}
+      error={catalog.error}
+      readOnly={readOnly || !enabled}
+      onSelect={selectJudgeModel}
+      onReload={loadCatalog}
+    />
     return null
   }
   const renderJudges = () => {
@@ -701,11 +727,11 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
           </div>
           <div style={fieldHelp}>{translate('field.extraJudges.help') ?? ''}</div>
         </div>
-        <div style={controlCell}><Button variant="outline" disabled={readOnly || draft.extraJudges.length >= MAX_EXTRA_JUDGES} onClick={addJudge}>{t['field.extraJudges.add']}</Button></div>
+        <div style={controlCell}><Button variant="outline" disabled={readOnly || draft.extraJudges.length >= MAX_EXTRA_JUDGES || !catalog.groups[0]?.models[0]} onClick={addJudge}>{t['field.extraJudges.add']}</Button></div>
       </div>
       {draft.extraJudges.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '0 0 14px', borderBottom: '1px solid var(--dsw-alias-border-l2)' }}>
         {draft.extraJudges.map((judge, idx) => {
-          const judgeGroup = loaded.groups.find(group => group.id === judge.provider)
+          const judgeGroup = catalog.groups.find(group => group.id === judge.provider)
           const judgeModels = judgeGroup?.models ?? []
           const judgeModel = judgeModels.find(entry => entry.id === judge.model)
           const judgeEfforts = judgeModel?.reasoning?.efforts ?? []
@@ -720,12 +746,12 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
                 <span style={judgeFieldLabel}>{t['field.provider.title']}</span>
                 <select style={selectStyle} disabled={readOnly} aria-label={tFormat(t['field.extraJudges.providerAria'], { index: idx + 1 })} value={judge.provider} onChange={event => {
                   const newProvider = event.target.value
-                  const targetGroup = loaded.groups.find(group => group.id === newProvider)
+                  const targetGroup = catalog.groups.find(group => group.id === newProvider)
                   const firstM = targetGroup?.models[0]
                   updateJudge(idx, { provider: newProvider, model: firstM?.id ?? '', ...(firstM?.reasoning?.defaultEffort ? { reasoningEffort: firstM.reasoning.defaultEffort } : { reasoningEffort: undefined }) })
                 }}>
-                  {!loaded.groups.some(group => group.id === judge.provider) && judge.provider && <option value={judge.provider}>{judge.provider}</option>}
-                  {loaded.groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.id}</option>)}
+                  {!catalog.groups.some(group => group.id === judge.provider) && judge.provider && <option value={judge.provider}>{judge.provider}</option>}
+                  {catalog.groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.id}</option>)}
                 </select>
               </label>
               <label style={judgeField}>
@@ -763,7 +789,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     // this panel, so the model picker is locked to the same "follow" value instead of offering a
     // catalog the auxiliary call may never use.
     const followRoute = !draft.iotThinkingProvider
-    const group = loaded.groups.find(candidate => candidate.id === draft.iotThinkingProvider)
+    const group = catalog.groups.find(candidate => candidate.id === draft.iotThinkingProvider)
     const models = group?.models ?? []
     const selectedModel = models.find(model => model.id === draft.iotThinkingModel)
     const efforts = selectedModel?.reasoning?.efforts ?? []
@@ -781,14 +807,14 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
           <span style={judgeFieldLabel}>{t['field.provider.title']}</span>
           <select style={selectStyle} disabled={readOnly} aria-label={t['field.iotThinkingRoute.providerAria']} value={draft.iotThinkingProvider} onChange={event => {
             const provider = event.target.value
-            const nextGroup = loaded.groups.find(candidate => candidate.id === provider)
+            const nextGroup = catalog.groups.find(candidate => candidate.id === provider)
             const model = nextGroup?.models.find(candidate => /deepseek/iu.test(candidate.id + ' ' + candidate.name)) ?? nextGroup?.models[0]
             const effort = model?.reasoning?.efforts.some(option => option.id === 'low') ? 'low' : undefined
             setDraft(current => current ? { ...current, iotThinkingProvider: provider, iotThinkingModel: model?.id, iotThinkingEffort: effort } : current)
           }}>
             <option value="">{t['field.iotThinkingRoute.followRoute']}</option>
-            {!loaded.groups.some(candidate => candidate.id === draft.iotThinkingProvider) && draft.iotThinkingProvider && <option value={draft.iotThinkingProvider}>{draft.iotThinkingProvider}</option>}
-            {loaded.groups.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.name} · {candidate.id}</option>)}
+            {!catalog.groups.some(candidate => candidate.id === draft.iotThinkingProvider) && draft.iotThinkingProvider && <option value={draft.iotThinkingProvider}>{draft.iotThinkingProvider}</option>}
+            {catalog.groups.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.name} · {candidate.id}</option>)}
           </select>
         </label>
         <label style={judgeField}>
@@ -821,14 +847,14 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
           <span style={fieldTitle}>{t['field.iotThinkingTargets.title']}</span>
           <div style={fieldHelp}>{t['field.iotThinkingTargets.help']}</div>
         </div>
-        <div style={controlCell}><Button variant="outline" disabled={readOnly || loaded.groups.length === 0} onClick={addThinkingTarget}>{t['field.iotThinkingTargets.add']}</Button></div>
+        <div style={controlCell}><Button variant="outline" disabled={readOnly || catalog.groups.length === 0} onClick={addThinkingTarget}>{t['field.iotThinkingTargets.add']}</Button></div>
       </div>
       {draft.iotThinking !== 'off' && draft.iotThinkingTargets.length === 0 && <p data-thinking-empty-hint style={{ ...fullLine, margin: '0 0 12px', color: 'var(--dsw-alias-state-warn-label)' }}>{t['field.iotThinkingTargets.empty']}</p>}
       {issue && <p style={{ ...fullLine, color: 'var(--dsw-alias-state-error-primary)' }}>{issueText(issue)}</p>}
       {draft.iotThinkingTargets.map((target, idx) => {
-        const mainGroup = loaded.groups.find(group => group.id === target.provider)
+        const mainGroup = catalog.groups.find(group => group.id === target.provider)
         const mainModels = mainGroup?.models ?? []
-        const rewriteGroup = loaded.groups.find(group => group.id === target.rewriteProvider)
+        const rewriteGroup = catalog.groups.find(group => group.id === target.rewriteProvider)
         const rewriteModels = rewriteGroup?.models ?? []
         const rewriteModel = rewriteModels.find(model => model.id === target.rewriteModel)
         const efforts = rewriteModel?.reasoning?.efforts ?? []
@@ -841,8 +867,8 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
             <label style={judgeField}>
               <span style={judgeFieldLabel}>{tFormat(t['field.iotThinkingTargets.mainProviderAria'], { index: idx + 1 })}</span>
               <select style={selectStyle} disabled={readOnly} aria-label={tFormat(t['field.iotThinkingTargets.mainProviderAria'], { index: idx + 1 })} value={target.provider} onChange={event => updateThinkingTarget(idx, { provider: event.target.value, model: undefined })}>
-                {!loaded.groups.some(group => group.id === target.provider) && target.provider && <option value={target.provider}>{target.provider}</option>}
-                {loaded.groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.id}</option>)}
+                {!catalog.groups.some(group => group.id === target.provider) && target.provider && <option value={target.provider}>{target.provider}</option>}
+                {catalog.groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.id}</option>)}
               </select>
             </label>
             <label style={judgeField}>
@@ -861,13 +887,13 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
               <span style={judgeFieldLabel}>{tFormat(t['field.iotThinkingTargets.rewriteProviderAria'], { index: idx + 1 })}</span>
               <select style={selectStyle} disabled={readOnly} aria-label={tFormat(t['field.iotThinkingTargets.rewriteProviderAria'], { index: idx + 1 })} value={target.rewriteProvider ?? ''} onChange={event => {
                 const provider = event.target.value || undefined
-                const group = loaded.groups.find(candidate => candidate.id === provider)
+                const group = catalog.groups.find(candidate => candidate.id === provider)
                 const model = group?.models.find(candidate => /deepseek/iu.test(candidate.id + ' ' + candidate.name)) ?? group?.models[0]
                 updateThinkingTarget(idx, { rewriteProvider: provider, rewriteModel: model?.id, rewriteEffort: undefined })
               }}>
                 <option value="">{t['field.iotThinkingTargets.followGlobal']}</option>
-                {!loaded.groups.some(group => group.id === target.rewriteProvider) && target.rewriteProvider && <option value={target.rewriteProvider}>{target.rewriteProvider}</option>}
-                {loaded.groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.id}</option>)}
+                {!catalog.groups.some(group => group.id === target.rewriteProvider) && target.rewriteProvider && <option value={target.rewriteProvider}>{target.rewriteProvider}</option>}
+                {catalog.groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.id}</option>)}
               </select>
             </label>
             <label style={judgeField}>
@@ -1017,9 +1043,9 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
       </div>
     </div>
 
-    {loaded.failures.length > 0 && <div style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--dsw-alias-state-warn-tertiary)', color: 'var(--dsw-alias-state-warn-label)', fontSize: 12, lineHeight: '18px' }}>
+    {catalog.failures.length > 0 && <div style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--dsw-alias-state-warn-tertiary)', color: 'var(--dsw-alias-state-warn-label)', fontSize: 12, lineHeight: '18px' }}>
       <div style={{ fontWeight: 500, marginBottom: 3 }}>{t['settings.catalogFailures']}</div>
-      {loaded.failures.map(failure => <div key={failure}>{failure}</div>)}
+      {catalog.failures.map(failure => <div key={failure.id}>{failure.name}: {failure.message}</div>)}
     </div>}
   </div>
 }

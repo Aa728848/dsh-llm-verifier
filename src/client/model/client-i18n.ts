@@ -4,7 +4,8 @@ export const zh = {
   // Settings Page
   'settings.title': 'LLM Verifier',
   'settings.intro': '配置独立裁判模型与自动复核策略，更改会自动保存。',
-  'settings.loading': '正在读取 DSH 模型和设置…',
+  'settings.loading': '正在读取 Verifier 设置…',
+  'settings.modelsLoading': '正在后台读取 DSH 模型目录…',
   'settings.retry': '重试',
   'settings.nsUnregistered': '未注册 Verifier 设置命名空间，请重启 DSH 宿主。',
 
@@ -80,6 +81,8 @@ export const zh = {
 
   // Section: Judge Model
   'section.model': '裁判模型',
+  'field.judgeModel.title': '裁判模型',
+  'field.judgeModel.help': '选择担任独立裁判的模型。',
   'field.provider.title': '供应商',
   'field.provider.help': '裁判模型使用的供应商。',
   'field.model.title': '模型',
@@ -424,7 +427,8 @@ export const en: I18nDict = {
   // Settings Page
   'settings.title': 'LLM Verifier',
   'settings.intro': 'Configure independent judges and review policies. Changes save automatically.',
-  'settings.loading': 'Loading DSH models and settings…',
+  'settings.loading': 'Loading Verifier settings…',
+  'settings.modelsLoading': 'Loading the DSH model catalog in the background…',
   'settings.retry': 'Retry',
   'settings.nsUnregistered': 'Verifier settings namespace is not registered. Restart the DSH host.',
 
@@ -500,6 +504,8 @@ export const en: I18nDict = {
 
   // Section: Judge Model
   'section.model': 'Judge Model',
+  'field.judgeModel.title': 'Judge model',
+  'field.judgeModel.help': 'Choose the model that acts as the independent judge.',
   'field.provider.title': 'Provider',
   'field.provider.help': 'Provider used by the judge model.',
   'field.model.title': 'Model',

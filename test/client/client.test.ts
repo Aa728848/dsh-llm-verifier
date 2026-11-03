@@ -206,8 +206,8 @@ describe('client IoT level control', () => {
     // The labels come from the mode list, never from a second literal copy of it.
     expect(source).toContain('export function iotThinkingSegments(t: I18nDict)')
     expect(source).toContain('IOT_THINKING_MODES.map(id => ({ value: id, label:')
-    // A segmented control must not become a native select: the existing count stays at 7.
-    expect(source.match(/<select/g)?.length).toBe(15)
+    // A segmented control must not become a native select: the existing count stays at 12.
+    expect(source.match(/<select/g)?.length).toBe(12)
   })
 })
 
@@ -1055,12 +1055,13 @@ describe('client settings layout', () => {
     expect(source.match(/style=\{inputStyle\}/g)?.length).toBe(2)
     // The number renderer keeps it and only adds the flex share for its unit suffix.
     expect(source.match(/style=\{\{ \.\.\.inputStyle, flex: '1 1 auto', minWidth: 0 \}\}/g)?.length).toBe(1)
-    // Long catalog choices stay native selects; the two short enums use segmented buttons.
+    // Extra judges keep native selects; the primary judge uses DSH's ModelSelect component.
     const selects = source.match(/<select/g)?.length ?? 0
     const styledSelects = (source.match(/style=\{selectStyle\}/g)?.length ?? 0)
       + (source.match(/style=\{\{ \.\.\.selectStyle/g)?.length ?? 0)
-    expect(selects).toBe(15)
+    expect(selects).toBe(12)
     expect(styledSelects).toBe(selects)
+    expect(source).toContain("if (field.kind === 'model') return <HostModelSelect")
     expect(source).toContain("if (field.select === 'mode') return renderSegment(")
     expect(source).toContain("if (field.select === 'processSelection') return renderSegment(")
     // No control may carry a rival box model inline (the shared constant is the only one).
