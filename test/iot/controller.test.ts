@@ -395,7 +395,7 @@ describe('replacement', () => {
 })
 
 describe('auxiliary request', () => {
-  it('is one hand-built compaction call on the same route with no session and no tools', async () => {
+  it('is one plugin-owned auxiliary call on the same route with no session and no tools', async () => {
     const { controller, calls } = makeController()
     const main = request({ temperature: 0.3, maxTokens: 4096, tools: [{ name: 'read', description: 'read', parameters: {} }] })
     await collect(controller.stream(main, mainOf([...reasoningChunks(0, LONG), ...tail()]).next))

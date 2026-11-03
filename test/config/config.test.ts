@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AUTO_PROCESS_SELECTION_MODES, Config, IOT_THINKING_MODES, isVolatileConfigRef, markVolatile, MAX_EXTRA_JUDGES, normalizeAutoProcessSelection, resolveConfig, unwrapVolatileConfig } from '../../src/config/config.ts'
+import { AUTO_PROCESS_SELECTION_MODES, Config, IOT_THINKING_MODES, installVerifierSettings, isVolatileConfigRef, markVolatile, MAX_EXTRA_JUDGES, normalizeAutoProcessSelection, resolveConfig, unwrapVolatileConfig } from '../../src/config/config.ts'
 
 /** The cross-copy identity cosmokit publishes for the volatile write hook. */
 const VOLATILE_WRITE = Symbol.for('cosmokit.volatile.write')
@@ -592,6 +592,24 @@ describe('config - automatic verification repeats and budget', () => {
     // pair instead of doubling the rounds) + 6 for the final acceptance per judge.
     expect(resolveConfig({}).autoMaxModelCallsPerTask).toBe(96)
     expect(resolveConfig({}).autoMaxModelCallsPerSession).toBe(240)
+  })
+})
+
+describe('config - host settings source', () => {
+  const install = (fiber: Record<string, unknown>) => {
+    const ctx = {
+      fiber,
+      inject(_deps: unknown, callback: (scope: unknown) => void) {
+        callback({ settings: { configure: () => () => {} }, effect: () => {} })
+      },
+      on: () => {},
+    } as never
+    return installVerifierSettings(ctx, resolveConfig({}), () => {})
+  }
+
+  it('prefers the host’s resolved effective config and falls back to raw config on older hosts', () => {
+    expect(install({ effectiveConfig: { autoVerifyMode: 'manual' }, config: { autoVerifyMode: 'strict' } })().autoVerifyMode).toBe('manual')
+    expect(install({ config: { autoVerifyMode: 'strict' } })().autoVerifyMode).toBe('strict')
   })
 })
 

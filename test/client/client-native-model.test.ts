@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   captureNativeModelSelect,
   createModelDirectory,
+  resolveModelBadgeText,
   type ModelDirectorySnapshot,
 } from '../../src/client/model/client-native-model.ts'
 
@@ -29,6 +30,13 @@ describe('native model directory adapter', () => {
     unsubscribe()
     directory.update({ status: 'ready' })
     expect(listener).toHaveBeenCalledOnce()
+  })
+
+  it('resolves localized model badges with English fallback', () => {
+    expect(resolveModelBadgeText('Recommended', 'zh')).toBe('Recommended')
+    expect(resolveModelBadgeText({ en: 'Recommended', zh: '推荐' }, 'zh')).toBe('推荐')
+    expect(resolveModelBadgeText({ en: 'Recommended', zh: '推荐' }, 'en')).toBe('Recommended')
+    expect(resolveModelBadgeText({ en: 'Recommended', fr: 'Recommandé' }, 'zh')).toBe('Recommended')
   })
 
   it('captures the exact registered DSH component and its dictionaries without mounting services', () => {

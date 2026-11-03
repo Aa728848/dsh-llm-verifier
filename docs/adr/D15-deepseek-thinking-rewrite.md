@@ -26,7 +26,7 @@ DeepSeek 官方路由的主循环会把模型产出的思考块原样带进后�
 
 - 每个符合条件的思考块**一次**辅助调用。辅助线路按 `逐条覆盖 → 全局设置 → 主请求自身` 解算:`iotThinkingProvider` / `iotThinkingModel` / `iotThinkingEffort` 是全局设置(供应商留空 = 跟随线路),每条线路还可带 `rewriteProvider` / `rewriteModel` / `rewriteEffort` 覆盖它。强度最终默认 `low`。
 - 指定了辅助模型却没有供应商(全局或逐条)是配置错误:`resolveConfig` 抛错,设置面板在保存前拦下。供应商一旦是动态的,"模型"就没有可归属的供应商,静默忽略等于让面板显示一个不会生效的值。
-- 辅助调用不携带主会话的 `sessionId`、不挂任何工具,超时 60 秒。
+- 辅助调用不携带主会话的 `sessionId`、不挂任何工具,超时 60 秒；通过 `dsh-compaction-basic` 加载 `compaction` 用途声明,保留端点的 compact 请求元数据。
 - **失败即放行**:超时、报错、返回空、格式不合、内容被截断——一律按原样回放原始流。不改写、不重试、不向主循环抛错。
 - 复用**已经存在的唯一一个** `llm/stream` 钩子,内部顺序固定为思考重写 → 过程选优([D9](D9-process-selection.md))。不新增第二个钩子:两个旁路挂在同一处,顺序才是可读的;挂两处就是把顺序交给宿主。
 - 不介入评分、门控与缓存身份:不动判官判决,不动 [D3](D3-fail-closed.md) / [D5](D5-three-budgets.md) / [D6](D6-acceptance-baseline.md) 的任何判定,不改 [D13](D13-cache-identity.md) 的 `version`。

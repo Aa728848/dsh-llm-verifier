@@ -7,7 +7,7 @@
 主 Agent 干活，另一个模型验收：比候选、看进度、判交付，并在宿主生命周期边界上自动门控。
 
 [![license](https://img.shields.io/badge/license-MIT-2EA44F.svg)](LICENSE)
-[![dsh](https://img.shields.io/badge/dsh-0.1.1%20%E2%80%93%200.2.1-blue.svg)](docs/HOST-COMPAT.md)
+[![dsh](https://img.shields.io/badge/dsh-0.1.1%20%E2%80%93%200.2.2-blue.svg)](docs/HOST-COMPAT.md)
 
 </div>
 

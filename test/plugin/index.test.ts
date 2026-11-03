@@ -112,6 +112,10 @@ describe('plugin assembly', () => {
     expect(range).toContain('^0.2.1-rc.1')
     expect(range).toContain('^0.2.1-rc.2')
     expect(range).toContain('^0.2.1-rc.3')
+    expect(range).toContain('^0.2.1-rc.4')
+    expect(range).toContain('^0.2.1-rc.5')
+    expect(range).toContain('^0.2.2-alpha.2')
+    expect(range).toContain('^0.2.2-alpha.3')
     const peers = Object.entries(manifest.peerDependencies).filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
     expect(peers).toHaveLength(8)
     for (const [, peerRange] of peers) expect(peerRange).toBe(range)
@@ -480,9 +484,26 @@ describe('verifier_best_of_n', () => {
     expect(measured[4]!.calls).toBeLessThanOrEqual(64)
   })
 
-  it('explains what to do when the session model is not logged yet', async () => {
+  it('uses the host’s current model selection instead of the historical request route', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const selectedExec = {
+      ...exec,
+      agent: {
+        ...exec.agent,
+        model: { current: () => ({ provider: 'next-provider', model: 'next-model', reasoningEffort: 'low' }) },
+      },
+    }
+    const result = await assemble(JUDGE, { stream: scriptedStream(2, [], calls) }).tools.get('verifier_best_of_n')!
+      .execute({ task: 'do the thing', n: 2 }, selectedExec) as Record<string, any>
+    expect(result.generatorProvider).toBe('next-provider')
+    expect(result.generatorModel).toBe('next-model')
+    expect(calls.filter(call => call.model === 'next-model')).toHaveLength(2)
+    expect(calls.some(call => call.model === 'session-model')).toBe(false)
+  })
+
+  it('explains what to do when no current or historical model is available', async () => {
     const execute = assemble(JUDGE, { stream: scriptedStream(1, [], []) }).tools.get('verifier_best_of_n')!.execute
-    await expect(execute({ task: 'do the thing' }, bareExec)).rejects.toThrow(/no logged request header/u)
+    await expect(execute({ task: 'do the thing' }, bareExec)).rejects.toThrow(/no current model selection or logged request header/u)
   })
 })
 

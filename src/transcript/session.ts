@@ -15,6 +15,20 @@ export function sessionEvents(session: unknown): readonly SessionEvent[] {
   return candidate?.events ?? []
 }
 
+export interface SessionModelTarget {
+  provider: string
+  model: string
+  reasoningEffort?: string
+}
+
+/** Read the session's current model, falling back to its last logged request on older hosts. */
+export function sessionModelTarget(agent: Agent): SessionModelTarget | undefined {
+  const owner = agent as Agent & { model?: { current?: () => SessionModelTarget | undefined } }
+  const selected = owner.model?.current?.() ?? agent.session.requestHeader()?.config
+  if (selected === undefined) return undefined
+  return { provider: selected.provider, model: selected.model, ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: String(selected.reasoningEffort) }) }
+}
+
 export interface SessionExtractOptions {
   fromSeq?: number
   toSeq?: number

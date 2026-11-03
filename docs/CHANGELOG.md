@@ -2,9 +2,16 @@
 
 ## Unreleased
 
+- **[DSH 0.2.1-rc.4 / rc.5 / 0.2.2-alpha.2 / alpha.3] 对齐最新宿主功能线**
+  - `engines.dsh` 与 8 条 DSH peer 补齐四条发布线，开发门禁精确锁定 `0.2.2-alpha.3`，Cordis 锁定 `4.0.6-alpha.2` 并扩展 peer；pnpm 发布年龄豁免同步更新
+  - `verifier_best_of_n` 优先通过 `agent.model.current()` 读取当前模型，旧宿主回退到最近请求头；设置读取优先采用 Cordis 已解析的 `fiber.effectiveConfig`
+  - 辅助思考按上游指南通过 `dsh-compaction-basic` 加载 `compaction` 请求用途声明，保留端点 compact 元数据；原生模型选择器补齐新版 `resolveText`，支持供应商模型角标及英文回退
+  - 能力对照结论：上游 `auto-review` 是逐工具权限审批 preset，Goal Round 没有独立评估器，Plan Mode 只负责人工评审，均不能替代候选评分、过程选优、进度与终验；继续复用 Workspace Changes 作为证据源，不把实验 Auto preset 隐式加入本插件 patch
+
 - **[设置页] 首屏与模型目录解耦**：设置读取完成后立即渲染，模型目录在后台独立加载；目录慢或失败不再阻塞其他设置项，并可在选择器内重试。
 - **[设置页] 主裁判复用宿主模型选择器**：供应商、模型与推理强度合并为一个选择器，仍写回原有配置键；安装支持通用控件挂载的 `dsh-claude-style` 时通过 `model-picker` 控件 ID 使用其选择器，否则使用 DSH 原生组件，旧宿主保留旧控件降级。
 - **[测试] 新增异步加载与宿主选择器适配回归**：覆盖目录延迟、失败隔离、注册捕获和外部 store 订阅。
+- **[修复] 补全辅助思考设置说明**：中英帮助文案重新说明生效供应商/模型、主 Agent 推理块、默认 low 强度及不参与裁判评分，与当前逐线路 opt-in 行为一致。
 
 ## 0.14.0 - 2026-11-03
 - **[`修复`] 辅助思考不再受「启用 Verifier 工具」总开关影响**

@@ -2,7 +2,7 @@
 
 ## 背景
 
-本插件声明支持 DSH 0.1.1 到 0.2.1 一整串预发布线。这些版本之间换掉了若干插件消费的接口形态,而同一个差异散落在多个调用点会立刻分叉。
+本插件声明支持 DSH 0.1.1 到 0.2.2 一整串预发布线。这些版本之间换掉了若干插件消费的接口形态,而同一个差异散落在多个调用点会立刻分叉。
 
 ## 决定
 
@@ -14,6 +14,8 @@
 | 工具结果的两种形态(旧:`tool-result` 嵌套块;新:`role:'tool'` 消息 + 消息级 `isError`) | `toolResultBlocks()` / `toolResultFailed()` |
 | `tool/ptc-dispatch` 与旧的 `tool/code-dispatch` | 同上,事件分发处 |
 | 宿主设置 `settings.get(ns)` 与 `SettingsForms.describe()` | `judge/top-logprobs.ts` 的 `settingsNamespace()` |
+| 当前模型选择 `agent.model.current()` 与旧请求头 | `transcript/session.ts` 的 `sessionModelTarget()` |
+| 已解析设置 `fiber.effectiveConfig` 与旧 `fiber.config` | `config/config.ts` 的 `installVerifierSettings()` |
 | 图标导出名(尺寸后缀 → 笔画后缀) | `client/view/client.tsx` 顶部按名探测 |
 | `dsh-claude-style` 的可选外部选择器、DSH 原生选择器与旧控件 | `client/view/host-model-select.tsx` 按能力探测,共用同一受控目录 |
 | DSH 原生模型选择器未从包入口导出,旧宿主又可能缺少其注册形态 | `client/model/client-native-model.ts` 的 `captureNativeModelSelect()`;失败时退回旧控件 |

@@ -817,7 +817,10 @@ export function installVerifierSettings(ctx: Context, entry: ResolvedConfig, onC
       if (typeof sctx.settings.configure === 'function') {
         sctx.effect(() => sctx.settings.configure({ auto: false }, ctx.fiber))
       }
-      source = () => unwrapVolatileConfig(((ctx.fiber as { config?: unknown } | undefined)?.config as Config) ?? entry)
+      source = () => {
+        const fiber = ctx.fiber as { effectiveConfig?: unknown; config?: unknown } | undefined
+        return unwrapVolatileConfig((fiber?.effectiveConfig ?? fiber?.config ?? entry) as Config)
+      }
       ;(ctx as any).on?.('loader/volatile-update', () => {
         onChange()
       })

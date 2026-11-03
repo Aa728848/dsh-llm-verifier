@@ -21,6 +21,7 @@ import {
   BlockAssembler, ReasoningEffortId, createUserMessage, isAgentLoopRequest,
   type ContentBlock, type GenerateOptions, type LlmRuntime, type StreamChunk, type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-compaction-basic'
 import type {} from '../plugin/message-source.ts'
 import {
   IOT_AUX_TIMEOUT_MS, IOT_MAX_CHARS, IOT_MIN_CHARS, findIoTTarget, resolveIoTRequestRoute, strategyFor,

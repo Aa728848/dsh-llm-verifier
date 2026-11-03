@@ -1,7 +1,24 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
-import { extractSession, sessionEvents, toolResultBlocks, toolResultFailed } from '../../src/transcript/session.ts'
+import { extractSession, sessionEvents, sessionModelTarget, toolResultBlocks, toolResultFailed } from '../../src/transcript/session.ts'
+
+describe('session model target', () => {
+  it('prefers the host’s current selection over the last request header', () => {
+    const agent = {
+      model: { current: () => ({ provider: 'next-provider', model: 'next-model', reasoningEffort: 'low' }) },
+      session: { requestHeader: () => ({ config: { provider: 'old-provider', model: 'old-model', reasoningEffort: 'high' } }) },
+    } as never
+    expect(sessionModelTarget(agent)).toEqual({ provider: 'next-provider', model: 'next-model', reasoningEffort: 'low' })
+  })
+
+  it('falls back to the logged request on older hosts and reports an unknown route', () => {
+    const logged = { session: { requestHeader: () => ({ config: { provider: 'old-provider', model: 'old-model', reasoningEffort: 'high' } }) } } as never
+    expect(sessionModelTarget(logged)).toEqual({ provider: 'old-provider', model: 'old-model', reasoningEffort: 'high' })
+    const empty = { model: { current: () => undefined }, session: { requestHeader: () => undefined } } as never
+    expect(sessionModelTarget(empty)).toBeUndefined()
+  })
+})
 
 describe('current session extraction', () => {
   it('keeps direct evidence, skips plugin instructions, and redacts secrets', async () => {

@@ -6,6 +6,13 @@ export interface JudgeModelSelection {
   reasoningEffort?: string
 }
 
+export type ModelBadgeText = string | ({ en: string } & Record<string, string>)
+
+/** Resolve provider-authored badge text for the settings page's two supported locales. */
+export function resolveModelBadgeText(text: ModelBadgeText, lang: 'zh' | 'en'): string {
+  return typeof text === 'string' ? text : text[lang] ?? text.en
+}
+
 export interface ModelProviderGroupView {
   id: string
   name: string
@@ -13,6 +20,7 @@ export interface ModelProviderGroupView {
     id: string
     name: string
     reasoning?: { efforts: readonly { id: string; name: string }[]; defaultEffort?: string }
+    badge?: { text: ModelBadgeText; tone: 'neutral' | 'info' | 'success' | 'warning' }
   }[]
 }
 
