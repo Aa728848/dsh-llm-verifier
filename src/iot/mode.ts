@@ -14,7 +14,7 @@ export const IOT_MODES: readonly IoTMode[] = ['off', 'compact', 'balanced', 'ful
 
 /** Optional global auxiliary-thinking model settings. */
 export interface IoTRequestRoute {
-  /** Auxiliary provider; empty or absent defaults to `deepseek-official`. */
+  /** Auxiliary provider; empty or absent follows the enabled route's own provider. */
   readonly provider?: string
   /** Auxiliary model; empty or absent follows the main model. */
   readonly model?: string
@@ -36,21 +36,38 @@ export interface IoTThinkingTarget {
   readonly rewriteEffort?: string
 }
 
-/** Whether a main provider/model is enabled: deepseek-official by default, plus explicit targets. */
-export function isIoTTargetEnabled(targets: readonly IoTThinkingTarget[], provider: string, model: string): boolean {
-  if (provider === 'deepseek-official') return true
-  return targets.some(target => target.provider === provider && (target.model === undefined || target.model === model))
+/**
+ * The single eligibility rule: an empty target model means every model of that provider.
+ *
+ * There is no built-in provider exemption. Auxiliary thinking follows an explicit opt-in route
+ * only, so enabling it for one provider cannot silently spend another provider's credential.
+ * See D15.
+ */
+export function findIoTTarget(
+  targets: readonly IoTThinkingTarget[],
+  provider: string,
+  model: string,
+): IoTThinkingTarget | undefined {
+  return targets.find(target => target.provider === provider && (target.model === undefined || target.model === model))
 }
 
-/** Resolve the global defaults and the matching target's optional auxiliary override. */
+/** Whether a main provider/model is enabled: only an explicit target enables it. */
+export function isIoTTargetEnabled(targets: readonly IoTThinkingTarget[], provider: string, model: string): boolean {
+  return findIoTTarget(targets, provider, model) !== undefined
+}
+
+/**
+ * Resolve the auxiliary route: the target's override, then the global default, then the main
+ * request's own route. The last step is what makes a bare opt-in line usable on its own provider.
+ */
 export function resolveIoTRequestRoute(
   route: IoTRequestRoute,
-  mainModel: string,
+  main: { provider: string; model: string },
   target?: IoTThinkingTarget,
 ): { provider: string; model: string; reasoningEffort: string } {
   return {
-    provider: target?.rewriteProvider?.trim() || route.provider?.trim() || 'deepseek-official',
-    model: target?.rewriteModel?.trim() || route.model?.trim() || mainModel,
+    provider: target?.rewriteProvider?.trim() || route.provider?.trim() || main.provider,
+    model: target?.rewriteModel?.trim() || route.model?.trim() || main.model,
     reasoningEffort: target?.rewriteEffort?.trim() || route.reasoningEffort?.trim() || 'low',
   }
 }

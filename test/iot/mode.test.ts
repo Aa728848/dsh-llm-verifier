@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   IOT_AUX_TIMEOUT_MS, IOT_MAX_CHARS, IOT_MAX_SESSIONS, IOT_MIN_CHARS, IOT_MODES, IOT_STRATEGIES,
-  isIoTMode, isIoTTargetEnabled, resolveIoTRequestRoute, strategyFor,
+  findIoTTarget, isIoTMode, isIoTTargetEnabled, resolveIoTRequestRoute, strategyFor,
 } from '../../src/iot/index.ts'
 
 describe('strategy table', () => {
@@ -35,22 +35,41 @@ describe('strategy table', () => {
 
 
 describe('enabled targets and route resolution', () => {
-  it('enables deepseek-official by default and other providers only by exact or wildcard target', () => {
+  it('enables nothing without a target, including deepseek-official', () => {
     const targets = [{ provider: 'opendesign', model: 'deepseek-v4.1-flash' }, { provider: 'kimi-code' }]
-    expect(isIoTTargetEnabled([], 'deepseek-official', 'anything')).toBe(true)
+    // The provider that used to be exempt is the boundary this rewrite exists for: an empty list
+    // enables nothing, so no provider ever spends another provider's credential by default.
+    expect(isIoTTargetEnabled([], 'deepseek-official', 'anything')).toBe(false)
     expect(isIoTTargetEnabled([], 'opendesign', 'deepseek-v4.1-flash')).toBe(false)
     expect(isIoTTargetEnabled(targets, 'opendesign', 'deepseek-v4.1-flash')).toBe(true)
     expect(isIoTTargetEnabled(targets, 'opendesign', 'other-model')).toBe(false)
     expect(isIoTTargetEnabled(targets, 'kimi-code', 'any-model')).toBe(true)
   })
 
-  it('applies global defaults and target-specific auxiliary overrides', () => {
-    expect(resolveIoTRequestRoute({}, 'main-model')).toEqual({ provider: 'deepseek-official', model: 'main-model', reasoningEffort: 'low' })
-    expect(resolveIoTRequestRoute({ provider: 'global-provider', model: 'global-model', reasoningEffort: 'high' }, 'main-model', {
+  it('returns the matching target itself, so the overrides travel with the decision', () => {
+    const targets = [{ provider: 'kimi-code', rewriteProvider: 'deepseek-account' }]
+    expect(findIoTTarget([], 'deepseek-official', 'deepseek-reasoner')).toBeUndefined()
+    expect(findIoTTarget(targets, 'kimi-code', 'any-model')).toEqual(targets[0])
+    expect(isIoTTargetEnabled(targets, 'kimi-code', 'any-model')).toBe(true)
+  })
+
+  it('falls back to the main route itself before any provider default', () => {
+    const main = { provider: 'deepseek-account', model: 'deepseek-reasoner' }
+    expect(resolveIoTRequestRoute({}, main)).toEqual({
+      provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'low',
+    })
+    // Blank strings are absences, not choices: a saved '' must not shadow the main route.
+    expect(resolveIoTRequestRoute({ provider: '  ', model: '  ', reasoningEffort: '  ' }, main)).toEqual({
+      provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'low',
+    })
+    expect(resolveIoTRequestRoute({ provider: 'global-provider', model: 'global-model', reasoningEffort: 'high' }, main, {
       provider: 'opendesign', rewriteProvider: 'rewrite-provider', rewriteModel: 'rewrite-model', rewriteEffort: 'max',
     })).toEqual({ provider: 'rewrite-provider', model: 'rewrite-model', reasoningEffort: 'max' })
-    expect(resolveIoTRequestRoute({ provider: 'global-provider', model: 'global-model', reasoningEffort: 'high' }, 'main-model', {
+    expect(resolveIoTRequestRoute({ provider: 'global-provider', model: 'global-model', reasoningEffort: 'high' }, main, {
       provider: 'opendesign', rewriteProvider: 'rewrite-provider',
     })).toEqual({ provider: 'rewrite-provider', model: 'global-model', reasoningEffort: 'high' })
+    expect(resolveIoTRequestRoute({ provider: 'global-provider' }, main, { provider: 'opendesign' })).toEqual({
+      provider: 'global-provider', model: 'deepseek-reasoner', reasoningEffort: 'low',
+    })
   })
 })

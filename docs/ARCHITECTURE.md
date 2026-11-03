@@ -39,10 +39,12 @@
 
 ## 辅助思考旁路
 
-辅助思考是独立可选模块(`src/iot/`),默认关闭,默认只作用于 `deepseek-official`;额外主供应商/模型由 `iotThinkingTargets` 逐项启用:
+辅助思考是独立可选模块(`src/iot/`),默认关闭。档位只决定强度,生效范围只由 `iotThinkingTargets` 决定,没有默认豁免的供应商:
 
 ```
-思考块 → 全局辅助模型(deepseek-official + 主模型 low)→ 匹配生效线路及逐条辅助覆盖→ 一次辅助调用(无主会话 sessionId、无工具、60s)
+主请求 → 档位 off? 穿过
+      → findIoTTarget(iotThinkingTargets) 未命中? 穿过(不缓冲)
+      → 思考块 → 辅助线路(逐条覆盖 → 全局设置 → 主请求自身,强度默认 low)→ 一次辅助调用(无主会话 sessionId、无工具、60s)
       → 改写文本 → 与原流同形回放;超时/报错/空/超限 → 原样回放原始流
 ```
 

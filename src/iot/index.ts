@@ -6,7 +6,7 @@ export { IoTController } from './controller.ts'
 export type { IoTDeps, IoTSettings } from './controller.ts'
 export {
   IOT_AUX_TIMEOUT_MS, IOT_MAX_CHARS, IOT_MAX_SESSIONS, IOT_MIN_CHARS, IOT_MODES, IOT_STRATEGIES,
-  isIoTMode, isIoTTargetEnabled, resolveIoTRequestRoute, strategyFor,
+  findIoTTarget, isIoTMode, isIoTTargetEnabled, resolveIoTRequestRoute, strategyFor,
 } from './mode.ts'
 export type { IoTMode, IoTRequestRoute, IoTStrategy, IoTThinkingTarget } from './mode.ts'
 export { IOT_PROMPT_MARKER, IOT_TRACE_TAG, buildCompactionPrompt, iotTraceDelimiters, iotTraceToken } from './prompt.ts'

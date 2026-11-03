@@ -83,8 +83,11 @@ interface Harness {
   settings: IoTSettings
 }
 
+/** The opt-in route these tests run under: no route, no work — there is no provider exemption. */
+const OFFICIAL_TARGET = { provider: 'deepseek-official' }
+
 function makeController(
-  settings: IoTSettings = { enabled: true, iotThinking: 'compact' },
+  settings: IoTSettings = { enabled: true, iotThinking: 'compact', iotThinkingTargets: [OFFICIAL_TARGET] },
   reply?: AuxBehaviour,
 ): Harness {
   const calls: GenerateOptions[] = []
@@ -135,6 +138,18 @@ describe('eligibility', () => {
     const out = await collect(controller.stream(request(), main.next))
     expect(out).toEqual(source)
     expect(calls).toHaveLength(0)
+    expect(main.calls()).toBe(1)
+    expect(controller.metrics('s-1')).toBeUndefined()
+  })
+
+  it('does nothing without an opt-in route, even on deepseek-official', async () => {
+    const { controller, calls } = makeController({ enabled: true, iotThinking: 'compact' })
+    const source = [...reasoningChunks(0, LONG), ...tail()]
+    const main = mainOf(source)
+    const out = await collect(controller.stream(request(), main.next))
+    expect(out).toEqual(source)
+    expect(calls).toHaveLength(0)
+    // Passed through untouched means unbuffered too: the source was consumed exactly once.
     expect(main.calls()).toBe(1)
     expect(controller.metrics('s-1')).toBeUndefined()
   })
@@ -529,7 +544,7 @@ describe('failure handling', () => {
   it('does not dispatch at all when the main request is already cancelled', async () => {
     const controller = new IoTController({
       llm: { stream: () => { throw new Error('must not be called') } } as unknown as LlmRuntime,
-      settings: () => ({ enabled: true, iotThinking: 'compact' }),
+      settings: () => ({ enabled: true, iotThinking: 'compact', iotThinkingTargets: [OFFICIAL_TARGET] }),
     })
     const cancelled = new AbortController()
     cancelled.abort(new Error('user cancelled'))
@@ -597,7 +612,7 @@ describe('usage accounting', () => {
 
 describe('global settings and provider routes', () => {
   it('follows live global changes without any session override', async () => {
-    const settings = { enabled: true, iotThinking: 'compact' as IoTMode }
+    const settings = { enabled: true, iotThinking: 'compact' as IoTMode, iotThinkingTargets: [OFFICIAL_TARGET] }
     const { controller, calls } = makeController(settings)
     settings.iotThinking = 'off'
     const closed = await collect(controller.stream(request(), mainOf([...reasoningChunks(0, LONG)]).next))
@@ -613,6 +628,7 @@ describe('global settings and provider routes', () => {
     const { controller, calls } = makeController({
       enabled: true,
       iotThinking: 'compact',
+      iotThinkingTargets: [OFFICIAL_TARGET],
       iotThinkingProvider: 'opendesign',
       iotThinkingModel: 'deepseek-v4.1-flash',
       iotThinkingEffort: 'high',
@@ -633,6 +649,17 @@ describe('global settings and provider routes', () => {
     await collect(controller.stream(request({ provider: 'opendesign', model: 'deepseek-v4.1-flash' }), mainOf([...reasoningChunks(0, LONG)]).next))
     expect(calls).toHaveLength(1)
     expect(calls[0]).toMatchObject({ provider: 'kimi-code', model: 'k3', reasoningEffort: 'max', maxTokens: 1200 })
+  })
+
+  it('follows the enabled route itself when no auxiliary route is configured', async () => {
+    const { controller, calls } = makeController({
+      enabled: true,
+      iotThinking: 'compact',
+      iotThinkingTargets: [{ provider: 'deepseek-account' }],
+    })
+    await collect(controller.stream(request({ provider: 'deepseek-account', model: 'deepseek-reasoner' }), mainOf([...reasoningChunks(0, LONG)]).next))
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'low', purpose: 'compaction' })
   })
 
   it('passes through an unconfigured main provider even when auxiliary thinking is on', async () => {

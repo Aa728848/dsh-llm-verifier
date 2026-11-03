@@ -23,7 +23,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import type {} from '../plugin/message-source.ts'
 import {
-  IOT_AUX_TIMEOUT_MS, IOT_MAX_CHARS, IOT_MIN_CHARS, resolveIoTRequestRoute, strategyFor,
+  IOT_AUX_TIMEOUT_MS, IOT_MAX_CHARS, IOT_MIN_CHARS, findIoTTarget, resolveIoTRequestRoute, strategyFor,
   type IoTMode, type IoTRequestRoute, type IoTStrategy, type IoTThinkingTarget,
 } from './mode.ts'
 import { assessCompaction } from './compaction.ts'
@@ -36,7 +36,7 @@ export interface IoTSettings {
   enabled: boolean
   /** Global auxiliary-thinking strategy; no per-session override exists. */
   iotThinking: IoTMode
-  /** Global auxiliary model settings; unset fields use deepseek-official/main-model/low. */
+  /** Global auxiliary model settings; unset fields use the enabled route's own provider and model, and low. */
   iotThinkingProvider?: string
   iotThinkingModel?: string
   iotThinkingEffort?: string
@@ -125,7 +125,8 @@ export class IoTController {
    *
    * All four facts are required, and the last one is what makes the feature safe against itself:
    * an auxiliary call is a hand-built request with no session id, so it can never satisfy this
-   * check — no recursion, no double counting.
+   * check — no recursion, no double counting. The opt-in route is the fifth fact: no matching
+   * target means no work at all, so enabling a provider cannot spend another provider's credential.
    * @param options - the request entering the waterfall.
    * @returns The session and strategy, or undefined to delegate untouched.
    */
@@ -139,10 +140,7 @@ export class IoTController {
     if (sessionId === '') return undefined
     const strategy = strategyFor(settings.iotThinking)
     if (strategy === undefined) return undefined
-    if (options.provider === 'deepseek-official') return { sessionId, strategy }
-    const model = options.model
-    const target = (settings.iotThinkingTargets ?? []).find(candidate =>
-      candidate.provider === options.provider && (candidate.model === undefined || candidate.model === model))
+    const target = findIoTTarget(settings.iotThinkingTargets ?? [], options.provider, options.model)
     return target === undefined ? undefined : { sessionId, strategy, target }
   }
 
@@ -312,7 +310,7 @@ export class IoTController {
         provider: selected.iotThinkingProvider,
         model: selected.iotThinkingModel,
         reasoningEffort: selected.iotThinkingEffort,
-      }, options.model, target)
+      }, { provider: options.provider, model: options.model }, target)
       const request: GenerateOptions = {
         provider: route.provider,
         model: route.model,

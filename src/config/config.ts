@@ -177,9 +177,9 @@ export interface Config {
   autoProcessCandidates?: number
   /** Auxiliary-thinking level for the main agent. Default OFF. */
   iotThinking?: IotThinkingMode
-  /** Auxiliary provider; empty defaults to deepseek-official. */
+  /** Auxiliary provider; empty follows the enabled route's own provider. */
   iotThinkingProvider?: string
-  /** Auxiliary model; empty follows the main model. */
+  /** Auxiliary model; empty follows the enabled route's own model. Requires a provider. */
   iotThinkingModel?: string
   /** Auxiliary effort; empty defaults to low. */
   iotThinkingEffort?: string
@@ -264,6 +264,7 @@ export interface ResolvedConfig {
   autoProcessAlternativeModel: string
   autoProcessCandidates: number
   iotThinking: IotThinkingMode
+  /** Empty means the auxiliary call follows the enabled route's own provider. */
   iotThinkingProvider: string
   iotThinkingModel?: string
   iotThinkingEffort?: string
@@ -481,7 +482,7 @@ export const Config = markVolatile(z.object({
   autoProcessAlternativeModel: z.string().default(''),
   autoProcessCandidates: z.number().step(1).min(2).default(2),
   iotThinking: z.union([...IOT_THINKING_MODES]).default('off'),
-  iotThinkingProvider: z.string().default('deepseek-official'),
+  iotThinkingProvider: z.string().default(''),
   iotThinkingModel: z.string(),
   iotThinkingEffort: z.string(),
   iotThinkingTargets: z.array(z.object({
@@ -604,9 +605,15 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   if (typeof iotThinking !== 'string' || !(IOT_THINKING_MODES as readonly string[]).includes(iotThinking)) {
     throw new Error('llm-verifier: iotThinking must be off, compact, balanced, or full')
   }
-  const iotThinkingProvider = (config.iotThinkingProvider ?? 'deepseek-official').trim() || 'deepseek-official'
+  // Empty is a legal provider: it means "follow the enabled route", which is the only value that
+  // makes a bare opt-in line work on its own provider. A model without a provider has no provider
+  // to live on, so it fails closed instead of being silently dropped from a row that still shows it.
+  const iotThinkingProvider = (config.iotThinkingProvider ?? '').trim()
   const iotThinkingModel = config.iotThinkingModel?.trim() || undefined
   const iotThinkingEffort = config.iotThinkingEffort?.trim() || undefined
+  if (!iotThinkingProvider && iotThinkingModel) {
+    throw new Error('llm-verifier: iotThinkingModel requires iotThinkingProvider')
+  }
   const rawThinkingTargets = config.iotThinkingTargets ?? []
   if (!Array.isArray(rawThinkingTargets)) throw new Error('llm-verifier: iotThinkingTargets must be an array')
   const targetIdentities = new Set<string>()
@@ -621,6 +628,11 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     const rewriteProvider = target.rewriteProvider?.trim() || undefined
     const rewriteModel = target.rewriteModel?.trim() || undefined
     const rewriteEffort = target.rewriteEffort?.trim() || undefined
+    // Same rule as the global pair: a per-route auxiliary model needs a provider of its own,
+    // otherwise the row names a model that no route is obliged to serve.
+    if (!rewriteProvider && rewriteModel) {
+      throw new Error('llm-verifier: iotThinkingTargets[' + index + '].rewriteModel requires rewriteProvider')
+    }
     return { provider, ...(model ? { model } : {}), ...(rewriteProvider ? { rewriteProvider } : {}), ...(rewriteModel ? { rewriteModel } : {}), ...(rewriteEffort ? { rewriteEffort } : {}) }
   })
 

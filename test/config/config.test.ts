@@ -741,13 +741,16 @@ describe('config - the single DeepSeek IoT setting', () => {
 
 
 describe('config - auxiliary-thinking global model and targets', () => {
-  it('defaults to deepseek-official, main-model low and no additional targets', () => {
+  it('defaults to no auxiliary provider and no enabled targets', () => {
     const resolved = resolveConfig({})
-    expect(resolved.iotThinkingProvider).toBe('deepseek-official')
+    // The empty string is the shipped default: it means "follow the enabled route", and it is the
+    // only default under which a bare opt-in line works without naming a second provider.
+    expect(resolved.iotThinkingProvider).toBe('')
     expect(resolved.iotThinkingModel).toBeUndefined()
     expect(resolved.iotThinkingEffort).toBeUndefined()
     expect(resolved.iotThinkingTargets).toEqual([])
     expect(Config({}).iotThinkingTargets).toEqual([])
+    expect(Config({}).iotThinkingProvider).toBe('')
   })
 
   it('normalizes global model settings and target overrides', () => {
@@ -768,8 +771,18 @@ describe('config - auxiliary-thinking global model and targets', () => {
       { provider: 'opendesign', model: 'deepseek-v4.1-flash' },
     ])
     expect(resolveConfig({ iotThinkingProvider: ' ', iotThinkingModel: ' ', iotThinkingEffort: ' ' })).toMatchObject({
-      iotThinkingProvider: 'deepseek-official', iotThinkingModel: undefined, iotThinkingEffort: undefined,
+      iotThinkingProvider: '', iotThinkingModel: undefined, iotThinkingEffort: undefined,
     })
+  })
+
+  it('refuses an auxiliary model or an override model with no provider of its own', () => {
+    // A model without a provider has no route to live on; dropping it silently would leave a row
+    // that still displays a value the auxiliary call never uses.
+    expect(() => resolveConfig({ iotThinkingModel: 'deepseek-reasoner' })).toThrow('iotThinkingModel requires iotThinkingProvider')
+    expect(() => resolveConfig({ iotThinkingProvider: 'opendesign', iotThinkingModel: 'deepseek-v4.1-flash' })).not.toThrow()
+    expect(() => resolveConfig({ iotThinkingTargets: [{ provider: 'opendesign', rewriteModel: 'k3' }] }))
+      .toThrow('iotThinkingTargets[0].rewriteModel requires rewriteProvider')
+    expect(() => resolveConfig({ iotThinkingTargets: [{ provider: 'opendesign', rewriteProvider: 'kimi-code', rewriteModel: 'k3' }] })).not.toThrow()
   })
 
   it('rejects duplicate provider/model targets and empty main providers', () => {

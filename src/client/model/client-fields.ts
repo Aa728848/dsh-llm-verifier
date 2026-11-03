@@ -91,7 +91,7 @@ export const CONFIG_DEFAULTS: Values = {
   autoProcessAlternativeModel: '',
   autoProcessCandidates: 2,
   iotThinking: 'off',
-  iotThinkingProvider: 'deepseek-official',
+  iotThinkingProvider: '',
   iotThinkingModel: undefined,
   iotThinkingEffort: undefined,
   iotThinkingTargets: [],
@@ -383,7 +383,7 @@ export function valuesFromView(view: Record<string, unknown> | undefined): Value
     iotThinking: (IOT_THINKING_MODES as readonly string[]).includes(v.iotThinking as string)
       ? v.iotThinking as IotThinkingMode
       : 'off',
-    iotThinkingProvider: typeof v.iotThinkingProvider === 'string' && v.iotThinkingProvider.trim() ? v.iotThinkingProvider.trim() : 'deepseek-official',
+    iotThinkingProvider: typeof v.iotThinkingProvider === 'string' ? v.iotThinkingProvider.trim() : '',
     iotThinkingModel: typeof v.iotThinkingModel === 'string' && v.iotThinkingModel.trim() ? v.iotThinkingModel.trim() : undefined,
     iotThinkingEffort: typeof v.iotThinkingEffort === 'string' && v.iotThinkingEffort.trim() ? v.iotThinkingEffort.trim() : undefined,
     iotThinkingTargets: normalizeIotThinkingTargets(v.iotThinkingTargets),
@@ -473,7 +473,7 @@ export function acceptsNumber(field: FieldSpec, raw: string): boolean {
 
 export interface FieldIssue {
   key: keyof Values
-  code: 'required' | 'range' | 'min' | 'max' | 'integer' | 'cacheDirRelative' | 'routeBudget' | 'altModelList' | 'duplicateThinkingTarget'
+  code: 'required' | 'range' | 'min' | 'max' | 'integer' | 'cacheDirRelative' | 'routeBudget' | 'altModelList' | 'duplicateThinkingTarget' | 'routeModelNeedsProvider' | 'targetModelNeedsProvider'
   params?: Record<string, string | number>
 }
 
@@ -545,6 +545,16 @@ export function validateValues(values: Values): FieldIssue[] {
     if (thinkingTargets.has(identity)) issues.push({ key: 'iotThinkingTargets', code: 'duplicateThinkingTarget', params: { provider: identity } })
     thinkingTargets.add(identity)
   }
+  // 'resolveConfig' rejects these two pairs with a thrown error; the page blocks the save instead,
+  // so the user sees which row is wrong rather than a failed write.
+  if (!values.iotThinkingProvider.trim() && (values.iotThinkingModel ?? '').trim()) {
+    issues.push({ key: 'iotThinkingProvider', code: 'routeModelNeedsProvider' })
+  }
+  values.iotThinkingTargets.forEach((target, index) => {
+    if (!(target.rewriteProvider ?? '').trim() && (target.rewriteModel ?? '').trim()) {
+      issues.push({ key: 'iotThinkingTargets', code: 'targetModelNeedsProvider', params: { index: index + 1 } })
+    }
+  })
   if (!values.provider.trim()) issues.push({ key: 'provider', code: 'required' })
   if (!values.model.trim()) issues.push({ key: 'model', code: 'required' })
   return issues

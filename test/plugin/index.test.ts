@@ -2096,7 +2096,10 @@ describe('IoT-Lite through the real hooks', () => {
     }
   }
 
-  /** A real main-loop request on the only route IoT is eligible for. */
+  /** The one opt-in route the integration cases run under: no route, no rewrite (D15). */
+  const OFFICIAL = { provider: 'deepseek-official' }
+
+  /** A real main-loop request, eligible only because OFFICIAL opts that route in. */
   const mainRequest = (overrides: Record<string, unknown> = {}) => markAgentLoopRequest({ provider: 'deepseek-official', model: 'deepseek-reasoner', messages: [], sessionId: 'iot-session' as never, ...overrides })
 
   const reasoningOf = (chunks: readonly Record<string, unknown>[]): string => chunks.filter(chunk => chunk.type === 'reasoning-delta').map(chunk => String(chunk.text)).join('')
@@ -2110,9 +2113,18 @@ describe('IoT-Lite through the real hooks', () => {
     expect(chunks).toEqual(mainChunks())
   })
 
+  it('stays closed on deepseek-official when the level is on but no route is listed', async () => {
+    const aux: AuxRequest[] = []
+    const { handlers } = assemble({ ...JUDGE, iotThinking: 'full' }, { stream: auxStream(aux) })
+    const chunks = await collect(handlers.get('llm/stream')!(mainRequest(), () => streamOf(mainChunks())) as AsyncIterable<unknown>)
+    // The level alone buys nothing: the list is the whole opt-in, so this provider is no longer exempt.
+    expect(aux).toEqual([])
+    expect(chunks).toEqual(mainChunks())
+  })
+
   it('replaces one finished reasoning block of the DeepSeek main request', async () => {
     const aux: AuxRequest[] = []
-    const { handlers } = assemble({ ...JUDGE, iotThinking: 'compact' }, { stream: auxStream(aux) })
+    const { handlers } = assemble({ ...JUDGE, iotThinking: 'compact', iotThinkingTargets: [OFFICIAL] }, { stream: auxStream(aux) })
     const chunks = await collect(handlers.get('llm/stream')!(mainRequest(), () => streamOf(mainChunks())) as AsyncIterable<unknown>)
 
     expect(reasoningOf(chunks)).toBe(COMPACTED)
@@ -2138,7 +2150,7 @@ describe('IoT-Lite through the real hooks', () => {
       { type: 'block-end', index: 0, block: { type: 'text', text: '- [goal] Fix it' } },
       { type: 'finish', reason: { kind: 'max-tokens' } },
     ]
-    const first = assemble({ ...JUDGE, iotThinking: 'compact' }, { stream: auxStream(truncated, truncatedReply) })
+    const first = assemble({ ...JUDGE, iotThinking: 'compact', iotThinkingTargets: [OFFICIAL] }, { stream: auxStream(truncated, truncatedReply) })
     const kept = await collect(first.handlers.get('llm/stream')!(mainRequest(), () => streamOf(mainChunks())) as AsyncIterable<unknown>)
     expect(kept).toEqual(mainChunks())
     expect(truncated).toHaveLength(1)
@@ -2147,7 +2159,7 @@ describe('IoT-Lite through the real hooks', () => {
 
     const exploding: AuxRequest[] = []
     const thrown = () => { throw new Error('provider said no') }
-    const second = assemble({ ...JUDGE, iotThinking: 'compact' }, { stream: auxStream(exploding, thrown) })
+    const second = assemble({ ...JUDGE, iotThinking: 'compact', iotThinkingTargets: [OFFICIAL] }, { stream: auxStream(exploding, thrown) })
     const recovered = await collect(second.handlers.get('llm/stream')!(mainRequest(), () => streamOf(mainChunks())) as AsyncIterable<unknown>)
     expect(recovered).toEqual(mainChunks())
     expect(exploding).toHaveLength(1)
@@ -2167,7 +2179,7 @@ describe('IoT-Lite through the real hooks', () => {
       { type: 'usage', usage },
       { type: 'finish', reason: { kind: 'stop' }, replayState },
     ]
-    const { handlers } = assemble({ ...JUDGE, iotThinking: 'balanced' }, { stream: auxStream(aux) })
+    const { handlers } = assemble({ ...JUDGE, iotThinking: 'balanced', iotThinkingTargets: [OFFICIAL] }, { stream: auxStream(aux) })
     const chunks = await collect(handlers.get('llm/stream')!(mainRequest(), () => streamOf(signedMain())) as AsyncIterable<unknown>)
     expect(chunks.find(chunk => chunk.type === 'block-end')).toEqual({ type: 'block-end', index: 3, block: { type: 'reasoning', text: COMPACTED, signature: 'provider-signature' } })
     expect(chunks.find(chunk => chunk.type === 'usage')).toEqual({ type: 'usage', usage })
@@ -2181,6 +2193,7 @@ describe('IoT-Lite through the real hooks', () => {
     const { handlers, injections, tools } = assemble({
       ...JUDGE,
       iotThinking: 'compact',
+      iotThinkingTargets: [OFFICIAL],
       iotThinkingProvider: 'opendesign',
       iotThinkingModel: 'deepseek-v4.1-flash',
       iotThinkingEffort: 'high',
@@ -2259,7 +2272,7 @@ describe('IoT-Lite through the real hooks', () => {
       calls.push('generation')
       return textStream('ALTERNATIVE-REPLY')
     }
-    const { handlers, rpc } = assemble({ ...JUDGE, autoProcessSelection: true, iotThinking: 'compact' }, { stream: stub, sessions: [{ id: 'agent-p06', createdAt: 1 }] })
+    const { handlers, rpc } = assemble({ ...JUDGE, autoProcessSelection: true, iotThinking: 'compact', iotThinkingTargets: [OFFICIAL] }, { stream: stub, sessions: [{ id: 'agent-p06', createdAt: 1 }] })
     const target = {
       id: 'agent-p06',
       session: { header: { id: 'agent-p06' }, snapshotEvents: () => stuckEvents(), requestHeader: () => ({ config: { provider: 'session-provider', model: 'session-model' } }) },

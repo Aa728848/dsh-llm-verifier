@@ -489,9 +489,9 @@ describe('settings navigation', () => {
 
 
 describe('auxiliary-thinking global model and targets', () => {
-  it('defaults to deepseek-official and normalizes global fields and targets', () => {
+  it('defaults to following the enabled route and normalizes global fields and targets', () => {
     const defaults = valuesFromView(undefined)
-    expect(defaults.iotThinkingProvider).toBe('deepseek-official')
+    expect(defaults.iotThinkingProvider).toBe('')
     expect(defaults.iotThinkingModel).toBeUndefined()
     expect(defaults.iotThinkingEffort).toBeUndefined()
     expect(defaults.iotThinkingTargets).toEqual([])
@@ -525,5 +525,21 @@ describe('auxiliary-thinking global model and targets', () => {
     const issue = issues.find(row => row.key === 'iotThinkingTargets')!
     expect(zh[issueMessageKey(issue)]).toContain('{provider}')
     expect(en[issueMessageKey(issue)]).toContain('{provider}')
+  })
+
+  it('blocks an auxiliary model that has no provider to run on', () => {
+    const routeOnly = validateValues({ ...base, iotThinkingModel: 'deepseek-reasoner' })
+    expect(routeOnly).toContainEqual({ key: 'iotThinkingProvider', code: 'routeModelNeedsProvider' })
+    expect(validateValues({ ...base, iotThinkingProvider: 'opendesign', iotThinkingModel: 'deepseek-v4.1-flash' }))
+      .not.toContainEqual({ key: 'iotThinkingProvider', code: 'routeModelNeedsProvider' })
+    // Empty model with no provider is the shipped default, not an error.
+    expect(validateValues({ ...base, iotThinkingProvider: '', iotThinkingModel: undefined }))
+      .not.toContainEqual({ key: 'iotThinkingProvider', code: 'routeModelNeedsProvider' })
+    const targetOnly = validateValues({ ...base, iotThinkingTargets: [{ provider: 'opendesign', rewriteModel: 'k3' }] })
+    expect(targetOnly).toContainEqual({ key: 'iotThinkingTargets', code: 'targetModelNeedsProvider', params: { index: 1 } })
+    expect(validateValues({ ...base, iotThinkingTargets: [{ provider: 'opendesign', rewriteProvider: 'kimi-code', rewriteModel: 'k3' }] }))
+      .not.toContainEqual({ key: 'iotThinkingTargets', code: 'targetModelNeedsProvider', params: { index: 1 } })
+    expect(zh['settings.invalid.routeModelNeedsProvider']).toBeTruthy()
+    expect(en['settings.invalid.targetModelNeedsProvider']).toContain('{index}')
   })
 })
