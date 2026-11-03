@@ -32,9 +32,11 @@ import { buildCompactionPrompt } from './prompt.ts'
 
 /** Live settings the controller acts on; read fresh at every decision point. */
 export interface IoTSettings {
-  /** Master switch of the whole plugin; false disables IoT-Lite regardless of the strategy. */
-  enabled: boolean
-  /** Global auxiliary-thinking strategy; no per-session override exists. */
+  /**
+   * Global auxiliary-thinking strategy; no per-session override exists. The level IS the switch:
+   * `off` disables the feature and any other level enables it. The plugin's review-tools switch is
+   * deliberately absent, so turning the tools off cannot stop this feature (D15).
+   */
   iotThinking: IoTMode
   /** Global auxiliary model settings; unset fields use the enabled route's own provider and model, and low. */
   iotThinkingProvider?: string
@@ -108,9 +110,7 @@ export class IoTController {
    * @returns The effective mode.
    */
   mode(sessionId: string | undefined): IoTMode {
-    const settings = this.deps.settings()
-    if (!settings.enabled) return 'off'
-    return settings.iotThinking
+    return this.deps.settings().iotThinking
   }
 
   /**
@@ -123,17 +123,18 @@ export class IoTController {
   /**
    * The one place eligibility is decided.
    *
-   * All four facts are required, and the last one is what makes the feature safe against itself:
-   * an auxiliary call is a hand-built request with no session id, so it can never satisfy this
-   * check — no recursion, no double counting. The opt-in route is the fifth fact: no matching
+   * Every fact here is required, and the agent-loop marker is what makes the feature safe against
+   * itself: an auxiliary call is a hand-built request with no session id, so it can never satisfy
+   * this check — no recursion, no double counting. The opt-in route is the last fact: no matching
    * target means no work at all, so enabling a provider cannot spend another provider's credential.
+   * The plugin's review-tools switch is NOT one of them: this feature stands on its own level, so
+   * turning the review tools off must not silently stop it (D15).
    * @param options - the request entering the waterfall.
    * @returns The session and strategy, or undefined to delegate untouched.
    */
   private eligible(options: GenerateOptions): EligibleRequest | undefined {
     if (typeof options !== 'object' || options === null) return undefined
     const settings = this.deps.settings()
-    if (!settings.enabled) return undefined
     if (!isAgentLoopRequest(options)) return undefined
     if (options.sessionId === undefined) return undefined
     const sessionId = String(options.sessionId)

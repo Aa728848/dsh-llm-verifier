@@ -2122,6 +2122,16 @@ describe('IoT-Lite through the real hooks', () => {
     expect(chunks).toEqual(mainChunks())
   })
 
+  it('keeps rewriting when only the review tools are switched off', async () => {
+    // The tools switch is not this feature's switch: wiring auxiliary thinking to `enabled` made an
+    // operator who turned the review tools off believe the feature was on while it never ran (D15).
+    const aux: AuxRequest[] = []
+    const { handlers } = assemble({ ...JUDGE, enabled: false, iotThinking: 'compact', iotThinkingTargets: [OFFICIAL] }, { stream: auxStream(aux) })
+    const chunks = await collect(handlers.get('llm/stream')!(mainRequest(), () => streamOf(mainChunks())) as AsyncIterable<unknown>)
+    expect(reasoningOf(chunks)).toBe(COMPACTED)
+    expect(aux).toHaveLength(1)
+  })
+
   it('replaces one finished reasoning block of the DeepSeek main request', async () => {
     const aux: AuxRequest[] = []
     const { handlers } = assemble({ ...JUDGE, iotThinking: 'compact', iotThinkingTargets: [OFFICIAL] }, { stream: auxStream(aux) })

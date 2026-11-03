@@ -1043,17 +1043,16 @@ export function apply(ctx: Context, config: Config = {}): void {
    * Auxiliary thinking: one compaction call per finished reasoning block of an enabled main route.
    *
    * ONE controller per plugin instance, created here — after the settings reader and the selector —
-   * because it owns per-session metrics. Settings are read live through
-   * `current()`, so switching the feature on or changing the level applies to the very next request
-   * without touching this object; a disabled setting is the controller's own closed path, which is why
-   * the wiring below needs no second gate.
+   * because it owns per-session metrics. Settings are read live through `current()`, so switching
+   * the feature on or changing the level applies to the very next request without touching this
+   * object; the level's own `off` is the closed path, which is why the wiring below needs no second
+   * gate. `enabled` is deliberately NOT wired in: that switch governs the review tools only (D15).
    */
   const iot = new IoTController({
     llm: ctx.llm,
     settings: () => {
       const selected = current()
       return {
-        enabled: selected.enabled,
         iotThinking: selected.iotThinking,
         iotThinkingProvider: selected.iotThinkingProvider,
         iotThinkingModel: selected.iotThinkingModel,
