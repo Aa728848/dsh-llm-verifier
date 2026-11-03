@@ -758,11 +758,18 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     </Fragment>
   }
   const renderThinkingRoute = () => {
+    // An empty provider is not a missing value: it is the default, and it means the auxiliary call
+    // inherits the enabled route's own route. Its model list therefore belongs to that route, not to
+    // this panel, so the model picker is locked to the same "follow" value instead of offering a
+    // catalog the auxiliary call may never use.
+    const followRoute = !draft.iotThinkingProvider
     const group = loaded.groups.find(candidate => candidate.id === draft.iotThinkingProvider)
     const models = group?.models ?? []
     const selectedModel = models.find(model => model.id === draft.iotThinkingModel)
     const efforts = selectedModel?.reasoning?.efforts ?? []
-    const summary = draft.iotThinkingProvider + ' · ' + (draft.iotThinkingModel || t['field.reasoningEffort.default']) + ' · ' + (draft.iotThinkingEffort || 'low')
+    const summary = followRoute
+      ? t['field.iotThinkingRoute.followRoute'] + ' · ' + (draft.iotThinkingEffort || 'low')
+      : draft.iotThinkingProvider + ' · ' + (draft.iotThinkingModel || t['field.reasoningEffort.default']) + ' · ' + (draft.iotThinkingEffort || 'low')
     return <details style={auxThinkingCard} data-thinking-route>
       <summary style={{ cursor: 'pointer', listStyle: 'none', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <span style={{ ...fieldTitle, fontSize: 13, fontWeight: 500 }}>{t['field.iotThinkingRoute.title']}</span>
@@ -779,18 +786,19 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
             const effort = model?.reasoning?.efforts.some(option => option.id === 'low') ? 'low' : undefined
             setDraft(current => current ? { ...current, iotThinkingProvider: provider, iotThinkingModel: model?.id, iotThinkingEffort: effort } : current)
           }}>
+            <option value="">{t['field.iotThinkingRoute.followRoute']}</option>
             {!loaded.groups.some(candidate => candidate.id === draft.iotThinkingProvider) && draft.iotThinkingProvider && <option value={draft.iotThinkingProvider}>{draft.iotThinkingProvider}</option>}
             {loaded.groups.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.name} · {candidate.id}</option>)}
           </select>
         </label>
         <label style={judgeField}>
           <span style={judgeFieldLabel}>{t['field.model.title']}</span>
-          <select style={selectStyle} disabled={readOnly} aria-label={t['field.iotThinkingRoute.modelAria']} value={draft.iotThinkingModel ?? ''} onChange={event => {
+          <select style={selectStyle} disabled={readOnly || followRoute} aria-label={t['field.iotThinkingRoute.modelAria']} value={followRoute ? '' : draft.iotThinkingModel ?? ''} onChange={event => {
             const model = models.find(candidate => candidate.id === event.target.value)
             const effort = model?.reasoning?.efforts.some(option => option.id === 'low') ? 'low' : undefined
             setDraft(current => current ? { ...current, iotThinkingModel: event.target.value || undefined, iotThinkingEffort: effort } : current)
           }}>
-            <option value="">{t['field.reasoningEffort.default']}</option>
+            <option value="">{followRoute ? t['field.iotThinkingRoute.followRoute'] : t['field.reasoningEffort.default']}</option>
             {!models.some(model => model.id === draft.iotThinkingModel) && draft.iotThinkingModel && <option value={draft.iotThinkingModel}>{draft.iotThinkingModel}</option>}
             {models.map(model => <option key={model.id} value={model.id}>{model.name} · {model.id}</option>)}
           </select>
@@ -815,6 +823,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
         </div>
         <div style={controlCell}><Button variant="outline" disabled={readOnly || loaded.groups.length === 0} onClick={addThinkingTarget}>{t['field.iotThinkingTargets.add']}</Button></div>
       </div>
+      {draft.iotThinking !== 'off' && draft.iotThinkingTargets.length === 0 && <p data-thinking-empty-hint style={{ ...fullLine, margin: '0 0 12px', color: 'var(--dsw-alias-state-warn-label)' }}>{t['field.iotThinkingTargets.empty']}</p>}
       {issue && <p style={{ ...fullLine, color: 'var(--dsw-alias-state-error-primary)' }}>{issueText(issue)}</p>}
       {draft.iotThinkingTargets.map((target, idx) => {
         const mainGroup = loaded.groups.find(group => group.id === target.provider)
@@ -830,7 +839,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
           </div>
           <div style={judgeGrid}>
             <label style={judgeField}>
-              <span style={judgeFieldLabel}>{t['field.iotThinkingTargets.mainProviderAria']}</span>
+              <span style={judgeFieldLabel}>{tFormat(t['field.iotThinkingTargets.mainProviderAria'], { index: idx + 1 })}</span>
               <select style={selectStyle} disabled={readOnly} aria-label={tFormat(t['field.iotThinkingTargets.mainProviderAria'], { index: idx + 1 })} value={target.provider} onChange={event => updateThinkingTarget(idx, { provider: event.target.value, model: undefined })}>
                 {!loaded.groups.some(group => group.id === target.provider) && target.provider && <option value={target.provider}>{target.provider}</option>}
                 {loaded.groups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.id}</option>)}
@@ -844,8 +853,12 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
                 {mainModels.map(model => <option key={model.id} value={model.id}>{model.name} · {model.id}</option>)}
               </select>
             </label>
+          </div>
+          {/* The three overrides are one decision set, so they share one row: wrapping them into
+              the auto-fit grid made the third select look like a separate, optional step. */}
+          <div style={auxThinkingGrid}>
             <label style={judgeField}>
-              <span style={judgeFieldLabel}>{t['field.iotThinkingTargets.rewriteProviderAria']}</span>
+              <span style={judgeFieldLabel}>{tFormat(t['field.iotThinkingTargets.rewriteProviderAria'], { index: idx + 1 })}</span>
               <select style={selectStyle} disabled={readOnly} aria-label={tFormat(t['field.iotThinkingTargets.rewriteProviderAria'], { index: idx + 1 })} value={target.rewriteProvider ?? ''} onChange={event => {
                 const provider = event.target.value || undefined
                 const group = loaded.groups.find(candidate => candidate.id === provider)
@@ -858,7 +871,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
               </select>
             </label>
             <label style={judgeField}>
-              <span style={judgeFieldLabel}>{t['field.iotThinkingTargets.rewriteModelAria']}</span>
+              <span style={judgeFieldLabel}>{tFormat(t['field.iotThinkingTargets.rewriteModelAria'], { index: idx + 1 })}</span>
               <select style={selectStyle} disabled={readOnly} aria-label={tFormat(t['field.iotThinkingTargets.rewriteModelAria'], { index: idx + 1 })} value={target.rewriteModel ?? ''} onChange={event => updateThinkingTarget(idx, { rewriteModel: event.target.value || undefined, rewriteEffort: undefined })}>
                 <option value="">{t['field.iotThinkingTargets.followGlobal']}</option>
                 {!rewriteModels.some(model => model.id === target.rewriteModel) && target.rewriteModel && <option value={target.rewriteModel}>{target.rewriteModel}</option>}
@@ -866,7 +879,7 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
               </select>
             </label>
             <label style={judgeField}>
-              <span style={judgeFieldLabel}>{t['field.iotThinkingTargets.rewriteEffortAria']}</span>
+              <span style={judgeFieldLabel}>{tFormat(t['field.iotThinkingTargets.rewriteEffortAria'], { index: idx + 1 })}</span>
               <select style={selectStyle} disabled={readOnly} aria-label={tFormat(t['field.iotThinkingTargets.rewriteEffortAria'], { index: idx + 1 })} value={target.rewriteEffort ?? ''} onChange={event => updateThinkingTarget(idx, { rewriteEffort: event.target.value || undefined })}>
                 <option value="">{t['field.iotThinkingTargets.followGlobal']}</option>
                 {efforts.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}

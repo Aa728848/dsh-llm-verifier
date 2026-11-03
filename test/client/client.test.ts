@@ -1147,12 +1147,26 @@ describe('auxiliary-thinking global model and target editors', () => {
     expect(source).toContain('data-thinking-target-index={idx}')
     expect(source).toContain('addThinkingTarget')
     expect(source).toContain('removeThinkingTarget(idx)')
-    for (const suffix of ['title', 'help', 'add', 'remove', 'itemTitle', 'mainProviderAria', 'mainModelAria', 'rewriteProviderAria', 'rewriteModelAria', 'rewriteEffortAria', 'duplicate', 'allModels', 'followGlobal']) {
+    for (const suffix of ['title', 'help', 'add', 'remove', 'itemTitle', 'mainProviderAria', 'mainModelAria', 'rewriteProviderAria', 'rewriteModelAria', 'rewriteEffortAria', 'duplicate', 'allModels', 'followGlobal', 'empty']) {
       expect(zh[('field.iotThinkingTargets.' + suffix) as keyof typeof zh], suffix).toBeTruthy()
       expect(en[('field.iotThinkingTargets.' + suffix) as keyof typeof en], suffix).toBeTruthy()
     }
+    expect(source).toContain("t['field.iotThinkingRoute.followRoute']")
+    // Every visible route label carries the index, so a raw key would render a literal "{index}".
+    for (const key of ['mainProviderAria', 'rewriteProviderAria', 'rewriteModelAria', 'rewriteEffortAria']) {
+      expect(source).not.toContain("{t['field.iotThinkingTargets." + key + "']}</span>")
+    }
+    // The three overrides are one decision set: they share one row instead of the auto-fit grid.
+    expect(source.split('style={auxThinkingGrid}').length - 1).toBe(2)
+    expect(source).toContain('data-thinking-empty-hint')
+    expect(source).toContain("draft.iotThinkingTargets.length === 0")
     expect(zh['field.iotThinkingRoute.title']).toBe('辅助思考模型')
     expect(en['field.iotThinkingRoute.title']).toBe('Auxiliary-thinking model')
+    expect(zh['field.iotThinkingRoute.followRoute']).toBe('跟随生效线路')
+    expect(en['field.iotThinkingRoute.followRoute']).toBe('Follow the enabled route')
+    // The empty-route hint is the only place the UI says "on but doing nothing".
+    expect(zh['field.iotThinkingTargets.empty']).toContain('没有生效线路')
+    expect(en['field.iotThinkingTargets.empty']).toContain('No enabled route')
     expect(zh['field.iotThinking.title']).toBe('辅助思考')
     expect(en['field.iotThinking.title']).toBe('Auxiliary Thinking')
   })
