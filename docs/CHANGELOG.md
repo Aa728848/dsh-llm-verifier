@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+## 0.15.0 - 2026-11-03
 - **[DSH 0.2.1-rc.4 / rc.5 / 0.2.2-alpha.2 / alpha.3] 对齐最新宿主功能线**
   - `engines.dsh` 与 8 条 DSH peer 补齐四条发布线，开发门禁精确锁定 `0.2.2-alpha.3`，Cordis 锁定 `4.0.6-alpha.2` 并扩展 peer；pnpm 发布年龄豁免同步更新
   - `verifier_best_of_n` 优先通过 `agent.model.current()` 读取当前模型，旧宿主回退到最近请求头；设置读取优先采用 Cordis 已解析的 `fiber.effectiveConfig`
