@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.12.0 - 2026-11-03
 - **[文档] 记录 DeepSeek 思考重写旁路（D15）**
   - 新增 ADR D15：独立可选模块、默认关闭、只作用于 `deepseek-official` 主循环、`compact` / `balanced` / `full` 三档固定强度；每块一次低投入辅助调用（不携带主会话 `sessionId`、不挂工具、60 秒超时），失败即原样回放原始流
   - 全局设置经既有设置系统持久化；已删除 `/iot` 及会话覆盖。全局辅助模型默认 `deepseek-official + 主模型 low`，`iotThinkingTargets` 支持增加其他主供应商/模型并逐条覆盖辅助供应商、模型和推理档位；指标是进程内内存态，重载即重置
