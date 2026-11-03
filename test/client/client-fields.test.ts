@@ -377,9 +377,10 @@ describe('settings defaults and profiles', () => {
     const changed = { ...base, autoVerifyThreshold: 0.8 }
     expect(isFieldChanged(threshold, changed)).toBe(true)
     expect(resetField(changed, 'autoVerifyThreshold').autoVerifyThreshold).toBe(CONFIG_DEFAULTS.autoVerifyThreshold)
-    // identity fields have no meaningful default and must not offer a reset
+    // The combined native model picker has no meaningful default and must not offer a reset.
+    expect(field('provider').kind).toBe('model')
     expect(isFieldChanged(field('provider'), { ...base, provider: 'other' })).toBe(false)
-    expect(isFieldChanged(field('model'), { ...base, model: 'other' })).toBe(false)
+    expect(FIELDS.some(entry => entry.key === 'model' || entry.key === 'reasoningEffort')).toBe(false)
     expect(isFieldChanged(field('extraJudges'), base)).toBe(false)
   })
 

@@ -4,9 +4,11 @@
 
 ## 1. 本插件消费的宿主面
 
-宿主包：`@deepseek-ai/cordis`、`dsh-tools`、`dsh-agent`、`dsh-session`、`dsh-llm`、`dsh-attachment`、`dsh-settings`、`dsh-credentials`、`dsh-api-remotes`、`dsh-client-connection`、`dsh-client-ui-renderer`、`dsh-client-ui-slots`、`dsh-client-ui-settings`、`dsh-client-ui-conversation`、`dsh-client-ui-primitives`、`dsh-client-locale`。
+宿主包：`@deepseek-ai/cordis`、`dsh-tools`、`dsh-agent`、`dsh-session`、`dsh-llm`、`dsh-attachment`、`dsh-settings`、`dsh-credentials`、`dsh-api-remotes`、`dsh-client-connection`、`dsh-client-ui-renderer`、`dsh-client-ui-slots`、`dsh-client-ui-settings`、`dsh-client-ui-conversation`、`dsh-client-ui-primitives`、`dsh-client-ui-model-selection`、`dsh-client-locale`。
 
 宿主**服务名**（`ctx.get()` / `ctx.inject()` 读取，类型系统看不见，改名就是静默失效）：`agents`、`llm`、`settings`、`credentials`、`jobs`、`workspaceChanges`、`connection`、`sidebarRightTabs`、`slots`、`remote` / `remote.session`。
+
+设置页优先通过 `window.__DSH_CLAUDE_STYLE_CONTROLS__` 通用控件注册表挂载 `dsh-claude-style` 的 `model-picker`；未安装或版本较旧时复用 `dsh-client-ui-model-selection` 注册的 `ModelSelect`。原生组件未从包入口导出，唯一借用点是 `client-native-model.ts` 的注册捕获；两种宿主选择器都不可用时显示旧的三项控件。模型目录读取与设置读取彼此独立，目录慢或失败不得阻塞设置页首屏。
 
 宿主**事件**（`ctx.on()`）：`agent/pre-step`、`agent/turn-stopping`、`agent/disposed`、`tools/pre-execute`、`llm/stream`。
 
