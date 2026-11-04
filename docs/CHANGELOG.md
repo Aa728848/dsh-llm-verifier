@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- **[DSH 0.2.2-rc.1 / Cordis 4.1.0 / 本机 master] 对齐最新宿主候选正式线与具名子代理协议**
+  - `engines.dsh` 与 8 条 DSH peer 同步追加 `|| ^0.2.2-rc.1`，`@deepseek-ai/cordis` peer 追加 `|| ^4.1.0`；开发依赖精确锁定 `0.2.2-rc.1` 与 `4.1.0`，pnpm 发布年龄豁免同步更新
+  - 原生模型选择器子插槽适配 `renderNativeModelSlot()` 支持省略 `options` 的列表插槽调用（`conversation.input.model.options`），修复在最新宿主点开主裁判选择器时的空引用异常
+  - 子代理委托工具统一通过 `isSubagentDelegationTool()` 识别 `subagent` 与各实例变体（`subagent_fork`、`subagent_oar`、`subagent_*`）；`wait_agent` 与 `team_task_*` 纳入记账/被动工具表，避免挤占检查点真实工作证据
+  - `hasPendingSubagents()` 结合父会话 `subagent/catalog` 的 `childId -> name` 映射与结算通知主语精确核销在途子任务，避免前缀重叠名字误删或无关兄弟通知驱逐活跃子任务；`interrupt_agent` 统一兼容新版 `{ agent }` 与旧版 `{ target }` / `{ agent_id }` 且仅在未失败时核销
 
 ## 0.15.0 - 2026-11-03
 - **[DSH 0.2.1-rc.4 / rc.5 / 0.2.2-alpha.2 / alpha.3] 对齐最新宿主功能线**

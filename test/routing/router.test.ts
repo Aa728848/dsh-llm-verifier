@@ -302,18 +302,21 @@ describe('production structured routing', () => {
     tool(value, 'job_list', 'jobs', '(no background jobs)')
     tool(value, 'job_kill', 'kill', 'requested cancellation of job job-1')
     tool(value, 'send_message', 'send', '{"messageId":"m1"}')
+    tool(value, 'wait_agent', 'wait', '{"timedOut":false}')
+    tool(value, 'team_task_update', 'board', '{"task":{"id":"1","status":"completed"}}')
     tool(value, 'list_subagent_models', 'models', 'antigravity/gemini-3.8-flash — Gemini 3.8 Flash')
     // A previous verdict is not observed work output either: grading progress from it
     // would be the judge grading itself.
     tool(value, 'verifier_current_session', 'verdict', '{"winner":"A","score":1,"baselineScore":0,"threshold":0.65}')
     tool(value, 'subagent', 'child', 'started subagent 042f004d-fe19-4ccb-8b98-f08a00b32e87')
+    tool(value, 'subagent_oar', 'child-oar', 'started subagent reviewer')
     value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
     const decision = analyzeStructuredRoute(value.snapshotEvents(), 8, 20000, 60000)
     expect(decision?.kind).toBe('track')
     if (decision?.kind !== 'track') return
     const step = decision.steps[1]!
     expect(evidenceBlock(step)).toContain('309 passed')
-    for (const marker of ['(no background jobs)', 'requested cancellation', 'messageId', 'Gemini 3.8 Flash', '"baselineScore"', 'started subagent']) {
+    for (const marker of ['(no background jobs)', 'requested cancellation', 'messageId', 'timedOut', '"status":"completed"', 'Gemini 3.8 Flash', '"baselineScore"', 'started subagent']) {
       expect(evidenceBlock(step), marker).not.toContain(marker)
     }
     // The digest still shows them as one-line context — that tail is what the judge has
@@ -603,6 +606,8 @@ describe('semantic evidence references', () => {
   it('hints a classification only for material the structured pass never consumes', () => {
     const subagent = session(); tool(subagent, 'subagent', 'a', 'candidate A')
     expect(semanticRouteHint(subagent.snapshotEvents())).toBe(true)
+    const oarSubagent = session(); tool(oarSubagent, 'subagent_oar', 'b', 'candidate B')
+    expect(semanticRouteHint(oarSubagent.snapshotEvents())).toBe(true)
     const plan = session()
     plan.append('tool/call', { turn: 1, step: 1, callId: 'plan' as never, name: 'exit_plan_mode', arguments: '{}' })
     plan.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'plan' as never, content: [{ type: 'text', text: 'approved' }], isError: false }) }, { surfaceOp: 'append' })

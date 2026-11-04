@@ -6,6 +6,7 @@ import {
   type JudgeModelSelection,
   type ModelCatalogFailureView,
   type ModelProviderGroupView,
+  renderNativeModelSlot,
   resolveModelBadgeText,
 } from '../model/client-native-model.ts'
 import { dictionaries, tFormat } from '../model/client-i18n.ts'
@@ -108,7 +109,7 @@ export function HostModelSelect(props: HostModelSelectProps) {
     select={select}
     resolveText={(text: Parameters<typeof resolveModelBadgeText>[0]) => resolveModelBadgeText(text, lang)}
     t={translate}
-    renderSlot={(_name: string, _owner: unknown, options: { fallback?: React.ReactNode }) => options.fallback ?? null}
+    renderSlot={renderNativeModelSlot}
   />
 }
 

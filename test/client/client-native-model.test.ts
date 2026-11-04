@@ -1,7 +1,9 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import {
   captureNativeModelSelect,
   createModelDirectory,
+  renderNativeModelSlot,
   resolveModelBadgeText,
   type ModelDirectorySnapshot,
 } from '../../src/client/model/client-native-model.ts'
@@ -63,5 +65,14 @@ describe('native model directory adapter', () => {
   it('fails soft when the host has no compatible registration', () => {
     expect(captureNativeModelSelect({}).component).toBeUndefined()
     expect(captureNativeModelSelect({ apply: () => { throw new Error('old host') } }).component).toBeUndefined()
+  })
+
+  it('handles NativeModelSelect child slots with or without an options bag', () => {
+    // Newer ModelSelect renders `conversation.input.model.options` as a list slot and omits the 3rd parameter.
+    expect(renderNativeModelSlot('conversation.input.model.options', { locked: false })).toBeNull()
+    expect(renderNativeModelSlot('conversation.input.model.badge', {}, {})).toBeNull()
+    expect(renderNativeModelSlot('conversation.input.model.badge', {}, { fallback: 'badge' })).toBe('badge')
+    const hostSelectSource = readFileSync(new URL('../../src/client/view/host-model-select.tsx', import.meta.url), 'utf8')
+    expect(hostSelectSource).toContain('renderSlot={renderNativeModelSlot}')
   })
 })

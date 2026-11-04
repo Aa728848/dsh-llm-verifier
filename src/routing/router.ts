@@ -342,18 +342,22 @@ function canonicalTodoSnapshots(index: EvidenceIndex): Array<{ seq: number; todo
 /** Tools whose output only repeats the snapshot a checkpoint already renders, so showing them
  * would displace the real work output just before them (D7). */
 const BOOKKEEPING_TOOLS = new Set([
-  'todo_write', 'create_goal', 'get_goal', 'update_goal', 'interrupt_agent', 'list_agents', 'exit_plan_mode', 'skill', 'present',
-  'job_list', 'job_kill', 'list_subagent_models', 'send_message',
+  'todo_write', 'create_goal', 'get_goal', 'update_goal', 'interrupt_agent', 'list_agents', 'wait_agent',
+  'exit_plan_mode', 'skill', 'present', 'job_list', 'job_kill', 'list_subagent_models', 'send_message',
+  'team_task_create', 'team_task_update', 'team_task_list', 'team_task_get',
 ])
 
 /** Our own verdict tools stay in the index so an explicit review is not re-run automatically, but
  * are never rendered as work output: a judge grading progress from an earlier verdict grades itself. */
 const VERIFIER_EVIDENCE_TOOLS = new Set(['verifier_compare', 'verifier_select', 'verifier_track', 'verifier_best_of_n', 'verifier_current_session'])
 
-const SUBAGENT_TOOLS = new Set(['subagent', 'subagent_fork'])
+/** Matches `subagent` and configured provider instances (`subagent_fork`, `subagent_oar`, `subagent_codex`, ...). */
+export function isSubagentDelegationTool(name: string): boolean {
+  return name === 'subagent' || name.startsWith('subagent_')
+}
 
-/** subagent/subagent_fork cannot be excluded by name: a background call returns only
- * `started subagent <id>`, which hides the child's report while looking like the newest observation. */
+/** Delegation tools cannot be excluded by name: a background call returns only
+ * `started subagent <name>`, which hides the child's report while looking like the newest observation. */
 const CHILD_START_ACKNOWLEDGEMENT = /^started (?:background )?subagent\b/u
 
 /** The single definition of "this result is observed work" (D7). */
@@ -361,7 +365,7 @@ function isEvidenceOutput(name: string, text: string): boolean {
   if (BOOKKEEPING_TOOLS.has(name) || VERIFIER_EVIDENCE_TOOLS.has(name)) return false
   const body = text.trim()
   if (!body) return false
-  return !(SUBAGENT_TOOLS.has(name) && CHILD_START_ACKNOWLEDGEMENT.test(body))
+  return !(isSubagentDelegationTool(name) && CHILD_START_ACKNOWLEDGEMENT.test(body))
 }
 
 const VERIFICATION_PASS_SIGNATURES: readonly RegExp[] = [
@@ -648,12 +652,12 @@ export function analyzeStructuredRoute(events: readonly SessionEvent[], maxCandi
   return undefined
 }
 
-const HINT_ARTIFACTS = new Set(['subagent', 'subagent_fork', 'workflow', 'exit_plan_mode'])
+const HINT_ARTIFACTS = new Set(['workflow', 'exit_plan_mode'])
 
 export function semanticRouteHint(events: readonly SessionEvent[]): boolean {
   const index = buildEvidenceIndex(events)
   if (!index) return false
-  for (const pair of index.calls.values()) if (HINT_ARTIFACTS.has(pair.name)) return true
+  for (const pair of index.calls.values()) if (HINT_ARTIFACTS.has(pair.name) || isSubagentDelegationTool(pair.name)) return true
   return false
 }
 

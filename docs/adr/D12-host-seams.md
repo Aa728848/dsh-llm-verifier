@@ -18,7 +18,9 @@
 | 已解析设置 `fiber.effectiveConfig` 与旧 `fiber.config` | `config/config.ts` 的 `installVerifierSettings()` |
 | 图标导出名(尺寸后缀 → 笔画后缀) | `client/view/client.tsx` 顶部按名探测 |
 | `dsh-claude-style` 的可选外部选择器、DSH 原生选择器与旧控件 | `client/view/host-model-select.tsx` 按能力探测,共用同一受控目录 |
-| DSH 原生模型选择器未从包入口导出,旧宿主又可能缺少其注册形态 | `client/model/client-native-model.ts` 的 `captureNativeModelSelect()`;失败时退回旧控件 |
+| DSH 原生模型选择器未从包入口导出,旧宿主又可能缺少其注册形态;新列表子插槽省略 `options` | `client/model/client-native-model.ts` 的 `captureNativeModelSelect()` / `renderNativeModelSlot()`;失败时退回旧控件 |
+| 子代理委托工具实例名(`subagent` / `subagent_fork` / `subagent_oar` / `subagent_*`) | `routing/router.ts` 的 `isSubagentDelegationTool()` |
+| 具名子代理结算(`subagent/catalog` 映射与通知主语)及 `interrupt_agent` 参数(`agent` / `target` / `agent_id`) | `routing/auto.ts` 的 `hasPendingSubagents()` / `interruptAgentTarget()` |
 
 ## 后果
 

@@ -1,7 +1,7 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 // Shared with the router so both agree on what opens a task; imported (type-only in the
 // other direction) rather than duplicated, because a drift here silently disables gating.
-import { inspectDeliveryPhase, latestDirectUserSeq } from './router.ts'
+import { inspectDeliveryPhase, isSubagentDelegationTool, latestDirectUserSeq } from './router.ts'
 import { renderDiagnostics, type Diagnostic, type ReviewStage } from '../scoring/core.ts'
 import { sanitizeVerifierText, toolResultFailed } from '../transcript/session.ts'
 
@@ -41,9 +41,9 @@ export interface AutoTaskEvidence {
 
 const PASSIVE_TOOLS = new Set([
   'read', 'read_image', 'glob', 'grep', 'web_search', 'web_fetch', 'ssh_list', 'job_list',
-  'job_output', 'list_agents', 'list_subagent_models', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource',
+  'job_output', 'list_agents', 'wait_agent', 'list_subagent_models', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource',
   'get_goal', 'skill', 'mcp__codegraph__codegraph_explore', 'ask_user_question',
-  'todo_write', 'present', 'run_code',
+  'todo_write', 'team_task_list', 'team_task_get', 'present', 'run_code',
 ])
 const VERIFIER_TOOLS = new Set([
   'verifier_compare', 'verifier_select', 'verifier_track', 'verifier_best_of_n', 'verifier_current_session',
@@ -153,10 +153,22 @@ function isSuccessfulCodeDispatch(data: CodeDispatchData): boolean {
   return true
 }
 
-const SUBAGENT_TOOLS = new Set(['subagent', 'subagent_fork'])
 const CONTINUABLE_SUBAGENT_START = /^\s*started subagent\s+([^\s`]+)/imu
 const BACKGROUND_SUBAGENT_JOB_START = /^\s*started background subagent job\s+([^\s`]+)/imu
 const GENERAL_SUBAGENT_START = /^\s*started (?:background )?subagent\b/imu
+// Current hosts address children by `<name>` in start/settlement text while `senderSessionId` stays
+// the child SessionId; anchoring on the fixed status verbs avoids matching anonymous `... finished`.
+const SETTLED_SUBAGENT_SUBJECT = /^\s*Background subagent\s+`?([^\s`]+)`?\s+(?:finished\b|was\s+stopped\b|ran\s+out\b|declined\b|failed\b|ended\b)/imu
+
+/** Normalized target of `interrupt_agent` across current (`agent`) and legacy (`target` / `agent_id`) hosts (D12). */
+export function interruptAgentTarget(rawArgs: unknown): string {
+  const parsed = parseArgumentsObject(rawArgs)
+  for (const key of ['agent', 'target', 'agent_id'] as const) {
+    const value = parsed[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return ''
+}
 
 /**
  * Whether background subagents started during the current task remain in flight.
@@ -171,41 +183,68 @@ const GENERAL_SUBAGENT_START = /^\s*started (?:background )?subagent\b/imu
  * @returns True when at least one background subagent remains unsettled.
  */
 export function hasPendingSubagents(events: readonly SessionEvent[], taskStartSeq: number): boolean {
+  const catalogNameById = new Map<string, string>()
+  for (const event of events) {
+    if ((event.type as string) !== 'subagent/catalog') continue
+    const data = (event as unknown as { data?: { childId?: unknown; name?: unknown } }).data
+    if (typeof data?.childId === 'string' && data.childId && typeof data.name === 'string' && data.name) {
+      catalogNameById.set(data.childId, data.name)
+    }
+  }
+
   const relevant = events.filter(event => event.seq >= taskStartSeq)
   const pendingContinuable = new Map<string, number>()
+  const knownContinuable = new Set<string>()
   const pendingJobs = new Map<string, number>()
   let anonymousPendingCount = 0
 
   const calls = new Map<string, SessionEvent<'tool/call'>>()
+  const failedCalls = new Set<string>()
   for (const event of relevant) {
-    if (event.type === 'tool/call') calls.set(String(event.data.callId), event)
+    if (event.type === 'tool/call') {
+      calls.set(String(event.data.callId), event)
+    } else if (event.type === 'tool/result') {
+      if (event.data.error !== undefined || toolResultFailed(event.data.message)) {
+        failedCalls.add(String(event.data.message.source.callId))
+      }
+    }
+  }
+
+  const recordContinuable = (idOrName: string, seq: number) => {
+    pendingContinuable.set(idOrName, seq)
+    knownContinuable.add(idOrName)
+  }
+  const clearContinuable = (target: string) => {
+    if (!target) return
+    if (pendingContinuable.delete(target)) return
+    const mappedName = catalogNameById.get(target)
+    if (mappedName) pendingContinuable.delete(mappedName)
   }
 
   for (const event of relevant) {
     if (event.type === 'tool/result') {
-      const call = calls.get(String(event.data.message.source.callId))
-      if (call && SUBAGENT_TOOLS.has(call.data.name) && event.data.error === undefined) {
-        if (!toolResultFailed(event.data.message)) {
-          const text = blockText(event.data.message.content)
-          const contMatch = text.match(CONTINUABLE_SUBAGENT_START)
-          const jobMatch = text.match(BACKGROUND_SUBAGENT_JOB_START)
-          if (contMatch) {
-            pendingContinuable.set(contMatch[1]!, event.seq)
-          } else if (jobMatch) {
-            pendingJobs.set(jobMatch[1]!, event.seq)
-          } else if (GENERAL_SUBAGENT_START.test(text)) {
-            anonymousPendingCount += 1
-          }
+      const callId = String(event.data.message.source.callId)
+      const call = calls.get(callId)
+      if (call && isSubagentDelegationTool(call.data.name) && !failedCalls.has(callId)) {
+        const text = blockText(event.data.message.content)
+        const contMatch = text.match(CONTINUABLE_SUBAGENT_START)
+        const jobMatch = text.match(BACKGROUND_SUBAGENT_JOB_START)
+        if (contMatch) {
+          recordContinuable(contMatch[1]!, event.seq)
+        } else if (jobMatch) {
+          pendingJobs.set(jobMatch[1]!, event.seq)
+        } else if (GENERAL_SUBAGENT_START.test(text)) {
+          anonymousPendingCount += 1
         }
       }
     } else if (CODE_DISPATCH_TYPES.has(event.type as string)) {
       const data = (event as unknown as { data: CodeDispatchData }).data
-      if (data && SUBAGENT_TOOLS.has(data.name) && isSuccessfulCodeDispatch(data)) {
+      if (data && isSubagentDelegationTool(data.name) && isSuccessfulCodeDispatch(data)) {
         const text = blockText(data.content)
         const contMatch = text.match(CONTINUABLE_SUBAGENT_START)
         const jobMatch = text.match(BACKGROUND_SUBAGENT_JOB_START)
         if (contMatch) {
-          pendingContinuable.set(contMatch[1]!, event.seq)
+          recordContinuable(contMatch[1]!, event.seq)
         } else if (jobMatch) {
           pendingJobs.set(jobMatch[1]!, event.seq)
         } else if (GENERAL_SUBAGENT_START.test(text)) {
@@ -215,13 +254,28 @@ export function hasPendingSubagents(events: readonly SessionEvent[], taskStartSe
     }
 
     if (event.type === 'user/message') {
-      const source = (event as unknown as { data?: { source?: { kind?: unknown; senderSessionId?: unknown; plugin?: unknown }; content?: unknown } }).data?.source
+      const source = (event as unknown as { data?: { source?: { kind?: unknown; senderSessionId?: unknown; summary?: unknown; plugin?: unknown }; content?: unknown } }).data?.source
       const text = blockText((event as unknown as { data?: { content?: unknown } }).data?.content)
 
       if (source?.kind === 'subagent-settled') {
-        const senderId = typeof source.senderSessionId === 'string' ? source.senderSessionId : undefined
-        if (senderId && pendingContinuable.has(senderId)) {
-          pendingContinuable.delete(senderId)
+        const senderId = typeof source.senderSessionId === 'string' && source.senderSessionId ? source.senderSessionId : undefined
+        const catalogName = senderId ? catalogNameById.get(senderId) : undefined
+        const summary = typeof source.summary === 'string' ? source.summary : ''
+        const settledSubject = summary.match(SETTLED_SUBAGENT_SUBJECT)?.[1] ?? text.match(SETTLED_SUBAGENT_SUBJECT)?.[1]
+
+        if (senderId && pendingContinuable.delete(senderId)) {
+          // Settled by exact legacy child SessionId.
+        } else if (catalogName && pendingContinuable.delete(catalogName)) {
+          // Settled by parent `subagent/catalog` childId -> name mapping.
+        } else if (settledSubject && pendingContinuable.delete(settledSubject)) {
+          // Settled by exact child subject in the runtime settlement notice.
+        } else if (
+          catalogName !== undefined
+          || settledSubject !== undefined
+          || (senderId !== undefined && knownContinuable.has(senderId))
+        ) {
+          // Notice names a specific child that was already interrupted or started before this task;
+          // never fall back to substring/oldest deletion, which would drop an active sibling.
         } else {
           let found = false
           for (const [id] of pendingContinuable) {
@@ -250,37 +304,21 @@ export function hasPendingSubagents(events: readonly SessionEvent[], taskStartSe
       }
     }
 
-    if (event.type === 'tool/call') {
+    if (event.type === 'tool/call' && !failedCalls.has(String(event.data.callId))) {
       const name = event.data.name
-      const argsText = event.data.arguments
-      let parsedArgs: Record<string, unknown> = {}
-      if (typeof argsText === 'string') {
-        try { parsedArgs = JSON.parse(argsText) } catch {}
-      } else if (typeof argsText === 'object' && argsText !== null) {
-        parsedArgs = argsText as Record<string, unknown>
-      }
       if (name === 'interrupt_agent') {
-        const target = String(parsedArgs.target ?? parsedArgs.agent_id ?? '')
-        if (target && pendingContinuable.has(target)) pendingContinuable.delete(target)
+        clearContinuable(interruptAgentTarget(event.data.arguments))
       } else if (name === 'job_kill') {
-        const jobId = String(parsedArgs.job_id ?? '')
+        const jobId = String(parseArgumentsObject(event.data.arguments).job_id ?? '')
         if (jobId && pendingJobs.has(jobId)) pendingJobs.delete(jobId)
       }
     } else if (CODE_DISPATCH_TYPES.has(event.type as string)) {
       const data = (event as unknown as { data: CodeDispatchData }).data
-      if (data) {
-        const name = data.name
-        let parsedArgs: Record<string, unknown> = {}
-        if (typeof data.arguments === 'string') {
-          try { parsedArgs = JSON.parse(data.arguments) } catch {}
-        } else if (typeof data.arguments === 'object' && data.arguments !== null) {
-          parsedArgs = data.arguments as Record<string, unknown>
-        }
-        if (name === 'interrupt_agent') {
-          const target = String(parsedArgs.target ?? parsedArgs.agent_id ?? '')
-          if (target && pendingContinuable.has(target)) pendingContinuable.delete(target)
-        } else if (name === 'job_kill') {
-          const jobId = String(parsedArgs.job_id ?? '')
+      if (data && isSuccessfulCodeDispatch(data)) {
+        if (data.name === 'interrupt_agent') {
+          clearContinuable(interruptAgentTarget(data.arguments))
+        } else if (data.name === 'job_kill') {
+          const jobId = String(parseArgumentsObject(data.arguments).job_id ?? '')
           if (jobId && pendingJobs.has(jobId)) pendingJobs.delete(jobId)
         }
       }

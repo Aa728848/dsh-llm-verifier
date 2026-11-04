@@ -1,4 +1,4 @@
-import type { ComponentType } from 'react'
+import type { ComponentType, ReactNode } from 'react'
 
 export interface JudgeModelSelection {
   provider: string
@@ -11,6 +11,15 @@ export type ModelBadgeText = string | ({ en: string } & Record<string, string>)
 /** Resolve provider-authored badge text for the settings page's two supported locales. */
 export function resolveModelBadgeText(text: ModelBadgeText, lang: 'zh' | 'en'): string {
   return typeof text === 'string' ? text : text[lang] ?? text.en
+}
+
+/** Child-slot shim for DSH's ModelSelect; list slots (`conversation.input.model.options`) omit `options` (D12). */
+export function renderNativeModelSlot(
+  _name: string,
+  _owner: unknown,
+  options?: { fallback?: ReactNode },
+): ReactNode {
+  return options?.fallback ?? null
 }
 
 export interface ModelProviderGroupView {

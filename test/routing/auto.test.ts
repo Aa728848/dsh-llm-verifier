@@ -361,6 +361,64 @@ describe('automatic verification policy', () => {
     expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(false)
   })
 
+  it('clears named subagents on interrupt_agent({ agent }) only when the call did not fail', () => {
+    const session = taskSession()
+    call(session, 'read', 'r1')
+    call(session, 'edit', 'e1')
+    session.append('tool/call', { turn: 1, step: 1, callId: 'sub-oar' as never, name: 'subagent_oar', arguments: '{}' })
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'sub-oar' as never, content: [{ type: 'text', text: 'started subagent worker-1' }], isError: false }) }, { surfaceOp: 'append' })
+
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(true)
+
+    // A rejected interrupt_agent call must not clear the still-running child.
+    session.append('tool/call', { turn: 1, step: 2, callId: 'intr-fail' as never, name: 'interrupt_agent', arguments: JSON.stringify({ agent: 'worker-1' }) })
+    session.append('tool/result', { turn: 1, step: 2, message: createToolResultMessage({ callId: 'intr-fail' as never, content: [{ type: 'text', text: 'unknown agent' }], isError: true }) }, { surfaceOp: 'append' })
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(true)
+
+    // Current hosts pass `{ agent: "<name>" }` instead of `{ target }` / `{ agent_id }`.
+    session.append('tool/call', { turn: 1, step: 3, callId: 'intr-ok' as never, name: 'interrupt_agent', arguments: JSON.stringify({ agent: 'worker-1' }) })
+    session.append('tool/result', { turn: 1, step: 3, message: createToolResultMessage({ callId: 'intr-ok' as never, content: [{ type: 'text', text: 'interrupt requested for agent worker-1' }], isError: false }) }, { surfaceOp: 'append' })
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(false)
+  })
+
+  it('settles named subagents via subagent/catalog without prefix collisions or unrelated sibling notices', () => {
+    const session = taskSession()
+    call(session, 'read', 'r1')
+    call(session, 'edit', 'e1')
+
+    // Start two prefix-overlapping named subagents (`reviewer` and `reviewer-extra`).
+    session.append('subagent/catalog' as never, { version: 3, childId: 'sess-short', childCreatedAt: 1, mode: 'continuable', label: 'Review core', name: 'reviewer' } as never)
+    session.append('tool/call', { turn: 1, step: 1, callId: 'sub-short' as never, name: 'subagent', arguments: '{"name":"reviewer"}' })
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'sub-short' as never, content: [{ type: 'text', text: 'started subagent reviewer' }], isError: false }) }, { surfaceOp: 'append' })
+
+    session.append('subagent/catalog' as never, { version: 3, childId: 'sess-long', childCreatedAt: 2, mode: 'continuable', label: 'Review extra', name: 'reviewer-extra' } as never)
+    session.append('tool/call', { turn: 1, step: 1, callId: 'sub-long' as never, name: 'subagent_oar', arguments: '{"name":"reviewer-extra"}' })
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'sub-long' as never, content: [{ type: 'text', text: 'started subagent reviewer-extra' }], isError: false }) }, { surfaceOp: 'append' })
+
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(true)
+
+    // Settling `reviewer-extra` (senderSessionId = sess-long) must NOT substring-match and drop `reviewer`.
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Background subagent reviewer-extra finished and will do no further work unless you send it more.' }],
+      source: { kind: 'subagent-settled', form: 'notice', summary: 'Background subagent reviewer-extra finished and will do no further work unless you send it more.', senderSessionId: 'sess-long' } as never,
+    }), { surfaceOp: 'append' })
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(true)
+
+    // A late settlement notice from an unrelated/pre-task named child must NOT evict `reviewer` via oldest-entry fallback.
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Background subagent pretask-helper was stopped before it finished.' }],
+      source: { kind: 'subagent-settled', form: 'notice', summary: 'Background subagent pretask-helper was stopped before it finished.', senderSessionId: 'sess-pretask' } as never,
+    }), { surfaceOp: 'append' })
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(true)
+
+    // Finally `reviewer` itself settles via its child SessionId.
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Background subagent reviewer finished and will do no further work unless you send it more.' }],
+      source: { kind: 'subagent-settled', form: 'notice', summary: 'Background subagent reviewer finished and will do no further work unless you send it more.', senderSessionId: 'sess-short' } as never,
+    }), { surfaceOp: 'append' })
+    expect(hasPendingSubagents(session.snapshotEvents(), 0)).toBe(false)
+  })
+
   it('keeps pending true if only one of multiple subagents settled', () => {
     const session = taskSession()
     call(session, 'read', 'r1')
