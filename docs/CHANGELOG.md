@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.16.0 - 2026-11-04
 - **[DSH 0.2.2-rc.1 / Cordis 4.1.0 / 本机 master] 对齐最新宿主候选正式线与具名子代理协议**
   - `engines.dsh` 与 8 条 DSH peer 同步追加 `|| ^0.2.2-rc.1`，`@deepseek-ai/cordis` peer 追加 `|| ^4.1.0`；开发依赖精确锁定 `0.2.2-rc.1` 与 `4.1.0`，pnpm 发布年龄豁免同步更新
   - 原生模型选择器子插槽适配 `renderNativeModelSlot()` 支持省略 `options` 的列表插槽调用（`conversation.input.model.options`），修复在最新宿主点开主裁判选择器时的空引用异常
