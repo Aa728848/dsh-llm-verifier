@@ -1206,9 +1206,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     // Plan mode is the operator's review boundary: the agent is supposed to research and
     // PROPOSE, so no automatic route, team gate or final acceptance may run here — a verdict
     // could only fail against the missing implementation and steer "actually implement it",
-    // commanding execution the human has not approved yet. The exit_plan_mode pre-review is
-    // the one gate that still runs while planning, so this boundary resumes once the mode is
-    // exited (plan/mode active → inactive) and real work exists.
+    // commanding execution the human has not approved yet. Nothing runs while planning, so this
+    // boundary resumes once the mode is exited (plan/mode active → inactive) and real work exists.
     if (evidence.planMode) {
       ctx.logger.info?.('llm-verifier automatic session verification skipped: plan mode is active')
       return
@@ -1327,7 +1326,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // One logical routing cycle consumes exactly ONE route attempt. A classification that
     // resolves to a decision is PROMOTED on its own reservation instead of committed and
     // re-reserved: the commit-then-reserve pair spent two attempts per cycle, so the shipped
-    // default of two could never afford "plan pre-review → classify → compare".
+    // default of two could never afford "classify → compare".
     let cycleReservation: Reservation | undefined
     if (!finalPreferred && !deliveryFastPath && decision === undefined && selected.autoRouteSemantic && (selected.autoVerifyMode === 'strict' || semanticRouteHint(snapshot))) {
       // Build the evidence view FIRST so the cycle's identity is its RENDERED EVIDENCE rather

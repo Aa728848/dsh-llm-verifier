@@ -507,7 +507,7 @@ export function inspectUserInteractionPause(
  * agent is expected to research and PROPOSE: any automatic route or acceptance verdict at
  * the turn-stopping boundary can only fail against the missing implementation and steer
  * "actually implement it" — commanding execution the human has not approved yet. The
- * `exit_plan_mode` pre-review is the one gate that still runs in this state.
+ * No automatic route or acceptance runs in this state.
  * @param events - Session event log (the whole log is folded; the mode may predate the task).
  * @returns True when the newest `plan/mode` event activated plan mode.
  */
