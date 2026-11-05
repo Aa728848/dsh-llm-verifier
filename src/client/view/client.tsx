@@ -233,7 +233,7 @@ function toneChip(tone: StatusTone): React.CSSProperties {
     color: tone === 'warn' ? 'var(--dsw-alias-state-warn-label)' : token,
   }
 }
-const toolColors: Record<string, string> = { verifier_route_classify: '#d97706', verifier_compare: '#4f8cff', verifier_select: '#8b6df6', verifier_track: '#2fc5c9', verifier_best_of_n: '#e2569b', verifier_current_session: '#f5a524' }
+const toolColors: Record<string, string> = { verifier_route_classify: '#d97706', verifier_compare: '#4f8cff', verifier_select: '#8b6df6', verifier_track: '#2fc5c9', verifier_current_session: '#f5a524' }
 
 function record(value: unknown): Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {} }
 function values(view: SettingsNamespaceView): Values { return valuesFromView(record(view.value)) }

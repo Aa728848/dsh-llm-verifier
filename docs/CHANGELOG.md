@@ -8,6 +8,7 @@
   - 删除 `verifier_best_of_n` 工具及其生成侧实现（`generateCandidate` / `generationClient` / `buildGenerationPrompt`），工具面由五个收敛为四个；`EMPTY_WORK_BASELINE` 与 `GENERATION_TEMPERATURE` 因仍被终验与 P06 使用而保留
   - 配置删除 `autoVerifyPlanMode`（schema / resolveConfig / 设置页字段 / 中英文案一并清理），已保存配置中的该键按未知键忽略
   - `parseVerdictLetter` 迁至 `src/gates/verdict.ts`，继续供 Team 任务闸使用
+  - 清掉重构残留：删除已无调用方的 `renderReferenceContext`（参考上下文仍由 `buildPairwisePrompt` 内的同一 nonce 块渲染）与纯文本通道上的 `tolerateTruncation`/`truncated`（截断仍是硬失败，D3）；`RoutePhase` 去掉 `plan_review` 相位及其两条回归用例；同步看板工具配色、`HOST-COMPAT` 宿主事件表，以及统计/活动视图/决策快照中仍在描述已删除特性的注释
 
 ## 0.17.0 - 2026-11-05
 - **[新增] 辅助思考期间对话区显示「辅助思考中…」**

@@ -312,20 +312,17 @@ const imageRefs = new WeakMap<VerifierImage, Promise<unknown>>()
 /**
  * One plain-text completion through the DSH stream.
  *
- * Shared by the explicit-tag judge path and by best-of-N generation, which differ in exactly one
- * place: a `max-tokens` finish. A truncated JUDGE answer is unusable — its verdict tags may never
- * have been emitted — so it stays a hard error. A truncated DRAFT is still a candidate the operator
- * already paid for, and the judge can see that the text stops mid-sentence and score it accordingly,
- * so generation receives the text plus a `truncated` flag.
+ * There is no top-logprob channel on this path, so `extractScore` reads the model's explicit A–T
+ * tags (`scoringMode`). Fail-closed (D3): a `max-tokens` finish is a hard error like any other
+ * failed finish, because an answer cut short may never have emitted the verdict tags it is read for.
  * @param config - resolved verifier client configuration.
  * @param prompt - the rendered prompt.
  * @param signal - the attempt's deadline signal.
  * @param images - attachments to send, if any.
  * @param attempt - 1-based attempt number for usage accounting.
- * @param tolerateTruncation - return the text of a max-tokens finish instead of throwing.
- * @returns The completion (with `truncated`) when it produced text.
+ * @returns The completion when it produced text.
  */
-async function callTextCompletion(config: VerifierClientConfig, prompt: string, signal: AbortSignal | undefined, images: readonly VerifierImage[] | undefined, attempt: number, tolerateTruncation: boolean): Promise<VerifierCompletion & { truncated: boolean }> {
+async function callTextCompletion(config: VerifierClientConfig, prompt: string, signal: AbortSignal | undefined, images: readonly VerifierImage[] | undefined, attempt: number): Promise<VerifierCompletion> {
   await config.topLogprobCapabilities.ensureLoaded()
   const content: ContentBlock[] = [{ type: 'text', text: prompt }]
   for (const image of images ?? []) {
@@ -373,24 +370,18 @@ async function callTextCompletion(config: VerifierClientConfig, prompt: string, 
     config.topLogprobCapabilities.markTemperatureUnsupported(config.provider, config.model)
     assembler = await runStream(true)
   }
-  let truncated = false
-  if (assembler.finish.kind === 'max-tokens') {
-    if (!tolerateTruncation) throw unusable('model call failed: ' + failureMessage(assembler.finish), attempt, assembler.usage)
-    truncated = true
-  } else {
-    const failed = failureMessage(assembler.finish)
-    if (failed !== undefined) throw unusable('model call failed: ' + failed, attempt, assembler.usage)
-  }
+  const failed = failureMessage(assembler.finish)
+  if (assembler.finish.kind === 'max-tokens' || failed !== undefined) throw unusable('model call failed: ' + failed, attempt, assembler.usage)
   const text = assembler.blocks().filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text').map(block => block.text).join('')
   if (!text.trim()) throw unusable('selected DSH model produced no text', attempt, assembler.usage)
   // DSH adapters expose provider-neutral text/usage but not top-logprob candidates.
   // extractScore() therefore uses the model's explicit final A–T tags.
-  return { text, tokens: [], positions: [], scoringMode: 'explicit-tag', usage: usage(attempt, assembler.usage), truncated }
+  return { text, tokens: [], positions: [], scoringMode: 'explicit-tag', usage: usage(attempt, assembler.usage) }
 }
 
 /** Explicit-tag judge completion: fail-closed, so a truncated answer is an error and never a score. */
 async function callExplicitTag(config: VerifierClientConfig, prompt: string, signal: AbortSignal | undefined, images: readonly VerifierImage[] | undefined, attempt: number): Promise<VerifierCompletion> {
-  return callTextCompletion(config, prompt, signal, images, attempt, false)
+  return callTextCompletion(config, prompt, signal, images, attempt)
 }
 
 export class RequestLimiter {

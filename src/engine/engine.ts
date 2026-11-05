@@ -199,8 +199,8 @@ function accountFailure(stats: RunStats, error: unknown): void {
 /**
  * Fold one nested run's counters into an accumulator (usage, cache, channel, incompleteness).
  *
- * Shared with index.ts so a multi-phase tool (best-of-N) accumulates generation, tournament and
- * baseline usage the same way. Never folds a value into itself, and zero-fills the RunStats-only
+ * Shared with index.ts and the process cycle so a multi-phase run accumulates generation, candidate
+ * and baseline usage the same way. Never folds a value into itself, and zero-fills the RunStats-only
  * counters so a partial source cannot poison the totals with NaN.
  */
 export function mergeRunStats(target: RunStats, source: (UsageStats & Partial<RunStats>) | undefined): void {

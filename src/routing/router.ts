@@ -33,7 +33,7 @@ export interface RoutedAgent { id: unknown; session: unknown }
 export type RoutedVerifierKind = 'compare' | 'select' | 'track'
 /** `process` is the internal P06 cycle: never a public tool, but it draws on the same budget and
  * final-acceptance floor as every other phase (D5). */
-export type RoutePhase = 'semantic' | RoutedVerifierKind | 'final' | 'plan_review' | 'team_task' | 'process'
+export type RoutePhase = 'semantic' | RoutedVerifierKind | 'final' | 'team_task' | 'process'
 
 /** One candidate as the router sees it. `content` is capped for the prompt, so `identity` keeps the
  * untruncated text for de-duplication (D7). */
@@ -924,7 +924,7 @@ export class AutoVerifierRouter {
     const state = this.state(agent)
     if (!state || state.inFlight?.id !== reservation.id || state.taskStartSeq !== reservation.taskStartSeq) return false
     state.inFlight = undefined; state.completed.add(reservation.fingerprint); state.strictBlocked = false
-    if (reservation.phase !== 'semantic' && reservation.phase !== 'final' && reservation.phase !== 'plan_review') state.finalRequiredFromSeq = Math.max(state.finalRequiredFromSeq ?? 0, evidenceSeq ?? reservation.taskStartSeq)
+    if (reservation.phase !== 'semantic' && reservation.phase !== 'final') state.finalRequiredFromSeq = Math.max(state.finalRequiredFromSeq ?? 0, evidenceSeq ?? reservation.taskStartSeq)
     if (reservation.phase === 'final') { state.finalRequiredFromSeq = undefined; state.finalPreferred = false }
     this.observe(observer => observer.settled?.(agent, reservation, 'committed'))
     return true

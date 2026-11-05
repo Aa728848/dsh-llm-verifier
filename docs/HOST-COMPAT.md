@@ -10,7 +10,7 @@
 
 设置页优先通过 `window.__DSH_CLAUDE_STYLE_CONTROLS__` 通用控件注册表挂载 `dsh-claude-style` 的 `model-picker`；未安装或版本较旧时复用 `dsh-client-ui-model-selection` 注册的 `ModelSelect`。原生组件未从包入口导出，唯一借用点是 `client-native-model.ts` 的注册捕获；两种宿主选择器都不可用时显示旧的三项控件。模型目录读取与设置读取彼此独立，目录慢或失败不得阻塞设置页首屏。
 
-宿主**事件**（`ctx.on()`）：`agent/pre-step`、`agent/turn-stopping`、`agent/disposed`、`tools/pre-execute`、`llm/stream`。
+宿主**事件**（`ctx.on()`）：`agent/pre-step`、`agent/turn-stopping`、`agent/disposed`、`llm/stream`。
 
 ## 2. 升级流程
 

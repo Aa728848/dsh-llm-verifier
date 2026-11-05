@@ -1046,16 +1046,6 @@ describe('transactional router state', () => {
     expect(router.finalPreferred(agent)).toBe(false)
     expect(router.reserve(agent, 'track', 'route-after-failure', 1, policy)).toBeDefined()
   })
-  it('does not arm final verification when a plan pre-review passes', () => {
-    const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
-    const plan = router.reserve(agent, 'plan_review', 'plan', 1, policy)!
-    expect(router.commit(agent, plan)).toBe(true)
-    // Approving a plan is not completed work: the next stop boundary must go through the
-    // normal eligibility check instead of a forced full-session verification.
-    expect(router.finalRequired(agent)).toBeUndefined()
-    const route = router.reserve(agent, 'compare', 'route', 4, policy)!
-    expect(router.commit(agent, route, 9)).toBe(true); expect(router.finalRequired(agent)).toBe(9)
-  })
   it('treats a team message as the task boundary so teammate sessions can reserve', () => {
     const value = Session.create('session-00000000-0000-4000-8000-000000000078' as never)
     value.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Implement the assigned team task' }], source: { kind: 'team-message' } as never }), { surfaceOp: 'append' })
@@ -1143,9 +1133,8 @@ describe('transactional router state', () => {
  * S01: a semantic classification and the decision it resolves are ONE routing cycle.
  *
  * Before promotion the classification committed (releasing the lock) and the execution
- * reserved again, so "plan pre-review → classify → compare" needed three attempts under a
- * default cap of two: the compare could never be admitted even though only two logical
- * decisions had been made.
+ * reserved again, so "classify → compare" needed two attempts on its own under a default cap of
+ * two: the compare could never be admitted even though only one logical decision had been made.
  */
 describe('one cycle per classification and execution', () => {
   it('spends a single route attempt when a classification is promoted into its decision', () => {
@@ -1164,19 +1153,6 @@ describe('one cycle per classification and execution', () => {
     expect(router.finalRequired(agent)).toBe(9)
     // The single allowed attempt is gone: promotion did not buy a second one.
     expect(router.reserve(agent, 'track', 'second-cycle', 3, budget)).toBeUndefined()
-  })
-
-  it('runs a plan pre-review and then a classify+compare cycle under the shipped two-attempt default', () => {
-    const value = session(); const agent = { id: value.id, session: value }; const router = new AutoVerifierRouter()
-    const budget = { ...policy, maxRoutePerTask: 2, maxModelCallsPerTask: 96, minFinalModelCalls: 6 }
-    const plan = router.reserve(agent, 'plan_review', 'plan', 1, budget)!
-    expect(router.commit(agent, plan)).toBe(true)
-    const classification = router.reserve(agent, 'semantic', 'semantic', 1, budget)!
-    expect(router.promote(agent, classification, 'compare', 'compare', 6, budget)).toBe(true)
-    expect(router.commit(agent, classification, 9)).toBe(true)
-    // Both attempts are now spent, so no third cycle exists — the plan's own acceptance
-    // must fall through to the final gate instead of expecting more stage budget.
-    expect(router.reserve(agent, 'track', 'track', 3, budget)).toBeUndefined()
   })
 
   it('leaves the second attempt for a genuine second cycle', () => {

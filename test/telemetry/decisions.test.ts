@@ -39,17 +39,17 @@ describe('boundDecisionCalls', () => {
     expect(bounded[0]!.label).toBe('c0')
   })
 
-  it('keeps the drafts and the tournament of a 27-call best-of-N snapshot', () => {
-    // Regression: with MAX_CALLS = 12 and judge labels sorting BEFORE the draft labels, every
-    // draft was cut and the snapshot could not show what the judges had chosen between.
+  it('keeps the candidate calls of an oversized 27-call snapshot', () => {
+    // Regression: with MAX_CALLS = 12 and judge labels sorting BEFORE the per-candidate labels,
+    // every candidate was cut and the snapshot could not show what the judges had chosen between.
     const calls = [
-      ...Array.from({ length: 3 }, (_, index) => call({ label: 'draft ' + (index + 1), prompt: 'draft prompt ' + index, output: 'DRAFT-' + index + ' ' + 'd'.repeat(3000) })),
+      ...Array.from({ length: 3 }, (_, index) => call({ label: 'candidate ' + (index + 1), prompt: 'candidate prompt ' + index, output: 'CANDIDATE-' + index + ' ' + 'd'.repeat(3000) })),
       ...Array.from({ length: 18 }, (_, index) => call({ label: 'criterion ' + (index % 3) + ' repeat ' + (index % 2 + 1) + ' #' + index, prompt: 'p'.repeat(6000), output: 'o'.repeat(3000) })),
       ...Array.from({ length: 6 }, (_, index) => call({ label: 'baseline ' + index, prompt: 'b'.repeat(6000), output: 'o'.repeat(3000) })),
     ]
     const bounded = boundDecisionCalls(calls)
     expect(bounded).toHaveLength(27)
-    for (const index of [0, 1, 2]) expect(bounded.some(value => value.label === 'draft ' + (index + 1))).toBe(true)
+    for (const index of [0, 1, 2]) expect(bounded.some(value => value.label === 'candidate ' + (index + 1))).toBe(true)
     const total = bounded.reduce((sum, value) => sum + value.prompt.length + value.output.length + value.label.length + value.channel.length, 0)
     expect(total).toBeLessThanOrEqual(30000)
   })

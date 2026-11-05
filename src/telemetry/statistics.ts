@@ -103,11 +103,10 @@ export function summarizeVerdict(toolName: VerifierToolName, value: unknown, pha
       ...framing,
     }
   }
-  // The remaining tools are both measured against the fixed empty-work baseline. A best-of-N
-  // verdict is rendered with the GATE's shape, not the select tool's: the tournament shares it
-  // also returns are relative preferences (wins/counts) and mean nothing against
-  // `autoVerifyThreshold`, while its `score`/`baselineScore`/`winner` come from the very same
-  // empty-work comparison the final gate runs. The dashboard reads it exactly like an acceptance.
+  // What remains is the session acceptance, measured against the fixed empty-work baseline and
+  // therefore rendered with the GATE's shape rather than the select tool's: its
+  // `score`/`baselineScore`/`winner` come from the very same comparison the final gate runs, so the
+  // dashboard reads it exactly like an acceptance.
   return acceptanceVerdict(row, phase, thresholds)
 }
 

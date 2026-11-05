@@ -99,9 +99,8 @@ export function classifyProcessOutcome(
  * Map one granted reservation onto the chip's active record.
  *
  * `process` is deliberately NOT mapped: P06 publishes its own richer record (candidate count,
- * generation vs comparison), and two writers for one cycle id would race. `plan_review` and
- * `team_task` are not announced either — the plan gate already shows a pending tool row in the
- * chat, so a chip line would only repeat it.
+ * generation vs comparison), and two writers for one cycle id would race. `team_task` is not
+ * announced either: it answers one task-status change, a window too short for the chip to show.
  * @param reservation - the reservation the router just granted.
  * @param startedAt - wall clock the cycle began at.
  * @returns The active record, or undefined for a phase the chip stays silent about.

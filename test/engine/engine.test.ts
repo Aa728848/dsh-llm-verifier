@@ -172,8 +172,8 @@ describe('VerifierEngine cache identity', () => {
     const labels: string[] = []
     const trace = (call: { label: string }) => { labels.push(call.label) }
     await engine.compare({ problem: 'task', candidateA: 'STRONG', candidateB: 'WEAK', repeats: 1, trace })
-    // Regression: without the prefix, a best-of-N baseline comparison was indistinguishable from
-    // the tournament it followed, and the snapshot read as if the judge had contradicted itself.
+    // Regression: without the prefix, a second comparison of the same problem and rubric is
+    // indistinguishable from the first, and the snapshot reads as if the judge contradicted itself.
     await engine.compare({ problem: 'task', candidateA: 'STRONG', candidateB: 'WEAK', repeats: 1, trace, traceLabelPrefix: 'baseline: ' })
     expect(labels.filter(label => label.startsWith('baseline: '))).toHaveLength(3)
     expect(labels.filter(label => !label.startsWith('baseline: '))).toHaveLength(3)

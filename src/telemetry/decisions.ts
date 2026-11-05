@@ -43,12 +43,13 @@ interface DecisionsDocument {
 /**
  * Upper bound on captured calls per invocation.
  *
- * A session acceptance makes six; an explicit best-of-N makes about 27 (N drafts, the
- * tournament, and the winner-vs-baseline comparison). Keeping the old 12 would have dropped
- * the drafts from the snapshot entirely — judge labels sort before `draft N` — so the one
- * record that explains "which draft won and why" could not show the drafts at all. The
- * per-record character budget is unchanged and shared equally, so the extra calls shrink each
- * window instead of growing the file. 32 is the ceiling the equal-share floor allows:
+ * A session acceptance makes six; an explicit multi-candidate selection makes about 27 (every
+ * pair x criterion x repeat x judge, plus the winner-vs-baseline comparison). Keeping the old 12
+ * would have dropped whole label groups from the snapshot — judge labels sort before the
+ * per-candidate ones — so the one record that explains "which candidate won and why" could not
+ * show the candidates at all. The per-record character budget is unchanged and shared equally, so
+ * the extra calls shrink each window instead of growing the file. 32 is the ceiling the
+ * equal-share floor allows:
  * 32 x (512 prompt + 256 output) still fits in {@link MAX_RECORD_CHARS}.
  */
 const MAX_CALLS = 32
@@ -103,8 +104,8 @@ export function boundDecisionCalls(calls: readonly DecisionCall[]): DecisionCall
   if (calls.length === 0) return []
   // Over the count cap, keep an EVEN SPREAD (first and last included) rather than a prefix.
   // A prefix is the wrong sample whenever the labels cluster: the engine labels its own calls
-  // in sorted order, so an oversized best-of-N (n=4 makes ~46 calls: the baseline, then the
-  // tournament, then `draft N` last) would lose every draft and keep only judge calls.
+  // in sorted order, so an oversized selection (the baseline and judging calls first, the
+  // per-candidate calls last) would lose every candidate and keep only judge calls.
   const selected = calls.length <= MAX_CALLS
     ? [...calls]
     : Array.from({ length: MAX_CALLS }, (_, index) => calls[Math.round(index * (calls.length - 1) / (MAX_CALLS - 1))]!)

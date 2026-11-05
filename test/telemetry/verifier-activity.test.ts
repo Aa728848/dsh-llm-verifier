@@ -42,9 +42,8 @@ describe('router reservations, as the chip reads them', () => {
     expect(reservationActivity(reservation('semantic', 1), 1_000)).toEqual({ cycleId: 'cycle-1', stage: 'route', phase: 'classifying', expectedCalls: 1, startedAt: 1_000 })
     expect(reservationActivity(reservation('select', 30), 1_000)).toEqual({ cycleId: 'cycle-1', stage: 'route', phase: 'reviewing', destination: 'select', expectedCalls: 30, startedAt: 1_000 })
     expect(reservationActivity(reservation('final', 12), 1_000)).toMatchObject({ stage: 'final', phase: 'accepting', expectedCalls: 12 })
-    // P06 publishes its own richer record; the plan gate already shows a pending tool row.
+    // P06 publishes its own richer record, and a team task gate answers one status change.
     expect(reservationActivity(reservation('process', 25), 1_000)).toBeUndefined()
-    expect(reservationActivity(reservation('plan_review', 6), 1_000)).toBeUndefined()
     expect(reservationActivity(reservation('team_task', 6), 1_000)).toBeUndefined()
   })
 

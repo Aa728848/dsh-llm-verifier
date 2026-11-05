@@ -20,7 +20,7 @@ import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanti
 import { VerifierActivities, createActivityObserver, type ActivityView } from '../telemetry/verifier-activity.ts'
 import { ProcessCycleStore, ProcessSelector, resolveProcessFile, type ProcessCycleReport } from '../process/process-selection.ts'
 import { IoTController } from '../iot/index.ts'
-import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, PROPOSAL_CRITERIA, buildPairwisePrompt, extractScore, renderDiagnostics, renderReferenceContext, type Diagnostic, type ReviewStage } from '../scoring/core.ts'
+import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, PROPOSAL_CRITERIA, buildPairwisePrompt, extractScore, renderDiagnostics, type Diagnostic, type ReviewStage } from '../scoring/core.ts'
 import { parseVerdictLetter } from '../gates/verdict.ts'
 import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from '../gates/team-gate.ts'
 import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, parseStatisticsQuery, resolveStatisticsFile, summarizeVerdict, type RouteObservation, type StatisticsOverview, type VerdictSummary, type VerifierToolName } from '../telemetry/statistics.ts'
@@ -140,8 +140,8 @@ function explicitCandidateLimit(selected: EvidenceBounds & { autoRouteMaxCandida
  *
  * A hard upper bound, not an estimate: ring (N) plus every pivot-round pair (non-pivots x
  * pivots, plus pivot-vs-pivot). De-duplicating against the ring can only ever remove
- * pairs, so this never under-counts — which matters because both best-of-N and the
- * explicit select guard must reject before any model request is issued.
+ * pairs, so this never under-counts — which matters because the explicit select guard must reject
+ * before any model request is issued.
  * @param count - candidate count.
  * @param pivots - pivot count the tournament will run with.
  * @returns The largest number of pairs the tournament can judge.

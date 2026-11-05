@@ -403,7 +403,7 @@ export function buildFailureNotice(context: string): Message {
  *
  * - the temperature is raised to at least GENERATION_TEMPERATURE. A host configured for
  *   near-deterministic sampling would otherwise return a copy of the original reply and the cycle
- *   would pay a generation to learn nothing (best-of-N raises it for exactly the same reason);
+ *   would pay a generation to learn nothing;
  * - failureContext, when present, is appended as a plugin message so the extra candidate is written
  *   with the failure evidence the cycle exists for.
  * the process-local "this is an agent-loop request" marker is

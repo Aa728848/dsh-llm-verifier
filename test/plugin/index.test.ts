@@ -1216,7 +1216,7 @@ describe('automatic gate lifecycle', () => {
  * S01/S05-A through the REGISTERED hooks.
  *
  * The router's own counters are not the contract: what matters is that the configured
- * attempt budget survives a real plan pre-review and that the classification row and the
+ * attempt budget survives a real classification cycle and that the classification row and the
  * execution it produced are observable as one cycle.
  */
 describe('routing-cycle budget through the real hooks', () => {
