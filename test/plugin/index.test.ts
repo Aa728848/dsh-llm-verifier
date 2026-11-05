@@ -2339,6 +2339,35 @@ describe('IoT-Lite through the real hooks', () => {
     expect(cycle?.route?.generatedCalls).toBe(1)
     expect(cycle?.route?.judgeCalls).toBe(6)
   })
+
+  it('reports the held block through the process query the chat chip polls', async () => {
+    // The bypass withholds the block's text, so this one field is the only sign of life the chat
+    // has while the auxiliary call runs (D15).
+    let duringHold: unknown
+    const seen: AuxRequest[] = []
+    const { handlers, rpc } = assemble({ ...JUDGE, iotThinking: 'compact', iotThinkingTargets: [OFFICIAL] }, {
+      stream: async function* (request: AuxRequest): AsyncIterable<unknown> {
+        seen.push(request)
+        duringHold = await rpc.get('/llm-verifier')!('process', { sessionId: 'iot-session' })
+        for (const chunk of auxChunks()) yield chunk
+      },
+    })
+    await collect(handlers.get('llm/stream')!(mainRequest(), () => streamOf(mainChunks())) as AsyncIterable<unknown>)
+    expect(seen).toHaveLength(1)
+    const during = duringHold as { ok: boolean; value: { sessionId: string; thinking?: { startedAt?: unknown } } }
+    expect(during.ok).toBe(true)
+    expect(during.value.sessionId).toBe('iot-session')
+    expect(typeof during.value.thinking?.startedAt).toBe('number')
+    // Released: the field is ABSENT rather than false, so the chip renders nothing and stops polling.
+    expect(await rpc.get('/llm-verifier')!('process', { sessionId: 'iot-session' })).toEqual({ ok: true, value: { sessionId: 'iot-session' } })
+  })
+
+  it('answers an idle session without the field and refuses a payload without a session', async () => {
+    const { rpc } = assemble({ ...JUDGE }, {})
+    expect(await rpc.get('/llm-verifier')!('process', { sessionId: 'quiet' })).toEqual({ ok: true, value: { sessionId: 'quiet' } })
+    expect((await rpc.get('/llm-verifier')!('process', { sessionId: '' }) as { ok: boolean }).ok).toBe(false)
+    expect((await rpc.get('/llm-verifier')!('process', undefined) as { ok: boolean }).ok).toBe(false)
+  })
 })
 
 /** Two consecutive FAILED verification runs: the only P06 recovery trigger. */

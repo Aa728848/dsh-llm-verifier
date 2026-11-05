@@ -299,6 +299,7 @@ export const zh = {
   'activity.final.accepting': '正在最终验收（约 {n} 次调用）…',
   'activity.final.accepted': '最终验收通过',
   'activity.final.rejected': '最终验收未通过',
+  'activity.thinking': '辅助思考中…',
 
   // Process selection (P06) chat chip: the reply is being buffered, so this is the only sign of life
   'process.generating': '正在过程选优：生成 {n} 份候选…',
@@ -722,6 +723,7 @@ export const en: I18nDict = {
   'activity.final.accepting': 'Running the final acceptance (about {n} calls)…',
   'activity.final.accepted': 'Final acceptance passed',
   'activity.final.rejected': 'Final acceptance did not pass',
+  'activity.thinking': 'Auxiliary thinking…',
 
   // Process selection (P06) chat chip: the reply is being buffered, so this is the only sign of life
   'process.generating': 'Selecting the best reply: generating {n} candidates…',
@@ -874,6 +876,8 @@ export function tFormat(template: string, params?: Record<string, string | numbe
 export interface ActivityChipView {
   active?: { stage?: unknown; phase?: unknown; destination?: unknown; candidates?: unknown; expectedCalls?: unknown }
   settled?: { stage?: unknown; outcome?: unknown }
+  /** The thinking bypass is withholding a reasoning block right now; its start is diagnostic only. */
+  thinking?: { startedAt?: unknown }
 }
 
 /** How the chip renders: a busy accent, a settled confirmation, or a failure note. */
@@ -915,6 +919,11 @@ export function verifierActivityText(
     return active.phase === 'comparing'
       ? { tone: 'busy', text: tFormat(t['process.comparing'], { n: candidates }) }
       : { tone: 'busy', text: tFormat(t['process.generating'], { n: candidates }) }
+  }
+  // The bypass's held block: it is happening NOW, so it outranks a cycle that already settled
+  // (a settled line lives 20s and can easily overlap the next block's hold).
+  if (view?.thinking !== undefined && view.thinking !== null) {
+    return { tone: 'busy', text: t['activity.thinking'] }
   }
   const settled = view?.settled
   if (settled?.stage === 'final') {

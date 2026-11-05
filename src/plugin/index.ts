@@ -1178,7 +1178,15 @@ export function apply(ctx: Context, config: Config = {}): void {
   const handleProcessQuery = async (payload: unknown): Promise<{ ok: true; value: { sessionId: string } & ActivityView } | ReturnType<typeof rpcFailure>> => {
     const sessionId = (payload as { sessionId?: unknown } | null)?.sessionId
     if (typeof sessionId !== 'string' || sessionId === '') return rpcFailure('a sessionId is required')
-    return rpcSuccess({ sessionId, ...activities.read(sessionId, Date.now()) })
+    // Two sources, one answer: the router's cycles and the thinking bypass's held block. They are
+    // merged HERE because the bypass is not a verifier cycle (no reservation, no durable record);
+    // see D15 and the ActivityView.thinking note.
+    const startedAt = iot.thinking(sessionId)
+    return rpcSuccess({
+      sessionId,
+      ...activities.read(sessionId, Date.now()),
+      ...(startedAt === undefined ? {} : { thinking: { startedAt } }),
+    })
   }
 
   /**

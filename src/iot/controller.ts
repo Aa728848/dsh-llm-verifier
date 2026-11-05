@@ -28,6 +28,7 @@ import {
   type IoTMode, type IoTRequestRoute, type IoTStrategy, type IoTThinkingTarget,
 } from './mode.ts'
 import { assessCompaction } from './compaction.ts'
+import { IoTFlights } from './flight.ts'
 import { IoTSessions, type SessionIoTMetrics } from './metrics.ts'
 import { buildCompactionPrompt } from './prompt.ts'
 
@@ -81,6 +82,8 @@ interface CompactionOutcome {
 /** The controller the host wires onto `llm/stream` and session disposal. */
 export class IoTController {
   private readonly sessions = new IoTSessions()
+  /** Held blocks: the chip's only fact, and it exists only while a `compacting()` call runs. */
+  private readonly flights = new IoTFlights()
 
   /**
    * @param deps - host seams: the LLM runtime, live settings, and a diagnostic logger.
@@ -100,10 +103,23 @@ export class IoTController {
   }
 
   /**
-   * Forget one session's override and counters (session disposal, settings reset).
+   * Forget one session's counters and any held block (session disposal, settings reset).
    * @param sessionId - session to forget.
    */
-  clear(sessionId: string): void { this.sessions.clear(sessionId) }
+  clear(sessionId: string): void {
+    this.sessions.clear(sessionId)
+    this.flights.clear(sessionId)
+  }
+
+  /**
+   * When this session last started holding a reasoning block, while it still holds one.
+   *
+   * One fact, read by the chat chip through the plugin's process query: the bypass withholds a
+   * block's text until it is relayed, so this is the only sign of life the chat has (D15).
+   * @param sessionId - session to read.
+   * @returns The hold start, or undefined when the bypass is not holding anything for it.
+   */
+  thinking(sessionId: string): number | undefined { return this.flights.held(sessionId, Date.now()) }
 
   /**
    * The strategy one session would run under right now.
@@ -167,11 +183,33 @@ export class IoTController {
       const at = open.indexOf(index)
       if (at >= 0) open.splice(at, 1)
     }
+    /**
+     * Blocks whose text is withheld right now.
+     *
+     * The chip's window opens on the FIRST withheld delta and closes when that block's text is
+     * emitted: before the first delta there is nothing being done and the chat shows nothing anyway,
+     * and after the release the chat has the text itself. Counted as a set because the stream may
+     * hold more than one block; the plugin-level record is opened and closed on 0<->1.
+     */
+    const holding = new Set<number>()
+    const hold = (index: number): void => {
+      if (holding.has(index)) return
+      holding.add(index)
+      if (holding.size === 1) this.flights.begin(eligible.sessionId, Date.now())
+    }
+    const release = (index: number): void => {
+      if (!holding.delete(index)) return
+      if (holding.size === 0) this.flights.end(eligible.sessionId)
+    }
     /** Relay what is buffered for one block, in the order it arrived, and empty the buffer. */
     const relay = function* (buffer: ReasoningBuffer, index: number): Generator<StreamChunk> {
-      for (const text of buffer.deltas) yield { type: 'reasoning-delta', index, text }
+      const texts = buffer.deltas
       buffer.deltas = []
       buffer.chars = 0
+      // The window is over the moment the text leaves the plugin, not when the consumer has read
+      // the last chunk: this is the release edge for every keep/overflow/flush path.
+      release(index)
+      for (const text of texts) yield { type: 'reasoning-delta', index, text }
     }
     /** Relay every open buffer before a terminal chunk, so no text is ever lost. */
     const relayOpen = function* (): Generator<StreamChunk> {
@@ -205,7 +243,9 @@ export class IoTController {
               // Too large to be worth a prompt: stop compacting THIS block and keep the stream live.
               buffer.overflowed = true
               yield* relay(buffer, chunk.index)
+              break
             }
+            hold(chunk.index)
             break
           }
           case 'block-end': {
@@ -237,6 +277,8 @@ export class IoTController {
               yield chunk
               break
             }
+            // The replacement is the release: the window closes as the rewritten text is emitted.
+            release(chunk.index)
             this.replaceBlock(metrics, original.length, outcome.text.length)
             this.deps.logger?.info?.('llm-iot: replaced a reasoning block (' + original.length + ' -> ' + outcome.text.length + ' chars)')
             // One delta carrying the whole replacement, then the block-end with the new text. Every
@@ -262,6 +304,11 @@ export class IoTController {
       // The source died: hand out what it already produced before the failure reaches the host.
       yield* relayOpen()
       throw error
+    } finally {
+      // Every path above releases its block, so this only matters when the consumer stops reading
+      // mid-window: a generator abandoned while holding a block must not leave the chat chip
+      // claiming work that no longer exists.
+      for (const index of [...holding]) release(index)
     }
     yield* relayOpen()
   }

@@ -42,10 +42,18 @@ export interface ActivitySettled {
   at: number
 }
 
-/** What one session currently has to show. Both fields absent means "nothing to say". */
+/** What one session currently has to show. All fields absent means "nothing to say". */
 export interface ActivityView {
   active?: ActivityActive
   settled?: ActivitySettled
+  /**
+   * The auxiliary-thinking bypass is withholding a reasoning block right now.
+   *
+   * Set only by the plugin's process query, never by {@link VerifierActivities}: the bypass is not a
+   * verifier cycle and holds no reservation, and a second writer for `active` would race the router
+   * that owns it. Kept apart so the chip can prefer a real cycle when both exist.
+   */
+  thinking?: { startedAt: number }
 }
 
 /**

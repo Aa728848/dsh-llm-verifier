@@ -61,6 +61,21 @@ describe('activity chip copy', () => {
     expect(verifierActivityText({ settled: { stage: 'final', outcome: 'unknown-to-this-build' } }, zh)).toBeNull()
   })
 
+  it('shows the auxiliary-thinking bypass while it holds a block, and yields to a real cycle', () => {
+    // The bypass withholds a reasoning block's text until it is relayed, so the chip is the only
+    // sign of life the chat has while it runs (D15).
+    expect(verifierActivityText({ thinking: { startedAt: 1 } }, zh)).toEqual({ tone: 'busy', text: '辅助思考中…' })
+    expect(verifierActivityText({ thinking: {} }, en)).toEqual({ tone: 'busy', text: 'Auxiliary thinking…' })
+    // A running cycle describes more than the bypass does, so it wins.
+    expect(verifierActivityText({ active: { stage: 'final', phase: 'accepting', expectedCalls: 2 }, thinking: { startedAt: 1 } }, zh)?.text).toBe('正在最终验收（约 2 次调用）…')
+    // The bypass is happening NOW, a settled line describes something that already finished, and the
+    // two overlap for as long as the settled record lives.
+    expect(verifierActivityText({ settled: { stage: 'final', outcome: 'accepted' }, thinking: { startedAt: 1 } }, zh)?.text).toBe('辅助思考中…')
+    // Nothing held, nothing said: an idle view must not grow a row.
+    expect(verifierActivityText({}, zh)).toBeNull()
+    expect(verifierActivityText({ thinking: null } as never, en)).toBeNull()
+  })
+
   it('treats an unknown phase as work in progress and a broken count as the minimum', () => {
     // A newer host describing a phase or a stage this build does not know must still show that
     // something is running, not disappear.

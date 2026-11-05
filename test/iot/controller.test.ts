@@ -655,3 +655,134 @@ describe('global settings and provider routes', () => {
     expect(calls).toHaveLength(0)
   })
 })
+
+/**
+ * The bypass's one visible fact: which session is holding a reasoning block right now.
+ *
+ * The chat chip polls this and nothing else, so every case here is about the window's two edges —
+ * open on the first withheld delta, closed the moment the text is emitted (or the stream dies).
+ */
+describe('held window', () => {
+  /** A source that parks after the first withheld delta so the window can be read from outside. */
+  function gated(text: string) {
+    let release!: () => void
+    const parked = new Promise<void>(resolve => { release = resolve })
+    const source = async function* (): AsyncIterable<StreamChunk> {
+      yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+      yield { type: 'reasoning-delta', index: 0, text }
+      await parked
+      yield { type: 'block-end', index: 0, block: { type: 'reasoning', text } }
+      for (const chunk of tail()) yield chunk
+    }
+    return { source, release: () => { release() } }
+  }
+
+  it('opens on the first withheld delta and closes when the replacement is emitted', async () => {
+    const { controller } = makeController()
+    const { source, release } = gated(LONG)
+    const iterator = controller.stream(request(), source)[Symbol.asyncIterator]()
+    const first = await iterator.next()
+    expect(first.value).toEqual({ type: 'block-start', index: 0, blockType: 'reasoning' })
+    expect(controller.thinking('s-1')).toBeUndefined()
+    // The delta is pulled and withheld: nothing is yielded until the auxiliary call answers, so the
+    // pull stays pending while the window is open.
+    const pending = iterator.next()
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(typeof controller.thinking('s-1')).toBe('number')
+    release()
+    const second = await pending
+    expect(second.value).toMatchObject({ type: 'reasoning-delta', index: 0, text: COMPACTED })
+    expect(controller.thinking('s-1')).toBeUndefined()
+    await collect({ [Symbol.asyncIterator]: () => iterator })
+    expect(controller.thinking('s-1')).toBeUndefined()
+  })
+
+  it('stays open across the auxiliary call, which is the longest part of the window', async () => {
+    let controller!: IoTController
+    const seen: Array<number | undefined> = []
+    const harness = makeController(undefined, () => {
+      seen.push(controller.thinking('s-1'))
+      return streamOf(auxReply(COMPACTED))
+    })
+    controller = harness.controller
+    await collect(controller.stream(request(), mainOf([...reasoningChunks(0, LONG), ...tail()]).next))
+    expect(seen).toHaveLength(1)
+    expect(typeof seen[0]).toBe('number')
+    expect(controller.thinking('s-1')).toBeUndefined()
+  })
+
+  it('closes on every failure path, so a kept block never leaves the window open', async () => {
+    const failing: AuxBehaviour = async function* () { throw new Error('aux unavailable') }
+    const thrown = makeController(undefined, failing)
+    await collect(thrown.controller.stream(request(), mainOf([...reasoningChunks(0, LONG), ...tail()]).next))
+    expect(thrown.controller.thinking('s-1')).toBeUndefined()
+
+    const refused = makeController(undefined, () => streamOf(auxReply(COMPACTED, { finish: 'max-tokens' })))
+    await collect(refused.controller.stream(request(), mainOf([...reasoningChunks(0, LONG), ...tail()]).next))
+    expect(refused.controller.thinking('s-1')).toBeUndefined()
+
+    const dead = makeController()
+    const source = async function* (): AsyncIterable<StreamChunk> {
+      yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+      yield { type: 'reasoning-delta', index: 0, text: LONG }
+      throw new Error('source died')
+    }
+    await expect(collect(dead.controller.stream(request(), source))).rejects.toThrow(/source died/)
+    expect(dead.controller.thinking('s-1')).toBeUndefined()
+  })
+
+  it('closes when the consumer stops reading mid-window', async () => {
+    const { controller } = makeController()
+    const { source, release } = gated(LONG)
+    const iterator = controller.stream(request(), source)[Symbol.asyncIterator]()
+    await iterator.next()
+    void iterator.next()
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(typeof controller.thinking('s-1')).toBe('number')
+    release()
+    await iterator.return?.(undefined)
+    expect(controller.thinking('s-1')).toBeUndefined()
+  })
+
+  it('never opens for a block that overflows the cap, because that block keeps streaming', async () => {
+    const { controller } = makeController()
+    const huge = reasoning(IOT_MAX_CHARS + 1)
+    const { source, release } = gated(huge)
+    const iterator = controller.stream(request(), source)[Symbol.asyncIterator]()
+    await iterator.next()
+    // The over-cap delta is relayed live rather than withheld, so there is no window to report.
+    const relayed = await iterator.next()
+    expect(relayed.value).toMatchObject({ type: 'reasoning-delta', index: 0, text: huge })
+    expect(controller.thinking('s-1')).toBeUndefined()
+    release()
+    await collect({ [Symbol.asyncIterator]: () => iterator })
+  })
+
+  it('never opens for a request the bypass does not touch', async () => {
+    const off = makeController({ iotThinking: 'off', iotThinkingTargets: [OFFICIAL_TARGET] })
+    await collect(off.controller.stream(request(), mainOf([...reasoningChunks(0, LONG), ...tail()]).next))
+    expect(off.controller.thinking('s-1')).toBeUndefined()
+
+    const unmapped = makeController({ iotThinking: 'full' })
+    await collect(unmapped.controller.stream(request(), mainOf([...reasoningChunks(0, LONG), ...tail()]).next))
+    expect(unmapped.controller.thinking('s-1')).toBeUndefined()
+  })
+
+  it('closes per block and per session, and is forgotten on clear', async () => {
+    const { controller } = makeController()
+    const twoBlocks: StreamChunk[] = [
+      ...reasoningChunks(0, LONG),
+      ...reasoningChunks(1, LONG),
+      ...tail(),
+    ]
+    const out = await collect(controller.stream(request(), mainOf(twoBlocks).next))
+    expect(deltas(out, 0)).toBe(COMPACTED)
+    expect(deltas(out, 1)).toBe(COMPACTED)
+    // One window per block, both closed by the end: the second block's start is a fresh window.
+    expect(controller.thinking('s-1')).toBeUndefined()
+    expect(controller.thinking('s-2')).toBeUndefined()
+
+    controller.clear('s-1')
+    expect(controller.thinking('s-1')).toBeUndefined()
+  })
+})
