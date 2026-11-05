@@ -52,7 +52,7 @@ function assemble(config: Record<string, unknown> = {}, options: { root?: string
   return { tools, warnings, rpc, handlers, injections }
 }
 
-/** A session whose model is already logged: the normal case for best-of-N. */
+/** A session whose model is already logged: the normal case for every explicit tool. */
 const exec = { agent: { id: 'agent-1', session: { header: { id: 'session-1' }, requestHeader: () => ({ config: { provider: 'session-provider', model: 'session-model', reasoningEffort: 'high' } }) } }, signal: new AbortController().signal }
 /** A session with no logged request header: the tool cannot know which model should draft. */
 const bareExec = { agent: { id: 'agent-2', session: { header: { id: 'session-2' }, requestHeader: () => undefined } }, signal: new AbortController().signal }
@@ -125,7 +125,7 @@ describe('plugin assembly', () => {
 
   it('registers exactly the four verifier tools with ensemble-aware output schemas', () => {
     const { tools } = assemble()
-    expect([...tools.keys()].sort()).toEqual(['verifier_best_of_n', 'verifier_compare', 'verifier_current_session', 'verifier_select', 'verifier_track'])
+    expect([...tools.keys()].sort()).toEqual(['verifier_compare', 'verifier_current_session', 'verifier_select', 'verifier_track'])
     for (const [name, definition] of tools) {
       expect(definition.output.schema.properties.judges, name + ' must report the judge ensemble').toBeDefined()
     }
@@ -221,7 +221,7 @@ describe('plugin assembly', () => {
 
   it('survives an unavailable settings service and an unregistered connection', () => {
     const { tools, warnings } = assemble()
-    expect(tools.size).toBe(5)
+    expect(tools.size).toBe(4)
     expect(warnings).toEqual([])
   })
 })
@@ -261,7 +261,7 @@ function verdictLetter(block: string): string {
 }
 
 /**
- * Scripted model for a whole best-of-N invocation.
+ * Scripted model for a multi-candidate invocation.
  *
  * Drafting calls are recognised by the drafting prompt's own tail (`Draft N of M.`) and are
  * answered with one strong or weak draft; every other call is a judge, answered by scoring
@@ -320,202 +320,6 @@ function assertMatchesSchema(value: unknown, schema: Record<string, any>, path: 
   else if (schema.type === 'boolean') expect(typeof value === 'boolean', path + ' is a boolean').toBe(true)
 }
 
-describe('verifier_best_of_n', () => {
-  it('records generation usage when too few drafts survive', async () => {
-    const definition = assemble(JUDGE, { stream: scriptedStream(1, [2, 3], []), sessions: [{ id: 'session-1', createdAt: 1 }] }).tools.get('verifier_best_of_n')!
-    const error = await definition.execute({ task: 'do the thing', n: 3 }, exec).catch(reason => reason)
-    const partial = partialStats(error)
-    // Draft 1 was generated and billed; the failure must not erase it.
-    expect(partial?.calls ?? 0).toBeGreaterThanOrEqual(1)
-    expect(partial?.inputTokens ?? 0).toBeGreaterThan(0)
-    // Both failed drafts still made one request each, and the survivor one: 3 attempts in total.
-    expect(partial?.attempts).toBe(3)
-  })
-
-  it('keeps a survivor usageIncomplete when an earlier attempt lost its usage', async () => {
-    const draftAttempts = new Map<number, number>()
-    const stream = (options: { messages: readonly unknown[] }) => {
-      const prompt = promptText(options)
-      const draft = /Draft (\d+) of \d+\./.exec(prompt)
-      if (draft !== null) {
-        const number = Number(draft[1])
-        const seen = (draftAttempts.get(number) ?? 0) + 1
-        draftAttempts.set(number, seen)
-        if (number === 1 && seen === 1) return (async function* () { throw new Error('network hiccup') })()
-        return textStream('draft ' + number + ' body')
-      }
-      return textStream('reasoning\n<score_A> A </score_A>\n<score_B> T </score_B>')
-    }
-    const definition = assemble({ ...JUDGE, maxRetries: 2, retryBaseDelayMs: 1 }, { stream, sessions: [{ id: 'session-1', createdAt: 1 }] }).tools.get('verifier_best_of_n')!
-    const result = await definition.execute({ task: 'do the thing', n: 3 }, exec) as Record<string, any>
-    expect(result.failed).toBe(0)
-    // Draft 1's first attempt failed with unknown usage; the surviving attempt's tokens are a
-    // floor, and addUsage() used to drop that flag.
-    expect(result.stats.usageIncomplete).toBe(true)
-  })
-
-  it('keeps generation and tournament usage when the baseline comparison fails', async () => {
-    const stream = (options: { messages: readonly unknown[] }) => {
-      const prompt = promptText(options)
-      const draft = /Draft (\d+) of \d+\./.exec(prompt)
-      if (draft !== null) return textStream('draft ' + draft[1] + ' body')
-      if (prompt.includes(BASELINE)) return (async function* () { throw new Error('baseline judge exploded') })()
-      return textStream('reasoning\n<score_A> A </score_A>\n<score_B> T </score_B>')
-    }
-    const definition = assemble(JUDGE, { stream, sessions: [{ id: 'session-1', createdAt: 1 }] }).tools.get('verifier_best_of_n')!
-    const error = await definition.execute({ task: 'do the thing', n: 2 }, exec).catch(reason => reason)
-    const partial = partialStats(error)
-    // Drafts were generated and the tournament ran before the baseline blew up.
-    expect(partial?.calls ?? 0).toBeGreaterThan(0)
-    expect(partial?.inputTokens ?? 0).toBeGreaterThan(0)
-  })
-
-  it('registers a gate-shaped output schema', () => {
-    const definition = assemble().tools.get('verifier_best_of_n')!
-    const properties = definition.output.schema.properties
-    for (const key of [
-      'best', 'index', 'sources', 'scores', 'ranking', 'comparisons', 'pivots', 'generated', 'failed',
-      'failures', 'score', 'baselineScore', 'winner', 'criteria', 'threshold', 'passesThreshold',
-      'failedCriteria', 'calls', 'stats', 'generatorProvider', 'generatorModel', 'provider', 'model', 'judges',
-    ]) expect(properties[key], key).toBeDefined()
-  })
-
-  it('rejects an out-of-range draft count and a blank task before any model call', async () => {
-    const calls: Array<Record<string, unknown>> = []
-    const execute = assemble(JUDGE, { stream: scriptedStream(1, [], calls) }).tools.get('verifier_best_of_n')!.execute
-    await expect(execute({ task: 'do it', n: 5 }, exec)).rejects.toThrow(/n must be an integer between 2 and 4/u)
-    await expect(execute({ task: 'do it', n: 1 }, exec)).rejects.toThrow(/n must be an integer between 2 and 4/u)
-    await expect(execute({ task: '   ', n: 2 }, exec)).rejects.toThrow(/task\[0\] must be a non-empty string/u)
-    expect(calls).toHaveLength(0)
-  })
-
-  it('drafts with the session model, ranks the drafts, and reports the gate-comparable score', async () => {
-    const calls: Array<Record<string, unknown>> = []
-    const result = await assemble(JUDGE, { stream: scriptedStream(2, [], calls) }).tools.get('verifier_best_of_n')!
-      .execute({ task: 'Fix the parser and prove it passes.' }, exec) as Record<string, any>
-    expect(result.generated).toBe(3)
-    expect(result.failed).toBe(0)
-    expect(result.failures).toEqual([])
-    expect(result.sources).toEqual([1, 2, 3])
-    // Draft 2 is the only one that shows verification, so it must win the tournament.
-    expect(result.index).toBe(1)
-    expect(result.best).toContain('COMPLETE-AND-VERIFIED')
-    expect(result.scores[1]).toBeGreaterThan(result.scores[0]!)
-    // The absolute score comes from the winner-vs-baseline comparison in the acceptance
-    // threshold's units, NOT from the relative tournament shares.
-    expect(result.score).toBe(1)
-    expect(result.baselineScore).toBe(0)
-    expect(result.winner).toBe('A')
-    expect(result.threshold).toBe(0.65)
-    expect(result.passesThreshold).toBe(true)
-    expect(result.failedCriteria).toEqual([])
-    expect(result.provider).toBe('judge-provider')
-    expect(result.model).toBe('judge-model')
-    expect(result.generatorProvider).toBe('session-provider')
-    expect(result.generatorModel).toBe('session-model')
-    // Generation used the session route with diversity sampling; judging used the judge route.
-    const drafted = calls.filter(call => call.model === 'session-model')
-    expect(drafted).toHaveLength(3)
-    for (const call of drafted) {
-      expect(call.provider).toBe('session-provider')
-      expect(call.temperature).toBe(1)
-      expect(call.maxTokens).toBe(16384)
-      expect(call.reasoningEffort).toBe('high')
-    }
-    expect(calls.filter(call => call.model === 'judge-model').length).toBeGreaterThan(3)
-    // The reported cost covers the drafts as well as every judge call.
-    expect(result.calls).toBe(calls.length)
-    // judges[].calls covers the WHOLE invocation: the tournament (18) plus the baseline (6).
-    expect(result.judges[0].calls).toBe(24)
-    expect(result.judges[0].calls + result.generated).toBe(result.calls)
-  })
-
-  it('keeps a truncated draft, retries it once, and reports it instead of returning nothing', async () => {
-    // Regression from the first real end-to-end acceptance: every draft of a long task hit the
-    // output ceiling and the tool failed with "0 usable draft(s)" — the judge contract's
-    // max-tokens error had leaked into the generator.
-    const calls: Array<Record<string, unknown>> = []
-    const result = await assemble(JUDGE, { stream: scriptedStream(1, [], calls, [1]) }).tools.get('verifier_best_of_n')!
-      .execute({ task: 'do the thing' }, exec) as Record<string, any>
-    expect(result.generated).toBe(3)
-    expect(result.truncated).toEqual([1])
-    // One capped attempt per draft, no hidden second generation.
-    const ceilings = calls.filter(call => call.model === 'session-model').map(call => call.maxTokens)
-    expect(ceilings).toEqual([16384, 16384, 16384])
-    // A truncated draft is still judged on its text, so the strong one can still win.
-    expect(result.index).toBe(0)
-    expect(result.best).toContain('COMPLETE-AND-VERIFIED')
-    expect(result.passesThreshold).toBe(true)
-  })
-
-  it('renders a result that satisfies the declared output schema', async () => {
-    const definition = assemble(JUDGE, { stream: scriptedStream(2, [], []) }).tools.get('verifier_best_of_n')!
-    const result = await definition.execute({ task: 'do the thing' }, exec)
-    assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'best_of_n')
-  })
-
-  it('fails closed when fewer than two drafts survive, naming every failure', async () => {
-    const execute = assemble(JUDGE, { stream: scriptedStream(1, [1, 3], []) }).tools.get('verifier_best_of_n')!.execute
-    await expect(execute({ task: 'do the thing' }, exec)).rejects.toThrow(/produced 1 usable draft\(s\) out of 3; at least 2 are required/u)
-    await expect(execute({ task: 'do the thing' }, exec)).rejects.toThrow(/draft 1: draft 1 exploded; draft 3: draft 3 exploded/u)
-  })
-
-  it('reports a failing absolute score when every draft is weak', async () => {
-    const result = await assemble(JUDGE, { stream: scriptedStream(0, [], []) }).tools.get('verifier_best_of_n')!
-      .execute({ task: 'do the thing' }, exec) as Record<string, any>
-    expect(result.generated).toBe(3)
-    expect(result.winner).toBe('A')
-    expect(result.score).toBeLessThan(0.65)
-    expect(result.passesThreshold).toBe(false)
-    expect(result.failedCriteria).toHaveLength(3)
-  })
-
-  it('stays inside the documented cost envelope', async () => {
-    // The README and the tool description publish these numbers, so they are locked here:
-    // 2 drafts + 6 tournament calls + 6 baseline calls; 3 + 18 + 6; n=4 adds 1..5 extra
-    // tournament pairs (36..54 judge calls) because the pivot round de-duplicates against the ring.
-    const measured: Record<number, { calls: number; comparisons: number }> = {}
-    for (const n of [2, 3, 4]) {
-      const result = await assemble(JUDGE, { stream: scriptedStream(2, [], []) }).tools.get('verifier_best_of_n')!
-        .execute({ task: 'do the thing', n }, exec) as Record<string, any>
-      measured[n] = { calls: result.calls, comparisons: result.comparisons }
-    }
-    expect(measured[2]).toEqual({ calls: 14, comparisons: 1 })
-    expect(measured[3]).toEqual({ calls: 27, comparisons: 3 })
-    expect(measured[4]!.calls).toBeGreaterThanOrEqual(40)
-    expect(measured[4]!.calls).toBeLessThanOrEqual(64)
-  })
-
-  it('uses the host’s current model selection instead of the historical request route', async () => {
-    const calls: Array<Record<string, unknown>> = []
-    const selectedExec = {
-      ...exec,
-      agent: {
-        ...exec.agent,
-        model: { current: () => ({ provider: 'next-provider', model: 'next-model', reasoningEffort: 'low' }) },
-      },
-    }
-    const result = await assemble(JUDGE, { stream: scriptedStream(2, [], calls) }).tools.get('verifier_best_of_n')!
-      .execute({ task: 'do the thing', n: 2 }, selectedExec) as Record<string, any>
-    expect(result.generatorProvider).toBe('next-provider')
-    expect(result.generatorModel).toBe('next-model')
-    expect(calls.filter(call => call.model === 'next-model')).toHaveLength(2)
-    expect(calls.some(call => call.model === 'session-model')).toBe(false)
-  })
-
-  it('explains what to do when no current or historical model is available', async () => {
-    const execute = assemble(JUDGE, { stream: scriptedStream(1, [], []) }).tools.get('verifier_best_of_n')!.execute
-    await expect(execute({ task: 'do the thing' }, bareExec)).rejects.toThrow(/no current model selection or logged request header/u)
-  })
-})
-
-/**
- * The explicit session verifier once returned a field its own output schema did not declare.
- * The host rejects that whole call with INVALID_TOOL_OUTPUT long before the model sees a
- * verdict, and because the failure does not depend on the arguments, a retry makes the same
- * model call and fails identically — it reads like a transient tool error. This suite asserts
- * the REAL return value against the declared schema instead of the fields the test knows about.
- */
 describe('verifier_current_session', () => {
   /** A session with a real event log: the tool has to extract its own task, trace and image refs. */
   const sessionExec = {
@@ -718,98 +522,10 @@ describe('explicit review stages', () => {
     expect(calls).toHaveLength(0)
   })
 
-  it('ranks best-of-N drafts as a proposal but measures the winner with the delivery rubric', async () => {
-    const prompts: string[] = []
-    const stream = (options: { messages: readonly unknown[] }) => {
-      const prompt = promptText(options)
-      prompts.push(prompt)
-      const draft = /Draft (\d+) of \d+\./.exec(prompt)
-      if (draft !== null) {
-        const number = Number(draft[1])
-        return textStream((number === 2 ? STRONG_DRAFT : WEAK_DRAFT) + ' Draft ' + number + '.')
-      }
-      const sideA = section(prompt, 'TRAJECTORY_A') || section(prompt, 'PROPOSAL_A')
-      const sideB = section(prompt, 'TRAJECTORY_B') || section(prompt, 'PROPOSAL_B')
-      return textStream('<score_A> ' + verdictLetter(sideA) + ' </score_A>\n<score_B> ' + verdictLetter(sideB) + ' </score_B>')
-    }
-    const definition = assemble(JUDGE, { stream, sessions: [{ id: 'session-1', createdAt: 1 }] }).tools.get('verifier_best_of_n')!
-    const result = await definition.execute({ task: 'do the thing' }, exec) as Record<string, any>
-    expect(result.rankingStage).toBe('proposal')
-    expect(result.rankingCriteriaSource).toBe('proposal')
-    expect(result.rankingCriteriaCount).toBe(3)
-    expect(result.baselineCriteriaSource).toBe('coding')
-    expect(result.baselineCriteriaCount).toBe(3)
-    const judges = prompts.filter(prompt => !/Draft \d+ of \d+\./.test(prompt))
-    const tournament = judges.filter(prompt => !prompt.includes(BASELINE))
-    const baseline = judges.filter(prompt => prompt.includes(BASELINE))
-    expect(tournament.length).toBeGreaterThan(0)
-    expect(baseline.length).toBeGreaterThan(0)
-    // Regression: scoring an unexecuted draft with the artifact rubric fails it by construction,
-    // so the tournament must use the proposal rubric while the baseline keeps the gate's own.
-    expect(tournament.every(prompt => prompt.includes('<<<PROPOSAL_A:'))).toBe(true)
-    expect(baseline.every(prompt => prompt.includes('<<<TRAJECTORY_A:'))).toBe(true)
-    // The absolute fields still come only from the baseline comparison.
-    expect(result.passesThreshold).toBe(true)
-    assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'best_of_n')
-  })
 
-  it('gives every draft and both judge comparisons the same reference context', async () => {
-    const prompts: string[] = []
-    const stream = (options: { messages: readonly unknown[] }) => {
-      const prompt = promptText(options)
-      prompts.push(prompt)
-      const draft = /Draft (\d+) of \d+\./.exec(prompt)
-      if (draft !== null) return textStream('draft ' + draft[1] + ' body')
-      const sideA = section(prompt, 'TRAJECTORY_A') || section(prompt, 'PROPOSAL_A')
-      const sideB = section(prompt, 'TRAJECTORY_B') || section(prompt, 'PROPOSAL_B')
-      return textStream('<score_A> ' + verdictLetter(sideA) + ' </score_A>\n<score_B> ' + verdictLetter(sideB) + ' </score_B>')
-    }
-    const definition = assemble(JUDGE, { stream, sessions: [{ id: 'session-1', createdAt: 1 }] }).tools.get('verifier_best_of_n')!
-    const result = await definition.execute({ task: 'do the thing', n: 2, context: 'Only stdlib may be used.' }, exec) as Record<string, any>
-    expect(result.contextIncluded).toBe(true)
-    const blocks = prompts.map(prompt => section(prompt, 'CONTEXT'))
-    expect(blocks).toHaveLength(prompts.length)
-    // Every call — 2 drafts plus the tournament and the baseline — sees the identical block.
-    expect(new Set(blocks).size).toBe(1)
-    expect(blocks[0]).toContain('Only stdlib may be used.')
-    assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'best_of_n')
-  })
 
-  it('keeps the task-only input when no context is given', async () => {
-    const prompts: string[] = []
-    const stream = (options: { messages: readonly unknown[] }) => {
-      prompts.push(promptText(options))
-      return textStream('reasoning\n<score_A> A </score_A>\n<score_B> T </score_B>')
-    }
-    const definition = assemble(JUDGE, { stream, sessions: [{ id: 'session-1', createdAt: 1 }] }).tools.get('verifier_best_of_n')!
-    const result = await definition.execute({ task: 'do the thing', n: 2 }, exec) as Record<string, any>
-    expect(result.contextIncluded).toBe(false)
-    expect(prompts.every(prompt => !prompt.includes('<<<CONTEXT:'))).toBe(true)
-  })
 
-  it('bounds the context per item and rejects a blank one, like every other evidence field', async () => {
-    const prompts: string[] = []
-    const stream = (options: { messages: readonly unknown[] }) => {
-      prompts.push(promptText(options))
-      return textStream('reasoning\n<score_A> A </score_A>\n<score_B> T </score_B>')
-    }
-    const definition = assemble(JUDGE, { stream, sessions: [{ id: 'session-1', createdAt: 1 }] }).tools.get('verifier_best_of_n')!
-    const result = await definition.execute({ task: 'do the thing', n: 2, context: 'C'.repeat(300_000) }, exec) as Record<string, any>
-    expect(result.contextIncluded).toBe(true)
-    // Per-item cap (autoRouteMaxItemChars = 20000) plus the block framing, not 300k characters.
-    expect(section(prompts[0]!, 'CONTEXT').length).toBeLessThan(20_100)
-    // A whitespace-only context is simply "no context", never an error the caller must fix.
-    const bare = await definition.execute({ task: 'do the thing', n: 2, context: '   ' }, exec) as Record<string, any>
-    expect(bare.contextIncluded).toBe(false)
-  })
 
-  it('keeps an explicit best-of-N rubric in control of both phases', async () => {
-    const result = await assemble(JUDGE, { stream: scriptedStream(2, [], []) }).tools.get('verifier_best_of_n')!
-      .execute({ task: 'do the thing', n: 2, criteria: [{ id: 'mine', name: 'Mine', description: 'judge only this one thing' }] }, exec) as Record<string, any>
-    expect(result.rankingCriteriaSource).toBe('explicit')
-    expect(result.baselineCriteriaSource).toBe('explicit')
-    expect(result.criteria.map((row: any) => row.id)).toEqual(['mine'])
-  })
 })
 
 describe('identical-candidate verdicts', () => {
@@ -885,15 +601,6 @@ describe('usage diagnostics in tool outputs', () => {
     assertMatchesSchema(roundTripped, definition.output.schema as Record<string, any>, 'compare')
   })
 
-  it('marks a partial generation failure incomplete and still satisfies the output schema', async () => {
-    // Draft 1 dies, drafts 2 and 3 survive: the invocation succeeds, but the failed request
-    // really happened. The REAL return value must carry the flag AND satisfy the schema.
-    const definition = assemble(JUDGE, { stream: scriptedStream(1, [1], []) }).tools.get('verifier_best_of_n')!
-    const result = await definition.execute({ task: 'do the thing' }, exec) as Record<string, any>
-    expect(result.failed).toBe(1)
-    expect(result.stats.usageIncomplete).toBe(true)
-    assertMatchesSchema(result, definition.output.schema as Record<string, any>, 'best_of_n')
-  })
 })
 
 /**
@@ -1544,89 +1251,10 @@ describe('routing-cycle budget through the real hooks', () => {
   const isRouter = (prompt: string) => prompt.includes('conservative verifier router')
   const isJudge = (prompt: string) => prompt.includes('TRAJECTORY_A')
 
-  it('lets a plan pre-review be followed by a classify+compare cycle under the shipped two attempts', async () => {
-    const calls: Array<Record<string, unknown>> = []
-    const { handlers } = assemble({ ...JUDGE, autoRouteMaxPerTask: 2, autoVerifyPlanMode: true }, { stream: cycleStream(calls), sessions: [{ id: 'agent-cycle', createdAt: 1 }] })
-    const steered: unknown[] = []
-    const signal = new AbortController().signal
-    await handlers.get('tools/pre-execute')!({ name: 'exit_plan_mode', arguments: { plan: 'Split the work and verify each part.' }, agent: agent(alternatives, steered), signal }, () => ({ kind: 'allow' }))
-    await handlers.get('agent/turn-stopping')!({ agent: agent(alternatives, steered), signal })
-    const prompts = calls.map(call => String(call.prompt))
-    expect(prompts.filter(isPlan)).toHaveLength(1)
-    expect(prompts.filter(isRouter)).toHaveLength(1)
-    // The compare really executed: six judge calls (three criteria x two rounds).
-    expect(prompts.filter(isJudge)).toHaveLength(6)
-    expect(JSON.stringify(steered)).toContain('Automatic verifier routing: compare')
-  })
 
-  it('falls through to the eligible final gate when the attempt budget is already spent', async () => {
-    const calls: Array<Record<string, unknown>> = []
-    const { handlers } = assemble({ ...JUDGE, autoRouteMaxPerTask: 1, autoVerifyPlanMode: true }, { stream: cycleStream(calls), sessions: [{ id: 'agent-cycle', createdAt: 1 }] })
-    const steered: unknown[] = []
-    const signal = new AbortController().signal
-    await handlers.get('tools/pre-execute')!({ name: 'exit_plan_mode', arguments: { plan: 'Split the work.' }, agent: agent(alternatives, steered), signal }, () => ({ kind: 'allow' }))
-    await handlers.get('agent/turn-stopping')!({ agent: agent(alternatives, steered), signal })
-    const prompts = calls.map(call => String(call.prompt))
-    // The plan used the only route attempt, so no classification and no routed compare.
-    expect(prompts.filter(isRouter)).toHaveLength(0)
-    expect(JSON.stringify(steered)).not.toContain('Automatic verifier routing: compare')
-    // Work is still eligible, so the mandatory final acceptance runs.
-    expect(prompts.filter(isJudge).length).toBeGreaterThan(0)
-  })
 
-  it('refuses a plan below the threshold and carries the findings as structured detail', async () => {
-    const calls: Array<Record<string, unknown>> = []
-    const { handlers } = assemble({ ...JUDGE, autoVerifyPlanMode: true }, {
-      stream: (options: { messages: readonly unknown[] }) => {
-        const prompt = promptText(options)
-        calls.push({ prompt })
-        return textStream(isPlan(prompt) ? 'Verdict: T\nSummary: no rollback step and no verification.' : 'Verdict: T\nSummary: unrelated.')
-      },
-      sessions: [{ id: 'agent-cycle', createdAt: 1 }],
-    })
-    const decision = await handlers.get('tools/pre-execute')!(
-      { name: 'exit_plan_mode', arguments: { plan: 'Just start coding.' }, agent: agent(alternatives, []), signal: new AbortController().signal },
-      () => ({ kind: 'allow' }),
-    ) as { kind: string; reason: string; info?: { name: string; code: string; reason?: string } }
 
-    expect(decision.kind).toBe('deny')
-    // The model still reads one sentence, and the reader gets the identity and the raw findings.
-    expect(decision.reason).toContain('[Automatic Verifier Plan Pre-review]')
-    expect(decision.info?.name).toBe('VerifierPlanPreReviewDenied')
-    expect(decision.info?.code).toBe('VERIFIER_PLAN_PRE_REVIEW_DENIED')
-    expect(decision.info?.reason).toContain('no rollback step')
-  })
 
-  it('hands an already-cancelled gate call the cancellation result instead of a refusal', async () => {
-    const calls: Array<Record<string, unknown>> = []
-    const { handlers } = assemble({ ...JUDGE, autoVerifyPlanMode: true }, { stream: cycleStream(calls), sessions: [{ id: 'agent-cycle', createdAt: 1 }] })
-    const controller = new AbortController()
-    controller.abort()
-
-    const decision = await handlers.get('tools/pre-execute')!(
-      { name: 'exit_plan_mode', arguments: { plan: 'Anything.' }, agent: agent(alternatives, []), signal: controller.signal },
-      () => ({ kind: 'allow' }),
-    )
-
-    expect(decision).toEqual({ kind: 'cancel' })
-    // Cancellation is decided by the host, never bought from a judge.
-    expect(calls).toHaveLength(0)
-  })
-
-  it('delegates calls it does not gate, cancellation included', async () => {
-    const calls: Array<Record<string, unknown>> = []
-    const { handlers } = assemble({ ...JUDGE, autoVerifyPlanMode: true }, { stream: cycleStream(calls), sessions: [{ id: 'agent-cycle', createdAt: 1 }] })
-    const controller = new AbortController()
-    controller.abort()
-
-    const decision = await handlers.get('tools/pre-execute')!(
-      { name: 'bash', arguments: { command: 'ls' }, agent: agent(alternatives, []), signal: controller.signal },
-      () => ({ kind: 'allow' }),
-    )
-
-    expect(decision).toEqual({ kind: 'allow' })
-    expect(calls).toHaveLength(0)
-  })
 
   it('stores a classification and its promoted execution under one cycle id', async () => {
     const calls: Array<Record<string, unknown>> = []
@@ -2239,7 +1867,7 @@ describe('IoT-Lite through the real hooks', () => {
     expect(aux[0]?.tools).toBeUndefined()
     // The command plane was deliberately removed: no /iot registration and no hidden session override.
     expect(injections.filter(entry => typeof entry.deps === 'object' && entry.deps !== null && !Array.isArray(entry.deps) && 'commands' in entry.deps)).toEqual([])
-    expect(tools.size).toBe(5)
+    expect(tools.size).toBe(4)
   })
 
   it('enables a configured additional main provider and applies its auxiliary override', async () => {

@@ -206,7 +206,6 @@ export interface Config {
   /** Markdown rubric file, read when `criteriaPreset` is `custom`. See README for the format. */
   criteriaFile?: string
   autoVerifyTeamTasks?: boolean
-  autoVerifyPlanMode?: boolean
   autoVerifySubagents?: boolean
   /**
    * Attach the host's own record of what the workspace changed to session acceptance.
@@ -277,7 +276,6 @@ export interface ResolvedConfig {
   criteriaPreset: CriteriaPresetSelection
   criteriaFile: string
   autoVerifyTeamTasks: boolean
-  autoVerifyPlanMode: boolean
   autoVerifySubagents: boolean
   autoWorkspaceEvidence: boolean
   provider: string
@@ -500,7 +498,6 @@ export const Config = markVolatile(z.object({
   criteriaPreset: z.union([...CRITERIA_PRESET_IDS, 'custom'] as const).default('coding'),
   criteriaFile: z.string().default(''),
   autoVerifyTeamTasks: z.boolean().default(true),
-  autoVerifyPlanMode: z.boolean().default(true),
   autoVerifySubagents: z.boolean().default(false),
   autoWorkspaceEvidence: z.boolean().default(true),
   provider: z.string().default('deepseek-official'),
@@ -767,7 +764,6 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     criteriaPreset,
     criteriaFile,
     autoVerifyTeamTasks: config.autoVerifyTeamTasks ?? true,
-    autoVerifyPlanMode: config.autoVerifyPlanMode ?? true,
     autoVerifySubagents: config.autoVerifySubagents ?? false,
     autoWorkspaceEvidence: config.autoWorkspaceEvidence ?? true,
     provider,

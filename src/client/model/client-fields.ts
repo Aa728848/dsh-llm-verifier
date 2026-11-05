@@ -48,7 +48,6 @@ export interface Values {
   autoMaxModelCallsPerTask: number
   autoMaxModelCallsPerSession: number
   autoVerifyTeamTasks: boolean
-  autoVerifyPlanMode: boolean
   criteriaPreset: 'coding' | 'debug' | 'research' | 'ops' | 'writing' | 'custom'
   criteriaFile: string
   provider: string
@@ -115,7 +114,6 @@ export const CONFIG_DEFAULTS: Values = {
   autoMaxModelCallsPerTask: 96,
   autoMaxModelCallsPerSession: 240,
   autoVerifyTeamTasks: true,
-  autoVerifyPlanMode: true,
   criteriaPreset: 'coding',
   criteriaFile: '',
   provider: '',
@@ -251,7 +249,6 @@ export const FIELDS: readonly FieldSpec[] = [
   number('autoTrackCompletionThreshold', 'routing', { min: 0, max: 1, slider: true }),
   number('autoTrackRepeats', 'routing', { min: 1, integer: true }),
   toggle('autoVerifyTeamTasks', 'routing'),
-  toggle('autoVerifyPlanMode', 'routing'),
   toggle('autoVerifySubagents', 'routing'),
   toggle('autoWorkspaceEvidence', 'routing'),
   select('autoProcessSelection', 'routing', 'processSelection'),
@@ -405,7 +402,6 @@ export function valuesFromView(view: Record<string, unknown> | undefined): Value
     autoMaxModelCallsPerTask: numberOr('autoMaxModelCallsPerTask'),
     autoMaxModelCallsPerSession: numberOr('autoMaxModelCallsPerSession'),
     autoVerifyTeamTasks: v.autoVerifyTeamTasks !== false,
-    autoVerifyPlanMode: v.autoVerifyPlanMode !== false,
     criteriaPreset: preset,
     criteriaFile: typeof v.criteriaFile === 'string' ? v.criteriaFile.trim() : '',
     provider: String(v.provider ?? ''),
@@ -611,7 +607,6 @@ const POLICY_KEYS = [
   'autoMaxModelCallsPerTask',
   'autoMaxModelCallsPerSession',
   'autoVerifyTeamTasks',
-  'autoVerifyPlanMode',
   'autoVerifySubagents',
   'autoProcessSelection',
   'maxProcessCyclesPerTask',
@@ -660,7 +655,6 @@ export function applyProfile(values: Values, id: ProfileId, criteria = WORST_CAS
         autoVerifyMaxPerSession: 3,
         autoTrackRepeats: 1,
         autoVerifyTeamTasks: false,
-        autoVerifyPlanMode: false,
       }
     case 'toolsOnly':
       return { ...base, ...budgets, autoVerifyMode: 'manual' }

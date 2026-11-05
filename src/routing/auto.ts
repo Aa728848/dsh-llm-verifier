@@ -46,7 +46,7 @@ const PASSIVE_TOOLS = new Set([
   'todo_write', 'team_task_list', 'team_task_get', 'present', 'run_code',
 ])
 const VERIFIER_TOOLS = new Set([
-  'verifier_compare', 'verifier_select', 'verifier_track', 'verifier_best_of_n', 'verifier_current_session',
+  'verifier_compare', 'verifier_select', 'verifier_track', 'verifier_current_session',
 ])
 const CONSEQUENTIAL_TOOLS = new Set([
   'edit', 'write', 'pwsh', 'bash', 'codex_image_generate',

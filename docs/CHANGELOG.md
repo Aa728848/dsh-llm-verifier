@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- **[移除] 计划预审与 `verifier_best_of_n`**
+  - 删除 `tools/pre-execute` 钩子、`src/gates/plan-gate.ts` 与 `src/gates/tool-decision.ts`；计划模式的角色回到「挂起全部自动门控」，不再在 `exit_plan_mode` 前拦截人类审批
+  - 删除 `verifier_best_of_n` 工具及其生成侧实现（`generateCandidate` / `generationClient` / `buildGenerationPrompt`），工具面由五个收敛为四个；`EMPTY_WORK_BASELINE` 与 `GENERATION_TEMPERATURE` 因仍被终验与 P06 使用而保留
+  - 配置删除 `autoVerifyPlanMode`（schema / resolveConfig / 设置页字段 / 中英文案一并清理），已保存配置中的该键按未知键忽略
+  - `parseVerdictLetter` 迁至 `src/gates/verdict.ts`，继续供 Team 任务闸使用
 
 ## 0.17.0 - 2026-11-05
 - **[新增] 辅助思考期间对话区显示「辅助思考中…」**

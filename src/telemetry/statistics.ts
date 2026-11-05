@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { RunStats } from '../engine/engine.ts'
 
-export const VERIFIER_TOOL_NAMES = ['verifier_route_classify', 'verifier_compare', 'verifier_select', 'verifier_track', 'verifier_best_of_n', 'verifier_current_session'] as const
+export const VERIFIER_TOOL_NAMES = ['verifier_route_classify', 'verifier_compare', 'verifier_select', 'verifier_track', 'verifier_current_session'] as const
 export type VerifierToolName = typeof VERIFIER_TOOL_NAMES[number]
 
 export interface VerdictSummary {
@@ -114,8 +114,8 @@ export function summarizeVerdict(toolName: VerifierToolName, value: unknown, pha
 /**
  * Verdict of a run that was measured against the fixed empty-work baseline.
  *
- * Shared by the automatic session acceptance and by `verifier_best_of_n`: both answer
- * "is this good enough to conclude", and both are decided by the same three conditions.
+ * Answers "is this good enough to conclude" for the automatic session acceptance, decided by
+ * the same three conditions the gate applies.
  * @param row - the rendered result.
  * @param phase - which stage produced it.
  * @param thresholds - resolved acceptance thresholds.

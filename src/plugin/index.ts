@@ -8,7 +8,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import { Config, installVerifierSettings, resolveConfig } from '../config/config.ts'
-import { RequestLimiter, attachUsage, callVerifier, callVerifierText, generateCandidate, requestAttempts, type UsageStats, type VerifierClientConfig } from '../judge/caller.ts'
+import { RequestLimiter, attachUsage, callVerifier, callVerifierText, requestAttempts, type UsageStats, type VerifierClientConfig } from '../judge/caller.ts'
 import { TopLogprobCapabilityCache, resolveCapabilityFile } from '../judge/top-logprobs.ts'
 import { ScoreCache, SingleFlight, resolveCacheFile, stableHash, type CachedPairScore } from '../engine/cache.ts'
 import { VerifierEngine, mergeRunStats, normalizeCriteria, partialStats, type JudgeScore, type RunStats } from '../engine/engine.ts'
@@ -20,9 +20,8 @@ import { AutoVerifierRouter, analyzeStructuredRoute, boundDecision, buildSemanti
 import { VerifierActivities, createActivityObserver, type ActivityView } from '../telemetry/verifier-activity.ts'
 import { ProcessCycleStore, ProcessSelector, resolveProcessFile, type ProcessCycleReport } from '../process/process-selection.ts'
 import { IoTController } from '../iot/index.ts'
-import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, PROPOSAL_CRITERIA, buildGenerationPrompt, buildPairwisePrompt, extractScore, renderDiagnostics, renderReferenceContext, type Diagnostic, type ReviewStage } from '../scoring/core.ts'
-import { buildPlanPreReviewPrompt, parseVerdictLetter, planFromArguments } from '../gates/plan-gate.ts'
-import { cancelledCall, denyWithInfo } from '../gates/tool-decision.ts'
+import { DEFAULT_GROUND_TRUTH_NOTE, EMPTY_WORK_BASELINE, PROPOSAL_CRITERIA, buildPairwisePrompt, extractScore, renderDiagnostics, renderReferenceContext, type Diagnostic, type ReviewStage } from '../scoring/core.ts'
+import { parseVerdictLetter } from '../gates/verdict.ts'
 import { inspectTeamTasks, buildTeamTaskVerificationPrompt } from '../gates/team-gate.ts'
 import { StatisticsStore, emptyRunStats, errorDetails, mergeStatisticsOverviews, parseStatisticsQuery, resolveStatisticsFile, summarizeVerdict, type RouteObservation, type StatisticsOverview, type VerdictSummary, type VerifierToolName } from '../telemetry/statistics.ts'
 import { resolveTopicDataDir, type SessionArtifactLocator } from '../transcript/topic-storage.ts'
@@ -42,7 +41,7 @@ export * from '../telemetry/decisions.ts'
 export * from '../routing/auto.ts'
 export * from '../routing/router.ts'
 export * from '../judge/pricing.ts'
-export * from '../gates/plan-gate.ts'
+export * from '../gates/verdict.ts'
 export * from '../gates/team-gate.ts'
 export * from '../transcript/workspace.ts'
 export { callVerifier, RequestLimiter, type VerifierClientConfig, type VerifierImage, type UsageStats, type VerifierCompletion } from '../judge/caller.ts'
@@ -132,11 +131,6 @@ const MAX_EXPLICIT_PLANNED_CALLS = 500
  * (plan 8.1), so one task's cycle can never consume another task's.
  */
 const MAX_PROCESS_PER_TASK = 1
-/** Bound on the plan pre-review findings, both in the refusal sentence and in its structured detail. */
-const PLAN_REVIEW_FEEDBACK_CHARS = 4000
-const MIN_BEST_OF_N = 2
-const MAX_BEST_OF_N = 4
-const DEFAULT_BEST_OF_N = 3
 interface EvidenceBounds { autoRouteMaxItemChars: number; autoRouteMaxInputChars: number }
 function explicitItemChars(selected: EvidenceBounds): number { return Math.max(selected.autoRouteMaxItemChars, EXPLICIT_MIN_ITEM_CHARS) }
 function explicitBudget(selected: EvidenceBounds): number { return Math.min(Math.max(selected.autoRouteMaxInputChars * 2, EXPLICIT_MIN_TOTAL_CHARS), EXPLICIT_MAX_TOTAL_CHARS) }
@@ -571,196 +565,6 @@ export function apply(ctx: Context, config: Config = {}): void {
     const { verifier, selected } = await engine(agent)
     return { result: await verifier.track(problem, steps, checkpoints, repeats, signal, routedImages, trace), selected }
   }, phase, observation)
-  /**
-   * Explicit best-of-N: draft N candidates with the session model, rank them with the
-   * configured judges, then re-measure the winner against the gate's own baseline.
-   *
-   * The tournament's `scores` are relative preference shares (wins/counts) and cannot be
-   * compared with `autoVerifyThreshold`; only the extra winner-vs-baseline comparison produces
-   * an absolute score in the gate's units. That comparison is why this tool exists instead of
-   * "generate candidates yourself and call verifier_select".
-   *
-   * Fail-closed by construction: fewer than {@link MIN_BEST_OF_N} surviving drafts is an error
-   * that names every failure, never a silent "best" picked out of a single survivor.
-   * @param agent - Agent owning the topic, and the session whose model writes the drafts.
-   * @param task - the request the drafts answer.
-   * @param count - how many drafts to request ({@link MIN_BEST_OF_N}..{@link MAX_BEST_OF_N}).
-   * @param repeats - caller's repeat count, or undefined for the default; used by both the
-   *   tournament and the baseline comparison.
-   * @param signal - tool-call abort signal.
-   * @param criteriaInput - caller-supplied criteria, or undefined for the configured rubric.
-   */
-  const bestOfN = async (agent: Agent, task: string, count: number, repeats: number | undefined, signal: AbortSignal, criteriaInput: unknown, contextInput?: unknown) => record('verifier_best_of_n', agent, async (trace) => {
-    const { verifier, selected } = await engine(agent)
-    if (!Number.isSafeInteger(count) || count < MIN_BEST_OF_N || count > MAX_BEST_OF_N) throw new Error('llm-verifier: n must be an integer between ' + MIN_BEST_OF_N + ' and ' + MAX_BEST_OF_N)
-    const rounds = capped(repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats')
-    // The two comparisons answer different questions, so by default they use different rubrics:
-    // the drafts are UNEXECUTED text, so ranking them with the artifact rubric ("compare the final
-    // verification command's stdout/stderr") fails every draft by construction. Ranking therefore
-    // defaults to the proposal rubric, while the winner-vs-baseline measurement keeps the
-    // configured DELIVERY rubric — that step predicts the gate and must not be weakened. An
-    // explicit `criteria` still controls both, exactly as before.
-    const rankingRubric: ResolvedCriteria = criteriaInput === undefined ? { criteria: PROPOSAL_CRITERIA, source: 'proposal' } : { criteria: normalizeCriteria(criteriaInput), source: 'explicit' }
-    const baselineRubric: ResolvedCriteria = criteriaInput === undefined ? await configuredCriteria() : rankingRubric
-    // Bound the plan before spending the generation: with repeats and an ensemble this tool can
-    // reach the shared explicit ceiling, and an unbounded custom rubric would blow past it. The
-    // two phases are counted separately instead of assuming their rubrics are the same size.
-    const planned = (selectComparisonsUpperBound(count) * rankingRubric.criteria.length + baselineRubric.criteria.length) * rounds * selected.judges.length
-    if (planned > MAX_EXPLICIT_PLANNED_CALLS) throw new Error('llm-verifier: best-of-n with n=' + count + ' would issue about ' + planned + ' judge calls; reduce n, repeats, criteria or judges')
-    // The drafting model is the session's current selection; older hosts fall back to the logged request.
-    const target = sessionModelTarget(agent)
-    if (target === undefined) throw new Error('llm-verifier: this session has no current model selection or logged request header, so best-of-n cannot tell which model should write the drafts — generate candidates with parallel subagents and rank them with verifier_select instead')
-    // The drafts come from the session model, so they are priced with THAT route's rates rather
-    // than with the judge's, which is what the single manual table could only approximate.
-    const generationPrices = await pricesFor(target.provider, target.model, selected)
-    // The task and the optional reference context share ONE explicit budget, each with its own item
-    // cap, so a huge context cannot push the combined request past the documented ceiling.
-    const contextRaw = typeof contextInput === 'string' ? contextInput : undefined
-    const bounded = explicitEvidence(
-      [task, ...(contextRaw?.trim() ? [contextRaw] : [])],
-      explicitItemChars(selected),
-      explicitBudget(selected),
-      'task',
-    )
-    const problem = bounded[0]!
-    const referenceContext = bounded[1]
-    // Both judge comparisons read the same block the drafts were given; appending it to the problem
-    // is what makes "same context everywhere" true rather than aspirational.
-    const judgedProblem = referenceContext === undefined ? problem : problem + '\n\n' + renderReferenceContext(problem, referenceContext)
-    // N independent drafts, in parallel. A failure is captured per draft so the error below can
-    // name it; a draft that fails is never substituted with another one.
-    // Accumulated from the first generation call onward, so a failure in ANY phase (a draft, the
-    // tournament, the baseline comparison) carries everything already spent instead of zero.
-    const generation = emptyRunStats()
-    let unknownDrafts = 0
-    const finishGeneration = (): RunStats => {
-      generation.estimatedCostUsd = costUsd(generation, generationPrices)
-      return generation
-    }
-    const failWithUsage = (error: Error): never => {
-      attachUsage(error, finishGeneration())
-      throw error
-    }
-    const attempts = await Promise.all(Array.from({ length: count }, async (_unused, index) => {
-      const prompt = buildGenerationPrompt(problem, index, count, referenceContext)
-      try {
-        const completion = await generateCandidate(verifier.client, target, prompt, signal)
-        trace?.({ label: 'draft ' + (index + 1), channel: completion.scoringMode, prompt, output: completion.text })
-        return { ok: true as const, text: completion.text, usage: completion.usage, truncated: completion.truncated }
-      } catch (error) {
-        // Carry the error OBJECT (not just its message): the retry chain folds every attempt's
-        // tokens and attempt count into it, and a response-less failure still knows its attempts.
-        return { ok: false as const, message: error instanceof Error ? error.message : String(error), billed: partialStats(error), attempts: requestAttempts(error) }
-      }
-    }))
-    const survivors: Array<{ attempt: number; text: string; usage: UsageStats; truncated: boolean }> = []
-    const failures: string[] = []
-    attempts.forEach((attempt, index) => {
-      if (attempt.ok) {
-        survivors.push({ attempt: index + 1, text: attempt.text, usage: attempt.usage, truncated: attempt.truncated })
-        // mergeRunStats (not addUsage) so a survivor whose earlier retry attempt lost its usage
-        // keeps the usageIncomplete flag it carries.
-        mergeRunStats(generation, attempt.usage)
-      } else {
-        failures.push('draft ' + (index + 1) + ': ' + attempt.message)
-        if (attempt.billed !== undefined) mergeRunStats(generation, attempt.billed)
-        else {
-          // No usage carrier at all: the attempt count the transport knows about still counts.
-          generation.attempts += attempt.attempts
-          generation.retries += Math.max(0, attempt.attempts - 1)
-        }
-        // A draft whose tokens never came back makes the total a floor, not a measurement.
-        if (attempt.billed === undefined || attempt.billed.usageIncomplete === true) unknownDrafts += 1
-      }
-    })
-    if (survivors.length < MIN_BEST_OF_N) failWithUsage(new Error('llm-verifier: best-of-n produced ' + survivors.length + ' usable draft(s) out of ' + count + '; at least ' + MIN_BEST_OF_N + ' are required to choose between them' + (failures.length === 0 ? '' : ' — ' + failures.join('; '))))
-    let ranked: Awaited<ReturnType<typeof verifier.select>>
-    try {
-      ranked = await verifier.select({ problem: judgedProblem, candidates: survivors.map(survivor => survivor.text), criteria: rankingRubric.criteria, ...(rankingRubric.groundTruthNote ? { groundTruthNote: rankingRubric.groundTruthNote } : {}), repeats: rounds, pivots: Math.min(2, survivors.length), seed: 0, reviewStage: 'proposal', domain: rankingRubric.source, ...(trace ? { trace } : {}) }, signal)
-    } catch (error) {
-      // The drafts are already paid for; a tournament failure must not hide them.
-      mergeRunStats(generation, partialStats(error))
-      attachUsage(error, finishGeneration())
-      throw error
-    }
-    mergeRunStats(generation, ranked.stats)
-    // The absolute, gate-comparable measurement. Same fixed baseline, same threshold rule as the
-    // automatic final acceptance, so "passes" here means the same thing it means at the gate.
-    // The label prefix keeps the snapshot readable: this compare reuses the same criteria as the
-    // tournament above, so without it two different comparisons share one set of labels.
-    let compared: Awaited<ReturnType<typeof verifier.compare>>
-    try {
-      compared = await verifier.compare({ problem: judgedProblem, candidateA: ranked.best, candidateB: EMPTY_WORK_BASELINE, criteria: baselineRubric.criteria, traceLabelPrefix: 'baseline: ', reviewStage: 'artifact', domain: baselineRubric.source, ...(baselineRubric.groundTruthNote ? { groundTruthNote: baselineRubric.groundTruthNote } : {}), repeats: rounds, ...(trace ? { trace } : {}) }, signal)
-    } catch (error) {
-      // Baseline scoring failed: keep the generation AND tournament usage that preceded it.
-      mergeRunStats(generation, partialStats(error))
-      attachUsage(error, finishGeneration())
-      throw error
-    }
-    mergeRunStats(generation, compared.stats)
-    const criteria: AcceptanceCriterion[] = compared.criteria.map(row => ({ id: row.id, name: row.name, score: row.scoreA }))
-    const threshold = selected.autoVerifyThreshold
-    const passesThreshold = sessionAccepted({ score: compared.scoreA, winner: compared.winner, criteria }, threshold)
-    // One cost line for the whole invocation, generation included: the drafts are real tokens the
-    // operator paid for even though no judge scored them. Their price is estimated with the
-    // configured verifier table (the only one the plugin has), which the README states.
-    const stats = finishGeneration()
-    if (unknownDrafts > 0) stats.usageIncomplete = true
-    const result = {
-      best: ranked.best,
-      index: ranked.index,
-      /**
-       * The drafts are text this tool generated; it never executed or tested them.
-       *
-       * Reported explicitly so a caller cannot read the tournament ranking as evidence that the
-       * winning draft was verified — only `score`/`passesThreshold` (from the baseline
-       * comparison) carry the gate's meaning.
-       */
-      rankingStage: 'proposal' as const,
-      rankingCriteriaSource: rankingRubric.source,
-      rankingCriteriaCount: rankingRubric.criteria.length,
-      baselineCriteriaSource: baselineRubric.source,
-      baselineCriteriaCount: baselineRubric.criteria.length,
-      /** Whether the optional reference context was supplied and therefore seen by every call. */
-      contextIncluded: referenceContext !== undefined,
-      /** 1-based draft numbers of the survivors, in `scores`/`ranking` order. */
-      sources: survivors.map(survivor => survivor.attempt),
-      scores: ranked.scores,
-      ranking: ranked.ranking,
-      comparisons: ranked.comparisons,
-      pivots: ranked.pivots,
-      generated: survivors.length,
-      failed: failures.length,
-      failures,
-      /** 1-based draft numbers still truncated after their escalated retry; empty is the normal case. */
-      truncated: survivors.filter(survivor => survivor.truncated).map(survivor => survivor.attempt),
-      score: compared.scoreA,
-      baselineScore: compared.scoreB,
-      winner: compared.winner,
-      criteria: compared.criteria,
-      threshold,
-      passesThreshold,
-      failedCriteria: failedAcceptanceCriteria(criteria, threshold).map(criterion => criterion.id),
-      calls: stats.calls,
-      stats,
-      generatorProvider: target.provider,
-      generatorModel: target.model,
-      // Every judge call of this invocation, not just the tournament's: the winner-vs-baseline
-      // comparison runs on the same clients, and the top-level call count already includes it.
-      // `ok` therefore covers both comparisons while `scores`/`ranking` stay tournament-shaped.
-      judges: ranked.judges.map((judge, index) => {
-        const baseline = compared.judges[index]
-        if (baseline === undefined) return judge
-        return {
-          ...judge,
-          ok: judge.ok && baseline.ok,
-          calls: judge.calls + baseline.calls,
-          ...(judge.error === undefined && baseline.error !== undefined ? { error: baseline.error } : {}),
-        }
-      }),
-    }
-    return { result, selected }
-  })
   const classifyRoute = async (agent: Agent, prompt: string, signal: AbortSignal, phase: string, observation?: RouteObservation) => record('verifier_route_classify', agent, async (trace) => {
     const { verifier, selected, prices } = await engine(agent)
     const completion = await callVerifierText(verifier.client, prompt, signal)
@@ -1333,61 +1137,6 @@ export function apply(ctx: Context, config: Config = {}): void {
     return processSelector.handle(options, () => stream, intent)
   })
 
-  // Plan pre-review: judge exit_plan_mode BEFORE the tool asks the human, so a
-  // weak plan is sent back to the model instead of reaching the review dialog.
-  ctx.on('tools/pre-execute', async (exec, next) => {
-    const selected = current()
-    if (!selected.enabled || selected.autoVerifyMode === 'manual' || !selected.autoVerifyPlanMode) return next()
-    if (exec.name !== 'exit_plan_mode' || exec.agent === undefined) return next()
-    // A call the caller already cancelled is not a policy refusal: hand the host its own
-    // cancellation result instead of letting this gate decide a call that will not run.
-    if (exec.signal.aborted) return cancelledCall()
-    if (!selected.autoVerifySubagents && isSubagentSession(exec.agent)) return next()
-    const plan = planFromArguments(exec.arguments)
-    if (!plan) return next()
-    const agent = exec.agent
-    // Reserve the floor for one final acceptance before any route is admitted, so an
-    // expensive route cannot arm the mandatory gate and then leave it unaffordable.
-    const policy = routePolicy(selected, (await configuredCriteria()).criteria.length * selected.autoVerifyFinalRepeats * selected.judges.length)
-    const evidence = analyzeAutoTask(sessionEvents(agent.session), { mode: selected.autoVerifyMode, minToolCalls: selected.autoVerifyMinToolCalls, maxPerTask: selected.autoVerifyMaxPerTask, maxPerSession: selected.autoVerifyMaxPerSession, threshold: selected.autoVerifyThreshold }, String(agent.id))
-    const planFingerprint = stableHash({ phase: 'plan_review', plan })
-    const reservation = autoRouter.reserve(agent, 'plan_review', planFingerprint, 1, policy)
-    if (reservation === undefined) {
-      // Already reviewed, another verification is in flight, or the auto-verification
-      // budget is spent. The plan still reaches the human: denying here would let an
-      // exhausted budget deadlock plan mode, whose only exit is this very tool call.
-      if (!autoRouter.completedFingerprint(agent, planFingerprint)) {
-        ctx.logger.warn('llm-verifier plan pre-review skipped (verification in flight or auto-verification budget exhausted)')
-      }
-      return next()
-    }
-    try {
-      const toSeq = sessionEvents(agent.session).at(-1)?.seq ?? -1
-      const extracted = await extractTask(agent, evidence.taskStartSeq, toSeq, selected.autoVerifyMaxChars, exec.signal)
-      const classified = await classifyRoute(agent, buildPlanPreReviewPrompt(extracted.problem, plan, selected.autoRouteMaxInputChars), exec.signal, 'plan_review', { cycleId: reservation.id, trigger: 'plan', stage: 'classification', destination: 'plan_review', attempt: reservation.attempt, reservedCalls: reservation.expectedCalls })
-      const verdict = parseVerdictLetter(classified.text)
-      if (verdict === undefined) {
-        autoRouter.fail(agent, reservation, false)
-        ctx.logger.warn('llm-verifier plan pre-review produced no verdict line; the plan was allowed through')
-        return next()
-      }
-      if (verdict.score >= selected.autoVerifyThreshold) {
-        autoRouter.commit(agent, reservation)
-        return next()
-      }
-      autoRouter.fail(agent, reservation, selected.autoVerifyMode === 'strict')
-      const findings = verdict.feedback.slice(0, PLAN_REVIEW_FEEDBACK_CHARS)
-      return denyWithInfo(
-        '[Automatic Verifier Plan Pre-review] scored ' + (verdict.score * 100).toFixed(1) + '% against a ' + (selected.autoVerifyThreshold * 100).toFixed(0) + '% threshold.\n' + findings + '\nRevise the plan to address these findings, then call exit_plan_mode again.',
-        { name: 'VerifierPlanPreReviewDenied', code: 'VERIFIER_PLAN_PRE_REVIEW_DENIED', reason: findings },
-      )
-    } catch (error) {
-      autoRouter.fail(agent, reservation, false)
-      ctx.logger.warn('llm-verifier plan pre-review failed: ' + (error instanceof Error ? error.message : String(error)))
-      return next()
-    }
-  })
-
   // S02: review a finished trusted workflow candidate envelope BEFORE the next model
   // request, so the chosen option shapes the very next action instead of arriving after it.
   // Deliberately narrow — the stop boundary still owns semantic routing, track and the final
@@ -1882,64 +1631,6 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.tools.register(defineTool({ name: 'verifier_select', description: 'Use autonomously when three or more substantive candidate answers, patches, plans, or trajectories must be ranked and an independent choice is valuable. Use verifier_compare for exactly two candidates. Generating extra candidates pays off only when the artifact is a final deliverable and choosing wrong is expensive: produce them (for example with parallel subagents), then rank the real ones here. Do not pad the list with near-duplicates. Deterministic orchestrators should call this directly once they have three or more real candidates. Pass review_stage="proposal" to rank unexecuted plans or drafts: the default rubric then becomes goal/constraints, feasibility and verification design, and the verdict reports reviewStage and criteriaSource — relative shares, never an acceptance result.', parameters: { problem: { type: 'string', required: true }, candidates: { type: 'array', items: { type: 'string' }, required: true }, review_stage: reviewStageParam, ...commonParams, pivots: { type: 'integer' }, seed: { type: 'integer' } }, output: { schema: { type: 'object', additionalProperties: false, properties: { index: { type: 'integer', required: true }, best: { type: 'string', required: true }, identical: { type: 'boolean' }, reviewStage: reviewStageField, criteriaSource: criteriaSourceField, diagnostics: diagnosticsSchema, scores: { type: 'array', items: { type: 'number' }, required: true }, ranking: { type: 'array', items: { type: 'integer' }, required: true }, pivots: { type: 'array', items: { type: 'integer' }, required: true }, comparisons: { type: 'integer', required: true }, calls: { type: 'integer', required: true }, stats: { ...statsSchema, required: true }, provider: { type: 'string', required: true }, model: { type: 'string', required: true }, judges: judgesSchema } }, render: (_args, value) => renderJson(value) }, timeoutMs: entry.timeoutMs * 100, async execute(args, exec) { requireEnabled(); const agent = requireAgent(exec.agent); return record('verifier_select', agent, async (trace) => { const { verifier, selected } = await engine(agent); const limit = explicitCandidateLimit(selected); if (args.candidates.length > limit) throw new Error('llm-verifier: candidates must contain at most ' + limit + ' entries'); const candidates = explicitEvidence(args.candidates, explicitItemChars(selected), explicitBudget(selected), 'candidates'); const stage = parseReviewStage(args.review_stage); const rubric = await stageRubric(stage, args.criteria); const criteria = rubric.criteria; const repeats = capped(args.repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats'); const pivots = capped(args.pivots, 2, Math.max(1, candidates.length), 'pivots'); const planned = selectComparisonsUpperBound(candidates.length, pivots) * criteria.length * repeats * selected.judges.length; if (planned > MAX_EXPLICIT_PLANNED_CALLS) throw new Error('llm-verifier: this selection would issue about ' + planned + ' judge calls (candidates x criteria x repeats x judges); reduce candidates, pivots, criteria, repeats or judges'); const result = await verifier.select({ problem: sanitizeVerifierText(args.problem, explicitItemChars(selected)), candidates, criteria, ...(rubric.groundTruthNote ? { groundTruthNote: rubric.groundTruthNote } : {}), repeats, pivots, seed: args.seed ?? 0, reviewStage: stage, domain: rubricDomain(rubric), images: await images(args.images, exec.signal), ...(trace ? { trace } : {}) }, exec.signal); return { result: { ...result, reviewStage: stage, criteriaSource: rubric.source }, selected } }) } }))
 
   ctx.tools.register(defineTool({ name: 'verifier_track', description: 'Use autonomously for a genuinely multi-step task when progress at explicit checkpoints is uncertain or needs evidence-based measurement. Deterministic goal/workflow orchestrators should call this directly when real checkpoints already exist. Do not use for a single completed answer or invent checkpoints.', parameters: { problem: { type: 'string', required: true }, steps: { type: 'array', items: { type: 'string' }, required: true }, checkpoints: { type: 'array', items: { type: 'integer' }, required: true }, repeats: commonParams.repeats, images: commonParams.images }, output: { schema: { type: 'object', additionalProperties: false, properties: { scores: { type: 'array', items: { type: 'number' }, required: true }, perRepeat: { type: 'array', items: { type: 'array', items: { type: 'number' } }, required: true }, diagnostics: diagnosticsSchema, calls: { type: 'integer', required: true }, stats: { ...statsSchema, required: true }, provider: { type: 'string', required: true }, model: { type: 'string', required: true }, judges: judgesSchema } }, render: (_args, value) => renderJson(value) }, timeoutMs: entry.timeoutMs * 20, async execute(args, exec) { requireEnabled(); const agent = requireAgent(exec.agent); return record('verifier_track', agent, async (trace) => { const { verifier, selected } = await engine(agent); if (args.steps.length > MAX_TRACK_STEPS) throw new Error('llm-verifier: steps must contain at most ' + MAX_TRACK_STEPS + ' entries'); const steps = explicitEvidence(args.steps, explicitItemChars(selected), explicitBudget(selected), 'steps'); const result = await verifier.track(sanitizeVerifierText(args.problem, explicitItemChars(selected)), steps, args.checkpoints, capped(args.repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats'), exec.signal, await images(args.images, exec.signal), trace); return { result, selected } }) } }))
-
-  ctx.tools.register(defineTool({
-    name: 'verifier_best_of_n',
-    description: 'Use ONLY when a final deliverable is expensive to get wrong and no candidate exists yet: this drafts n independent candidates with the current session model, has the independent verifier rank them, and then re-scores the winner against the same fixed empty-work baseline the automatic acceptance gate uses. A draft that hits its output ceiling is kept and listed in truncated — the judge sees the incomplete text and scores it as such, and discarding it would waste a generation already paid for. It is by far the most expensive verifier tool: on the default 3-criterion rubric it costs 2 generations + 12 judge calls at n=2, 3 + 24 at n=3, and 4 + 36..60 at n=4 — never call it per turn, for trivial questions, or to compare candidates you already have (rank those with verifier_select or verifier_compare). By default the tournament ranks the drafts with the proposal rubric (they are unexecuted text, so the artifact rubric would fail them by construction) while the winner-vs-baseline step keeps the configured delivery rubric; an explicit criteria applies to both. rankingStage/rankingCriteriaSource/baselineCriteriaSource report which rubric each phase used. scores are RELATIVE tournament shares; only score, criteria, threshold and passesThreshold are absolute and comparable with the acceptance gate. Requires a session with a current or historical model selection; if neither is available, write the candidates with parallel subagents and call verifier_select instead.',
-    parameters: {
-      task: { type: 'string', required: true, description: 'The request every draft must answer. Bound to the explicit per-item evidence cap after redaction.' },
-      n: { type: 'integer', description: 'How many independent drafts to generate; between 2 and 4, default 3. Cost grows with n.' },
-      context: { type: 'string', description: 'Optional repository constraints, interfaces, file excerpts and known facts the drafts must respect. Redacted, per-item bounded and charged against the same explicit evidence budget as task. Every draft AND both judge comparisons see the identical block; omitted keeps the task-only input of earlier versions.' },
-      criteria: commonParams.criteria,
-      repeats: commonParams.repeats,
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          best: { type: 'string', required: true },
-          index: { type: 'integer', required: true },
-          rankingStage: { type: 'string', required: true },
-          rankingCriteriaSource: { type: 'string', required: true },
-          rankingCriteriaCount: { type: 'integer', required: true },
-          baselineCriteriaSource: { type: 'string', required: true },
-          baselineCriteriaCount: { type: 'integer', required: true },
-          contextIncluded: { type: 'boolean', required: true },
-          sources: { type: 'array', items: { type: 'integer' }, required: true },
-          scores: { type: 'array', items: { type: 'number' }, required: true },
-          ranking: { type: 'array', items: { type: 'integer' }, required: true },
-          comparisons: { type: 'integer', required: true },
-          pivots: { type: 'array', items: { type: 'integer' }, required: true },
-          generated: { type: 'integer', required: true },
-          failed: { type: 'integer', required: true },
-          failures: { type: 'array', items: { type: 'string' }, required: true },
-          truncated: { type: 'array', items: { type: 'integer' }, required: true },
-          score: { type: 'number', required: true },
-          baselineScore: { type: 'number', required: true },
-          winner: { type: 'string', enum: ['A', 'B', 'tie'], required: true },
-          criteria: { type: 'array', items: criterionResultSchema, required: true },
-          threshold: { type: 'number', required: true },
-          passesThreshold: { type: 'boolean', required: true },
-          failedCriteria: { type: 'array', items: { type: 'string' }, required: true },
-          calls: { type: 'integer', required: true },
-          stats: { ...statsSchema, required: true },
-          generatorProvider: { type: 'string', required: true },
-          generatorModel: { type: 'string', required: true },
-          provider: { type: 'string', required: true },
-          model: { type: 'string', required: true },
-          judges: judgesSchema,
-        },
-      },
-      render: (_args, value) => renderJson(value),
-    },
-    timeoutMs: entry.timeoutMs * 100,
-    async execute(args, exec) {
-      requireEnabled()
-      const agent = requireAgent(exec.agent)
-      return bestOfN(agent, args.task, args.n ?? DEFAULT_BEST_OF_N, args.repeats, exec.signal, args.criteria, args.context)
-    },
-  }))
 
   ctx.tools.register(defineTool({ name: 'verifier_current_session', description: 'Explicitly verify the current DSH session. Smart/strict policy can also invoke this gate automatically at the turn-stopping lifecycle boundary after consequential work with real tool evidence. Extracts the session, applies redaction and bounds, then sends the evidence to the configured verifier model.', parameters: { from_seq: { type: 'integer' }, to_seq: { type: 'integer' }, include_assistant_text: { type: 'boolean' }, redact_patterns: { type: 'array', items: { type: 'string' } }, max_chars: { type: 'integer' }, repeats: { type: 'integer' } }, output: { schema: { type: 'object', additionalProperties: false, properties: { sessionId: { type: 'string', required: true }, problem: { type: 'string', required: true }, score: { type: 'number', required: true }, baselineScore: { type: 'number', required: true }, winner: { type: 'string', enum: ['A', 'B', 'tie'], required: true }, criteria: { type: 'array', items: acceptanceCriterionResultSchema, required: true }, diagnostics: diagnosticsSchema, fromSeq: { type: 'integer', required: true }, toSeq: { type: 'integer', required: true }, omittedCharacters: { type: 'integer', required: true }, agreement: { type: 'number', required: true }, calls: { type: 'integer', required: true }, stats: { ...statsSchema, required: true }, provider: { type: 'string', required: true }, model: { type: 'string', required: true }, judges: judgesSchema } }, render: (_args, value) => renderJson(value) }, timeoutMs: entry.timeoutMs * 20, async execute(args, exec) { requireEnabled(); const agent = requireAgent(exec.agent); return verifySession(agent, { fromSeq: args.from_seq, toSeq: args.to_seq, includeAssistantText: args.include_assistant_text, redactPatterns: args.redact_patterns, maxChars: args.max_chars === undefined ? undefined : capped(args.max_chars, 200000, MAX_SESSION_CHARS, 'max_chars'), repeats: capped(args.repeats, 2, MAX_EXPLICIT_REPEATS, 'repeats') }, exec.signal) } }))
 }

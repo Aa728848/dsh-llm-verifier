@@ -39,7 +39,6 @@ pnpm run verify:release  # 提交前必跑
 
 ## 不要顺手"修"掉的地方
 
-`docs/HOST-COMPAT.md` 第 4 节列了完整清单。最常被误改的两处：
+`docs/HOST-COMPAT.md` 第 4 节列了完整清单。最常被误改的一处：
 
 - `snapshotEvents()` 上的 `@deprecated` **不要**换成 `SessionController.page()`：后者只放行 user/assistant 消息，工具调用与结果全都取不到，本插件没有证据可判。
-- `PreToolDecision` 的 `info` / `cancel` 是有意的跨版本发射，不是冗余字段。

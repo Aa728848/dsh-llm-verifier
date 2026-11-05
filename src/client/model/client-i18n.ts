@@ -14,7 +14,7 @@ export const zh = {
   'field.enabled.title': '启用 Verifier 工具',
   'field.enabled.helpOn': '允许 Agent 调用 Verifier 评审工具。',
   'field.enabled.helpOff': '停用所有 Verifier 评审工具。',
-  'field.enabled.warnDisabled': 'verifier_compare、verifier_select、verifier_track、verifier_best_of_n 和 verifier_current_session 当前不可用。',
+  'field.enabled.warnDisabled': 'verifier_compare、verifier_select、verifier_track 和 verifier_current_session 当前不可用。',
 
   // Section: Automatic Verification
   'section.autoVerify': '自动验收',
@@ -318,8 +318,6 @@ export const zh = {
   'guide.verifier.desc': '大模型复核工具调用、耗时与成本统计',
   'field.autoVerifyTeamTasks.title': '自动验收 Team 任务',
   'field.autoVerifyTeamTasks.help': 'Team 任务状态变化时自动复核。',
-  'field.autoVerifyPlanMode.title': '计划模式自动预审',
-  'field.autoVerifyPlanMode.help': '提交计划前自动预审可行性与风险。',
   'field.autoProcessSelection.title': '过程选优',
   'field.autoProcessSelection.off': '关闭',
   'field.autoProcessSelection.help': '控制主循环中生成并评判备选的时机。',
@@ -438,7 +436,7 @@ export const en: I18nDict = {
   'field.enabled.title': 'Enable Verifier Tools',
   'field.enabled.helpOn': 'Allow the Agent to call Verifier review tools.',
   'field.enabled.helpOff': 'Disable all Verifier review tools.',
-  'field.enabled.warnDisabled': 'verifier_compare, verifier_select, verifier_track, verifier_best_of_n, and verifier_current_session are currently unavailable.',
+  'field.enabled.warnDisabled': 'verifier_compare, verifier_select, verifier_track, and verifier_current_session are currently unavailable.',
 
   // Section: Automatic Verification
   'section.autoVerify': 'Automatic Verification',
@@ -742,8 +740,6 @@ export const en: I18nDict = {
   'guide.verifier.desc': 'LLM verifier tool calls, duration and cost statistics',
   'field.autoVerifyTeamTasks.title': 'Verify Team Tasks',
   'field.autoVerifyTeamTasks.help': 'Review Team tasks automatically when their status changes.',
-  'field.autoVerifyPlanMode.title': 'Plan Mode Pre-verification',
-  'field.autoVerifyPlanMode.help': 'Check plan feasibility and risks before submission.',
   'field.autoProcessSelection.title': 'Process Selection',
   'field.autoProcessSelection.help': 'Choose when the main loop generates and judges alternatives.',
   'field.autoProcessSelection.off': 'Off',
@@ -854,7 +850,6 @@ export const toolLabels: Record<'zh' | 'en', Record<string, string>> = {
     verifier_compare: '两项对比',
     verifier_select: '多项优选',
     verifier_track: '进度跟踪',
-    verifier_best_of_n: '生成选优',
     verifier_current_session: '会话验收',
   },
   en: {
@@ -862,7 +857,6 @@ export const toolLabels: Record<'zh' | 'en', Record<string, string>> = {
     verifier_compare: 'Pairwise Comparison',
     verifier_select: 'Candidate Selection',
     verifier_track: 'Progress Tracking',
-    verifier_best_of_n: 'Best-of-N Drafting',
     verifier_current_session: 'Session Acceptance',
   },
 }

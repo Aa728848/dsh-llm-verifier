@@ -349,7 +349,7 @@ const BOOKKEEPING_TOOLS = new Set([
 
 /** Our own verdict tools stay in the index so an explicit review is not re-run automatically, but
  * are never rendered as work output: a judge grading progress from an earlier verdict grades itself. */
-const VERIFIER_EVIDENCE_TOOLS = new Set(['verifier_compare', 'verifier_select', 'verifier_track', 'verifier_best_of_n', 'verifier_current_session'])
+const VERIFIER_EVIDENCE_TOOLS = new Set(['verifier_compare', 'verifier_select', 'verifier_track', 'verifier_current_session'])
 
 /** Matches `subagent` and configured provider instances (`subagent_fork`, `subagent_oar`, `subagent_codex`, ...). */
 export function isSubagentDelegationTool(name: string): boolean {

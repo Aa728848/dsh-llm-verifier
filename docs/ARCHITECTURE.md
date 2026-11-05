@@ -8,14 +8,14 @@
 
 | 位置 | 装什么 |
 | --- | --- |
-| `src/plugin/` | 插件装配:五个工具注册、生命周期钩子、设置与 RPC 路由、对外导出 |
+| `src/plugin/` | 插件装配:四个工具注册、生命周期钩子、设置与 RPC 路由、对外导出 |
 | `src/config/` | 配置 schema 与严格校验;判据预设解析与自定义判据回退 |
 | `src/scoring/` | 纯函数:A–T 标尺、分数期望、提示词构造、锦标赛、Bradley–Terry |
 | `src/judge/` | 裁判调用面:超时重试、并发限流、logprobs 通道与能力记忆、四层定价、图片 |
 | `src/engine/` | compare / select / track 编排、位置交换、多裁判聚合;评分缓存 |
 | `src/transcript/` | 会话提取与脱敏、宿主事件访问兼容层、真实文件改动证据、话题侧车目录 |
 | `src/routing/` | 结构化与语义路由、预约状态机、预算估算;验收判定与反馈文案 |
-| `src/gates/` | 三个生命周期门:计划预审、Team 任务验收、工具调用决策 |
+| `src/gates/` | Team 任务验收门与共用的判决解析(`verdict.ts`) |
 | `src/process/` | 请求级过程选优(`llm/stream` 缓冲、备选生成、胜者回放) |
 | `src/iot/` | DeepSeek 主 Agent 辅助思考:流缓冲、供应商改写路由、辅助调用与内存指标 |
 | `src/telemetry/` | 调用统计、决策快照、看板活动视图 |

@@ -660,17 +660,6 @@ export function renderReferenceContext(task: string, context: string | undefined
   ].join('\n')
 }
 
-export function buildGenerationPrompt(task: string, index: number, total: number, context?: string): string {
-  const reference = renderReferenceContext(task, context)
-  return [
-    'You are one of ' + total + ' independent experts asked to answer the same request. Answer it yourself, completely and concretely, in the form the request calls for — code, patch, plan, or prose.',
-    'Do not ask clarifying questions, do not defer the work to a later step, and do not refer to the other attempts. Where the answer depends on a command, a test, or other evidence, state exactly what it is and what output would prove it; never claim a verification you cannot describe.',
-    ...(reference === '' ? [] : [reference]),
-    '**Request:**\n' + task.trim(),
-    'Draft ' + (index + 1) + ' of ' + total + '.',
-  ].join('\n\n')
-}
-
 /** Progress uses A=NO..T=YES, the reverse of pairwise success scoring. */
 export function extractProgressScore(completion: CompletionLogprobs, tag: string): number {
   return 1 - extractScore(completion, tag)
