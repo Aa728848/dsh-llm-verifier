@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **[变更] 宿主兼容范围限定为 DSH 0.2 系列**
+  - `engines.dsh` 与 8 条 DSH peer 统一为 `>=0.2.0-rc.1 <0.3.0-0`，不再放行 0.1 系列，继续支持既有 0.2 预发布与正式线并拒绝 0.3
+  - 运行时代码与旧形态读取分支不变；本次仅收窄已声明并受宿主门控执行的支持范围
+
 ## 0.18.0 - 2026-11-05
 - **[移除] 计划预审与 `verifier_best_of_n`**
   - 删除 `tools/pre-execute` 钩子、`src/gates/plan-gate.ts` 与 `src/gates/tool-decision.ts`；计划模式的角色回到「挂起全部自动门控」，不再在 `exit_plan_mode` 前拦截人类审批
