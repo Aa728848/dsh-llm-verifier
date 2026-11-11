@@ -55,7 +55,7 @@
         "../deepseek-harness/packages/core/session/lib/types/index.d.ts"
       ],
       "@deepseek-ai/dsh-settings": [
-        "../deepseek-harness/packages/core/settings/lib/types/index.d.ts"
+        "../deepseek-harness/packages/settings/settings/lib/types/index.d.ts"
       ],
       "@deepseek-ai/dsh-tools": [
         "../deepseek-harness/packages/core/tools/lib/types/index.d.ts"

@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- **[DSH 0.2.2-rc.2 / 本机 master] 对齐最新宿主正式线与新增工具分类**
+  - `engines.dsh` 与 8 条 DSH peer（`>=0.2.0-rc.1 <0.3.0-0`）原生覆盖 `0.2.2-rc.2`，`@deepseek-ai/cordis` 保持 `4.1.0`；开发依赖继续锁定 npm 已发布的 `0.2.2-rc.1`，并针对本机重建后的 `0.2.2-rc.2` / `e8f7b93a344` 声明产物完成全量类型核验
+  - 修复 `tsconfig.local.json` 中 `@deepseek-ai/dsh-settings` 映射路径（随宿主目录迁移从 `packages/core/settings` 更新至 `packages/settings/settings`），防止本地宿主类型门禁静默回退到 `node_modules`
+  - 自动验收工具分类对齐 `0.2.2` 新增及实验工具面：将 `office_render`、`load_workspace_dependencies`、`lsp`、`schedule_list`、`schedule_view`、`terminal_read`、`terminal_list`、`user_terminal_list`、`user_terminal_read`、`session_*` 只读检索与 `cua_run_code` 外层容器纳入 `PASSIVE_TOOLS`；将 `office_convert`、`office_recalculate`、`cua`、`terminal_open`、`terminal_send`、`terminal_signal`、`terminal_close`、`schedule_create`、`schedule_edit`、`create_worktree`、`apply_patch`、`str_replace_editor` 纳入 `CONSEQUENTIAL_TOOLS`，确保文档转换/重算、持久化终端命令执行与桌面操控均能触发自动门控并在复核后再次改动时正确使旧结论失效
+  - 审查 `0.2.2-rc.1..0.2.2-rc.2` 宿主契约变更：`LlmError` 内置错误码收紧、`Session.append` 批量重载、`<system-reminder>` 运行时上下文包装、子代理 `interrupt_agent` 默认关闭及 PTC `inspect` 显式输出均与本插件现有实现兼容
+
 
 ## 0.19.0 - 2026-11-07
 - **[变更] 宿主兼容范围限定为 DSH 0.2 系列**

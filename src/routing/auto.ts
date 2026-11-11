@@ -40,18 +40,24 @@ export interface AutoTaskEvidence {
 }
 
 const PASSIVE_TOOLS = new Set([
-  'read', 'read_image', 'glob', 'grep', 'web_search', 'web_fetch', 'ssh_list', 'job_list',
+  'read', 'read_image', 'glob', 'grep', 'lsp', 'web_search', 'web_fetch', 'ssh_list', 'job_list',
   'job_output', 'list_agents', 'wait_agent', 'list_subagent_models', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource',
-  'get_goal', 'skill', 'mcp__codegraph__codegraph_explore', 'ask_user_question',
-  'todo_write', 'team_task_list', 'team_task_get', 'present', 'run_code',
+  'get_goal', 'skill', 'load_workspace_dependencies', 'office_render', 'mcp__codegraph__codegraph_explore', 'ask_user_question',
+  'todo_write', 'team_task_list', 'team_task_get', 'schedule_list', 'schedule_view',
+  'terminal_read', 'terminal_list', 'user_terminal_list', 'user_terminal_read',
+  'session_search', 'session_event_search', 'session_trace', 'session_event_trace', 'session_event_read',
+  'present', 'run_code', 'cua_run_code',
 ])
 const VERIFIER_TOOLS = new Set([
   'verifier_compare', 'verifier_select', 'verifier_track', 'verifier_current_session',
 ])
 const CONSEQUENTIAL_TOOLS = new Set([
-  'edit', 'write', 'pwsh', 'bash', 'codex_image_generate',
+  'edit', 'write', 'apply_patch', 'str_replace_editor', 'pwsh', 'bash', 'codex_image_generate',
+  'office_convert', 'office_recalculate', 'cua',
+  'terminal_open', 'terminal_send', 'terminal_signal', 'terminal_close',
   'ssh_exec', 'ssh_upload', 'ssh_download', 'ssh_tunnel', 'ssh_cluster',
   'job_kill', 'workbench_session_delete', 'create_goal', 'update_goal',
+  'schedule_create', 'schedule_edit', 'create_worktree',
 ])
 
 /**

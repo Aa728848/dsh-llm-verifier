@@ -252,6 +252,65 @@ describe('automatic verification policy', () => {
     expect(analyzeAutoTask(session.snapshotEvents(), smart)).toMatchObject({ eligible: false, reason: 'no-consequential-work', consequentialToolCalls: 0 })
   })
 
+  it('classifies DSH 0.2.2 Office, terminal, schedule, worktree, and CUA tools for eligibility and staleness', () => {
+    const passiveNames = [
+      'office_render', 'load_workspace_dependencies', 'lsp',
+      'schedule_list', 'schedule_view',
+      'terminal_read', 'terminal_list', 'user_terminal_list', 'user_terminal_read',
+      'session_search', 'session_event_search', 'session_trace', 'session_event_trace', 'session_event_read',
+      'cua_run_code',
+    ] as const
+    const passiveSession = taskSession()
+    for (const [index, name] of passiveNames.entries()) {
+      call(passiveSession, name, 'passive-' + index)
+    }
+    expect(analyzeAutoTask(passiveSession.snapshotEvents(), smart)).toMatchObject({
+      toolCalls: passiveNames.length,
+      consequentialToolCalls: 0,
+      eligible: false,
+      reason: 'no-consequential-work',
+    })
+
+    // Passive inspection after a passing manual review must not invalidate that review.
+    const stillFresh = taskSession()
+    call(stillFresh, 'edit', 'e1'); call(stillFresh, 'pwsh', 'e2'); call(stillFresh, 'read', 'e3')
+    sessionVerify(stillFresh, 'v1', verdict(0.9, 'A', { toSeq: 9 }))
+    call(stillFresh, 'office_render', 'p-render')
+    call(stillFresh, 'terminal_read', 'p-tread')
+    call(stillFresh, 'user_terminal_read', 'p-utread')
+    expect(analyzeAutoTask(stillFresh.snapshotEvents(), smart)).toMatchObject({
+      manualVerificationAccepted: true,
+      eligible: false,
+      reason: 'already-verified',
+    })
+
+    // Each consequential tool (none of which matched the fallback regex before) must both count
+    // toward eligibility and invalidate an earlier manual verification when run afterwards.
+    const consequentialNames = [
+      'office_convert', 'office_recalculate', 'cua',
+      'terminal_open', 'terminal_send', 'terminal_signal', 'terminal_close',
+      'schedule_create', 'create_worktree',
+    ] as const
+    for (const name of consequentialNames) {
+      const strictSession = taskSession()
+      call(strictSession, name, 'c-' + name)
+      expect(analyzeAutoTask(strictSession.snapshotEvents(), { ...smart, mode: 'strict' }), name + ' should be consequential').toMatchObject({
+        consequentialToolCalls: 1,
+        eligible: true,
+        reason: 'strict-eligible',
+      })
+
+      const postPass = taskSession()
+      call(postPass, 'edit', 'e1'); call(postPass, 'pwsh', 'e2'); call(postPass, 'read', 'e3')
+      sessionVerify(postPass, 'v1', verdict(0.9, 'A', { toSeq: 9 }))
+      call(postPass, name, 'after-' + name)
+      expect(analyzeAutoTask(postPass.snapshotEvents(), smart), name + ' after pass should invalidate verdict').toMatchObject({
+        manualVerificationAccepted: false,
+        eligible: true,
+      })
+    }
+  })
+
   it('suppresses eligibility when a background continuable subagent is in flight', () => {
     const session = taskSession()
     call(session, 'read', 'r1')
