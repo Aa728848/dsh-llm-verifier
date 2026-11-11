@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.19.1 - 2026-11-11
 - **[DSH 0.2.2-rc.2 / 本机 master] 对齐最新宿主正式线与新增工具分类**
   - `engines.dsh` 与 8 条 DSH peer（`>=0.2.0-rc.1 <0.3.0-0`）原生覆盖 `0.2.2-rc.2`，`@deepseek-ai/cordis` 保持 `4.1.0`；开发依赖继续锁定 npm 已发布的 `0.2.2-rc.1`，并针对本机重建后的 `0.2.2-rc.2` / `e8f7b93a344` 声明产物完成全量类型核验
   - 修复 `tsconfig.local.json` 中 `@deepseek-ai/dsh-settings` 映射路径（随宿主目录迁移从 `packages/core/settings` 更新至 `packages/settings/settings`），防止本地宿主类型门禁静默回退到 `node_modules`
