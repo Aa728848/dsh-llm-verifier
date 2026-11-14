@@ -13,11 +13,11 @@ export function resolveModelBadgeText(text: ModelBadgeText, lang: 'zh' | 'en'): 
   return typeof text === 'string' ? text : text[lang] ?? text.en
 }
 
-/** Child-slot shim for DSH's ModelSelect; list slots (`conversation.input.model.options`) omit `options` (D12). */
+/** Child-slot shim for DSH's ModelSelect; list slots omit `options` and keyed panes pass `entryKey` (D12). */
 export function renderNativeModelSlot(
   _name: string,
   _owner: unknown,
-  options?: { fallback?: ReactNode },
+  options?: { fallback?: ReactNode; entryKey?: string },
 ): ReactNode {
   return options?.fallback ?? null
 }

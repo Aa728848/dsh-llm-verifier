@@ -345,6 +345,7 @@ const BOOKKEEPING_TOOLS = new Set([
   'todo_write', 'create_goal', 'get_goal', 'update_goal', 'interrupt_agent', 'list_agents', 'wait_agent',
   'exit_plan_mode', 'skill', 'present', 'job_list', 'job_kill', 'list_subagent_models', 'send_message',
   'team_task_create', 'team_task_update', 'team_task_list', 'team_task_get',
+  'timeline_tree', 'timeline_tasks', 'timeline_pull', 'timeline_read', 'timeline_reply', 'propose_action',
 ])
 
 /** Our own verdict tools stay in the index so an explicit review is not re-run automatically, but

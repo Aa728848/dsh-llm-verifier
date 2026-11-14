@@ -44,6 +44,8 @@ const PASSIVE_TOOLS = new Set([
   'job_output', 'list_agents', 'wait_agent', 'list_subagent_models', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource',
   'get_goal', 'skill', 'load_workspace_dependencies', 'office_render', 'mcp__codegraph__codegraph_explore', 'ask_user_question',
   'todo_write', 'team_task_list', 'team_task_get', 'schedule_list', 'schedule_view',
+  'timeline_tree', 'timeline_tasks', 'timeline_pull', 'timeline_read', 'timeline_reply',
+  'cordis_inspect_list', 'cordis_inspect_query', 'plugin_market', 'propose_action',
   'terminal_read', 'terminal_list', 'user_terminal_list', 'user_terminal_read',
   'session_search', 'session_event_search', 'session_trace', 'session_event_trace', 'session_event_read',
   'present', 'run_code', 'cua_run_code',
@@ -57,7 +59,7 @@ const CONSEQUENTIAL_TOOLS = new Set([
   'terminal_open', 'terminal_send', 'terminal_signal', 'terminal_close',
   'ssh_exec', 'ssh_upload', 'ssh_download', 'ssh_tunnel', 'ssh_cluster',
   'job_kill', 'workbench_session_delete', 'create_goal', 'update_goal',
-  'schedule_create', 'schedule_edit', 'create_worktree',
+  'schedule_create', 'schedule_edit', 'create_worktree', 'ralph',
 ])
 
 /**

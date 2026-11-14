@@ -326,6 +326,28 @@ describe('production structured routing', () => {
     expect(step).not.toContain('verifier_current_session')
   })
 
+  it('keeps timeline and action-card bookkeeping outputs from displacing verification proof', () => {
+    const value = session()
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'in_progress' }, { content: 'Test', status: 'pending' }] })
+    tool(value, 'pwsh', 'verify', 'TYPECHECK_EXIT=0\nTests 309 passed')
+    tool(value, 'timeline_tree', 'tl-tree', '{"status":"saved","goalId":"g1"}')
+    tool(value, 'timeline_tasks', 'tl-tasks', '{"status":"updated","applied":1}')
+    tool(value, 'timeline_pull', 'tl-pull', '{"status":"next","task":{"id":"t1"}}')
+    tool(value, 'timeline_read', 'tl-read', '{"reports":[],"annotations":[]}')
+    tool(value, 'timeline_reply', 'tl-reply', '{"status":"replied","annotationId":"a1"}')
+    tool(value, 'propose_action', 'action-card', 'Card shown below your answer. Do not restate it.')
+    value.append('todo/write', { todos: [{ content: 'Implement', status: 'completed' }, { content: 'Test', status: 'completed' }] })
+    const decision = analyzeStructuredRoute(value.snapshotEvents(), 8, 20000, 60000)
+    expect(decision?.kind).toBe('track')
+    if (decision?.kind !== 'track') return
+    const step = decision.steps[1]!
+    expect(evidenceBlock(step)).toContain('309 passed')
+    for (const marker of ['goalId', 'applied', '"status":"next"', 'annotations', 'annotationId', 'Card shown below your answer']) {
+      expect(evidenceBlock(step), marker).not.toContain(marker)
+    }
+    expect(step).toContain('Recent tool results')
+  })
+
   it('summarises the recent calls in one line each, newest last', () => {
     // The verification block says HOW MUCH happened after the run; the digest says WHAT,
     // so a judge can tell "only issue bookkeeping since" from "twelve writes since".

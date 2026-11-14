@@ -18,10 +18,10 @@ import { join, relative, resolve } from 'node:path'
 const repo = resolve(import.meta.dirname, '..')
 const REBUILD = [
   'The paths above are the ones tsconfig.local.json maps; either place the checkout there (a directory',
-  'junction works) or repoint those paths. Then rebuild it from the harness checkout:',
+  'junction works) or repoint those paths. Then rebuild the package declarations from the harness checkout:',
   '  pnpm install',
-  '  node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc -b tsconfig.host.json',
-  '  node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc -b tsconfig.client.json',
+  '  pnpm exec tsx scripts/compile-referenced-projects.ts host-contracts',
+  '  NODE_OPTIONS=--max-old-space-size=8192 pnpm exec tsx scripts/compile-referenced-projects.ts client',
   '',
   'The client face needs the harness optional dependencies installed, and stays stale without them.',
 ]

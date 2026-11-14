@@ -311,6 +311,52 @@ describe('automatic verification policy', () => {
     }
   })
 
+  it('classifies DSH timeline, inspection, market, action-card, and ralph tools for eligibility and staleness', () => {
+    const passiveNames = [
+      'timeline_tree', 'timeline_tasks', 'timeline_pull', 'timeline_read', 'timeline_reply',
+      'cordis_inspect_list', 'cordis_inspect_query', 'plugin_market', 'propose_action',
+    ] as const
+    const passiveSession = taskSession()
+    for (const [index, name] of passiveNames.entries()) {
+      call(passiveSession, name, 'passive-' + index)
+    }
+    expect(analyzeAutoTask(passiveSession.snapshotEvents(), smart)).toMatchObject({
+      toolCalls: passiveNames.length,
+      consequentialToolCalls: 0,
+      eligible: false,
+      reason: 'no-consequential-work',
+    })
+
+    const stillFresh = taskSession()
+    call(stillFresh, 'edit', 'e1'); call(stillFresh, 'pwsh', 'e2'); call(stillFresh, 'read', 'e3')
+    sessionVerify(stillFresh, 'v1', verdict(0.9, 'A', { toSeq: 9 }))
+    call(stillFresh, 'timeline_tasks', 'p-tasks')
+    call(stillFresh, 'timeline_reply', 'p-reply')
+    call(stillFresh, 'propose_action', 'p-action')
+    expect(analyzeAutoTask(stillFresh.snapshotEvents(), smart)).toMatchObject({
+      manualVerificationAccepted: true,
+      eligible: false,
+      reason: 'already-verified',
+    })
+
+    const strictSession = taskSession()
+    call(strictSession, 'ralph', 'c-ralph')
+    expect(analyzeAutoTask(strictSession.snapshotEvents(), { ...smart, mode: 'strict' })).toMatchObject({
+      consequentialToolCalls: 1,
+      eligible: true,
+      reason: 'strict-eligible',
+    })
+
+    const postPass = taskSession()
+    call(postPass, 'edit', 'e1'); call(postPass, 'pwsh', 'e2'); call(postPass, 'read', 'e3')
+    sessionVerify(postPass, 'v1', verdict(0.9, 'A', { toSeq: 9 }))
+    call(postPass, 'ralph', 'after-ralph')
+    expect(analyzeAutoTask(postPass.snapshotEvents(), smart)).toMatchObject({
+      manualVerificationAccepted: false,
+      eligible: true,
+    })
+  })
+
   it('suppresses eligibility when a background continuable subagent is in flight', () => {
     const session = taskSession()
     call(session, 'read', 'r1')

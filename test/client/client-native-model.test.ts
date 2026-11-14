@@ -72,6 +72,8 @@ describe('native model directory adapter', () => {
     expect(renderNativeModelSlot('conversation.input.model.options', { locked: false })).toBeNull()
     expect(renderNativeModelSlot('conversation.input.model.badge', {}, {})).toBeNull()
     expect(renderNativeModelSlot('conversation.input.model.badge', {}, { fallback: 'badge' })).toBe('badge')
+    expect(renderNativeModelSlot('conversation.input.model.pane', { closePane: () => {} }, { entryKey: 'agent-team' })).toBeNull()
+    expect(renderNativeModelSlot('conversation.input.model.pane', { closePane: () => {} }, { entryKey: 'agent-team', fallback: 'pane' })).toBe('pane')
     const hostSelectSource = readFileSync(new URL('../../src/client/view/host-model-select.tsx', import.meta.url), 'utf8')
     expect(hostSelectSource).toContain('renderSlot={renderNativeModelSlot}')
   })

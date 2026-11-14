@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- **[DSH 0.2.2-rc.3 / 本机 master] 对齐最新宿主候选线与 Timeline 等工具面**
+  - 17 条 `@deepseek-ai/dsh-*` 开发依赖升级锁定至 npm 已发布的 `0.2.2-rc.3`（`engines.dsh` 与 8 条 DSH peer 保持 `>=0.2.0-rc.1 <0.3.0-0`），并针对本机重建后的 `39163dd30f7` 声明产物完成全量类型核验
+  - 客户端 `renderNativeModelSlot` 兼容 `dsh-client-ui-model-selection` 新增的 `conversation.input.model.pane` keyed 子插槽（`{ entryKey }`）
+  - 工具分类与证据过滤对齐最新宿主面：将 `@deepseek-ai/dsh-timeline` 的 `timeline_tree`、`timeline_tasks`、`timeline_pull`、`timeline_read`、`timeline_reply` 及动作卡片 `propose_action` 纳入 `PASSIVE_TOOLS` 与 `BOOKKEEPING_TOOLS`，将只读检索 `cordis_inspect_list`、`cordis_inspect_query`、`plugin_market` 纳入 `PASSIVE_TOOLS`，将跨轮次共享工作区执行工具 `ralph` 纳入 `CONSEQUENTIAL_TOOLS`
+  - 审查 `vendor/cordis` `4.0.0-rc.12` 元数据收敛、`@deepseek-ai/cordis-plugin-include` 补丁 YAML 解析切换及客户端包导出子路径清理，均与现有实现兼容
 
 ## 0.19.1 - 2026-11-11
 - **[DSH 0.2.2-rc.2 / 本机 master] 对齐最新宿主正式线与新增工具分类**
