@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.19.2 - 2026-11-14
 - **[DSH 0.2.2-rc.3 / 本机 master] 对齐最新宿主候选线与 Timeline 等工具面**
   - 17 条 `@deepseek-ai/dsh-*` 开发依赖升级锁定至 npm 已发布的 `0.2.2-rc.3`（`engines.dsh` 与 8 条 DSH peer 保持 `>=0.2.0-rc.1 <0.3.0-0`），并针对本机重建后的 `39163dd30f7` 声明产物完成全量类型核验
   - 客户端 `renderNativeModelSlot` 兼容 `dsh-client-ui-model-selection` 新增的 `conversation.input.model.pane` keyed 子插槽（`{ entryKey }`）
