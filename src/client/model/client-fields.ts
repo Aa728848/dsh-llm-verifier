@@ -712,7 +712,7 @@ export function sectionSummary(id: SectionId, values: Values, t: Translate, form
         state: values.autoRouteSemantic ? label('settings.summary.on') : label('settings.summary.off'),
         task: values.autoRouteMaxPerTask,
         session: values.autoRouteMaxPerSession,
-        // The collapsed header states the P06 arm too: 'every-step' is the one setting on this page
+        // The collapsed header states the process-selection arm too: 'every-step' is the one setting on this page
         // that can multiply spend per step, and it must be visible without expanding the section.
         selection: label('field.autoProcessSelection.' + values.autoProcessSelection),
         // The IoT arm is stated here for the same reason: a non-off level spends an auxiliary call

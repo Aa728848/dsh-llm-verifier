@@ -83,10 +83,10 @@ for (const directory of dirs) {
   } catch { /* an unreadable snapshot file is not a reason to fail the replay */ }
 }
 
-// S05-B offline layer: what the recorded routing cycles actually did, and (when a labeled
+// Offline layer: what the recorded routing cycles actually did, and (when a labeled
 // sample directory is supplied) how the deterministic routing layers score against real labels.
 const cycles = summarizeRouteCycles(invocations)
-// P06 单列：过程选优的触发、结局、交付与两条对照臂（见 P05 计划里的指标清单）。
+// Process selection (D9): trigger, outcome, delivery and control-arm breakdown.
 const processCycles = summarizeProcessCycles(invocations)
 const samples = []
 if (options.samples !== undefined) {

@@ -31,8 +31,8 @@ export interface TodoItem {
 export interface RoutedAgent { id: unknown; session: unknown }
 
 export type RoutedVerifierKind = 'compare' | 'select' | 'track'
-/** `process` is the internal P06 cycle: never a public tool, but it draws on the same budget and
- * final-acceptance floor as every other phase (D5). */
+/** `process` is the internal process-selection cycle (D9): never a public tool, but it draws on
+ * the same budget and final-acceptance floor as every other phase (D5). */
 export type RoutePhase = 'semantic' | RoutedVerifierKind | 'final' | 'team_task' | 'process'
 
 /** One candidate as the router sees it. `content` is capped for the prompt, so `identity` keeps the
@@ -400,7 +400,7 @@ function looksLikeVerificationRun(text: string): boolean {
 }
 
 /** The verdict a rendered run actually stated. The tool-level failure flag alone is true for a
- * failing test suite, which is the case the P06 trigger exists for (D9). */
+ * failing test suite, which is the case the recovery trigger exists for (D9). */
 export function verificationVerdict(text: string): 'passed' | 'failed' | undefined {
   if (VERIFICATION_FAILURE_SIGNATURES.some(pattern => pattern.test(text))) return 'failed'
   if (VERIFICATION_PASS_SIGNATURES.some(pattern => pattern.test(text))) return 'passed'
@@ -471,7 +471,7 @@ function verificationEvidence(index: EvidenceIndex, newest: EvidenceCall | undef
   return { text: prefix + sanitizeVerifierText(run.text, budget - prefix.length), call: run }
 }
 
-/** Two consecutive completed runs whose results BOTH failed. The P06 trigger (D9). */
+/** Two consecutive completed runs whose results BOTH failed. The recovery trigger (D9). */
 export interface RecoverySignal {
   signature: string
   fromSeq: number

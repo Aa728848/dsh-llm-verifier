@@ -52,10 +52,7 @@ export interface CompareOptions {
   reviewStage?: ReviewStage
   /** Task domain for the prompt's role sentence; normally the criteria preset id. */
   domain?: string
-  /**
-   * Optional reference context rendered as a separate data-only block between the task and the
-   * two candidates (P06's bounded process evidence pack). Omitted renders nothing.
-   */
+  /** Optional reference context rendered as a data-only block between the task and the two candidates (D9, D10). */
   context?: string
 }
 export interface CriterionResult { id: string; name: string; scoreA: number; scoreB: number }
@@ -155,19 +152,10 @@ function median(values: readonly number[]): number {
 function blankStats(): RunStats { return { ...emptyUsage(), cacheHits: 0, cacheMisses: 0, estimatedCostUsd: 0, topLogprobScores: 0, explicitTagScores: 0 } }
 
 /**
- * Where an invocation records the usage it accumulated before it finally failed.
- *
- * The engine aggregates per-judge usage while jobs are still running, so a later job that
- * throws used to discard everything the earlier jobs had already spent: a run with two
- * successful calls then one failure was persisted as one attempt and zero tokens. Attaching
- * the live stats object to the error keeps every known request and token.
- */
-/**
  * Usage accumulated before an invocation failed; undefined when the error carries none.
  *
- * The carrier may be a bare UsageStats (a caller-level response) or a full RunStats (an engine
- * accumulator). It is normalized here so no caller can merge a partial shape and turn the
- * RunStats-only counters into NaN (which the host serializes as null and rejects).
+ * Normalizes a bare `UsageStats` or a full `RunStats` so no caller merges a partial shape
+ * and turns the `RunStats`-only counters into `NaN` (which the host serializes as `null` and rejects).
  */
 export function partialStats(error: unknown): RunStats | undefined {
   const value = partialUsage<Partial<RunStats> & UsageStats>(error)
@@ -406,8 +394,6 @@ export class VerifierEngine {
     const outcome = await this.flights.run(dedupeKey, async () => cache.getOrCreate(keyForMode(await predictScoringChannel(client)), create, value => keyForMode(value.scoringMode)))
     const landed = outcome.value
     const reused = outcome.joined || landed.hit
-    // Findings ride along with the cache entry: the key is the rendered prompt, so they describe the
-    // very evidence that produced this score. An entry written before P04 simply has none.
     return { scores: [landed.value.scoreA, landed.value.scoreB], usage: reused ? emptyUsage() : landed.value.usage, scoringMode: landed.value.scoringMode, hit: reused, channelFallback: reused ? false : fellBack, diagnostics: landed.value.diagnostics ?? [] }
   }
 

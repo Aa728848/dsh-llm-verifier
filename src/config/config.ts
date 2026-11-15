@@ -12,7 +12,7 @@ export const VERIFIER_SETTINGS_NAMESPACE = 'llm-verifier' as never
 export type AutoVerifyMode = 'manual' | 'smart' | 'strict'
 
 /**
- * When the P06 request-level selector may register an intent.
+ * When the request-level process selector (see D9) may register an intent.
  *
  * `off` is the shipped default and the closed path. `recovery` is the original behaviour: one cycle
  * per task, and only once two consecutive verification runs have failed. `every-step` buys a
@@ -25,7 +25,7 @@ export type AutoProcessSelectionMode = 'off' | 'recovery' | 'every-step'
 export const AUTO_PROCESS_SELECTION_MODES: readonly AutoProcessSelectionMode[] = ['off', 'recovery', 'every-step']
 
 /**
- * Normalize the P06 switch, accepting the pre-3-mode BOOLEAN spelling.
+ * Normalize the process-selection switch, accepting the pre-3-mode BOOLEAN spelling.
  *
  * `true` meant "the recovery trigger" before the mode existed, so it must resolve to `recovery` and
  * never to `every-step`: silently upgrading a saved boolean to the expensive mode would multiply an
@@ -46,7 +46,7 @@ export function normalizeAutoProcessSelection(value: unknown): AutoProcessSelect
 }
 
 /**
- * The schemastery schema of a P06 mode: the three modes first, the legacy boolean last.
+ * The schemastery schema of a process-selection mode: the three modes first, the legacy boolean last.
  *
  * The boolean member exists so the HOST can still resolve a section an older client saved — the
  * schema validates the stored user layer, and rejecting `true` there would make the whole namespace
@@ -132,24 +132,24 @@ export interface Config {
   autoRouteMaxPerSession?: number
   autoTrackCompletionThreshold?: number
   /**
-   * P06 request-level selection over \`llm/stream\`: give a task an alternative next reply.
+   * Request-level selection over `llm/stream` (see D9): give a task an alternative next reply.
    *
    * Default OFF and never turned on automatically. Only smart mode enters the path, and a selection
    * is never an acceptance. The legacy boolean is still accepted (`true` → `recovery`).
    */
   autoProcessSelection?: AutoProcessSelectionMode | boolean
   /**
-   * P06: cycles the \`every-step\` mode may buy within ONE task.
+   * Cycles the `every-step` mode may buy within ONE task (see D5, D9).
    *
    * Every-step buys a cycle for every main-loop request, so without a per-task ceiling a long task
    * would select on every step indefinitely. This allowance is INDEPENDENT of the routing quota
-   * (\`autoRouteMaxPerTask\`) and of the final acceptance quota (\`autoVerifyMaxPerTask\`): the three
+   * (`autoRouteMaxPerTask`) and of the final acceptance quota (`autoVerifyMaxPerTask`): the three
    * counters never share a value, so spending cycles can neither starve the final gate nor be
    * starved by it.
    */
   maxProcessCyclesPerTask?: number
   /**
-   * P06: hand the alternative reply the failing-run evidence the cycle was triggered by.
+   * Hand the alternative reply the failing-run evidence the cycle was triggered by (see D9).
    *
    * Default ON: without it the extra candidate is written from exactly the same information as the
    * reply the session already showed failing, so the comparison mostly measures sampling noise.
@@ -157,7 +157,7 @@ export interface Config {
    */
   autoProcessFailureContext?: boolean
   /**
-   * P06: generate the alternative replies with these `provider/model` routes instead of the request's own.
+   * Generate the alternative replies with these `provider/model` routes instead of the request's own (see D9).
    *
    * A COMMA-SEPARATED list. Entry i supplies the i-th generated candidate, and a list shorter than
    * the candidate count wraps around (see `resolveAlternativeTargets`). Empty (the default) resamples
@@ -168,7 +168,7 @@ export interface Config {
    */
   autoProcessAlternativeModel?: string
   /**
-   * P06: how many candidates one process cycle compares, the original reply included.
+   * How many candidates one process cycle compares, the original reply included (see D9).
    *
    * N=2 (the shipped default) judges one pair. N=3 or 4 runs the tournament over
    * [original, alternative 1, ...], which costs roughly five times the judge calls at N=3 — see
@@ -203,7 +203,7 @@ export interface Config {
    * unaffected. Judging a research or ops task with the coding rubric measures the wrong thing.
    */
   criteriaPreset?: CriteriaPresetSelection
-  /** Markdown rubric file, read when `criteriaPreset` is `custom`. See README for the format. */
+  /** Markdown rubric file, read when `criteriaPreset` is `custom`. See `docs/criteria/software-engineering.md` for the format. */
   criteriaFile?: string
   autoVerifyTeamTasks?: boolean
   autoVerifySubagents?: boolean

@@ -263,7 +263,7 @@ export const zh = {
   'recent.detail.routeAlternativeModel': '备选模型 {model}',
   'recent.detail.channelFallback': '通道降级 {count}',
 
-  // Process-selection cycle pipeline (P06): one row per request the selection actually touched
+  // Process-selection cycle pipeline (D9): one row per request the selection actually touched
   'processCycles.title': '过程选优周期',
   'processCycles.note': '最近 {count} 个周期 · 最新在前',
   'processCycles.cycle': '周期 {cycle}',
@@ -301,7 +301,7 @@ export const zh = {
   'activity.final.rejected': '最终验收未通过',
   'activity.thinking': '辅助思考中…',
 
-  // Process selection (P06) chat chip: the reply is being buffered, so this is the only sign of life
+  // Process selection (D9) chat chip: the reply is being buffered, so this is the only sign of life
   'process.generating': '正在过程选优：生成 {n} 份候选…',
   'process.comparing': '正在过程选优：裁判比较 {n} 份候选…',
   'process.replaced': '过程选优完成：已改用更优的回复',
@@ -685,7 +685,7 @@ export const en: I18nDict = {
   'recent.detail.routeAlternativeModel': 'alternative model {model}',
   'recent.detail.channelFallback': 'channel fallbacks {count}',
 
-  // Process-selection cycle pipeline (P06): one row per request the selection actually touched
+  // Process-selection cycle pipeline (D9): one row per request the selection actually touched
   'processCycles.title': 'Process Selection Cycles',
   'processCycles.note': 'last {count} cycles · newest first',
   'processCycles.cycle': 'cycle {cycle}',
@@ -723,7 +723,7 @@ export const en: I18nDict = {
   'activity.final.rejected': 'Final acceptance did not pass',
   'activity.thinking': 'Auxiliary thinking…',
 
-  // Process selection (P06) chat chip: the reply is being buffered, so this is the only sign of life
+  // Process selection (D9) chat chip: the reply is being buffered, so this is the only sign of life
   'process.generating': 'Selecting the best reply: generating {n} candidates…',
   'process.comparing': 'Selecting the best reply: judging {n} candidates…',
   'process.replaced': 'Process selection: a better reply replaced the original',

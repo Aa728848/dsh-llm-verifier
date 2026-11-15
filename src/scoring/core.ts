@@ -146,7 +146,7 @@ export const CRITERIA_PRESETS: Record<CriteriaPresetId, Criterion[]> = {
  *
  * The same numeric verdict means different things per stage, and the acceptance gate only ever
  * reads the final artifact review: a proposal that "wins" has proven nothing about the work.
- * Omitting the stage means the historical artifact semantics (see README).
+ * Omitting the stage means the historical artifact semantics (see D7).
  */
 export type ReviewStage = 'proposal' | 'artifact'
 
@@ -177,7 +177,7 @@ export const PROPOSAL_CRITERIA: Criterion[] = [
 ]
 
 /**
- * Rubric for the P06 request-level comparison: choosing the NEXT action after a failure.
+ * Rubric for the request-level process comparison (see D9): choosing the NEXT action after a failure.
  *
  * Not the proposal rubric, and not a looser version of it. The proposal rubric asks whether a plan
  * addresses the stated goal; this comparison has evidence the proposal stage never has — the exact

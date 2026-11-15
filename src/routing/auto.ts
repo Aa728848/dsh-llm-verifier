@@ -506,19 +506,7 @@ export function inspectUserInteractionPause(
   return undefined
 }
 
-/**
- * Whether the session is currently in plan mode.
- *
- * The host logs one `plan/mode` event per committed transition and folds the log as
- * "empty log → inactive, last event wins" (its own projection does exactly this). Hosts
- * without plan mode never log the event, so nothing changes there. While planning, the
- * agent is expected to research and PROPOSE: any automatic route or acceptance verdict at
- * the turn-stopping boundary can only fail against the missing implementation and steer
- * "actually implement it" — commanding execution the human has not approved yet. The
- * No automatic route or acceptance runs in this state.
- * @param events - Session event log (the whole log is folded; the mode may predate the task).
- * @returns True when the newest `plan/mode` event activated plan mode.
- */
+/** Whether the session is currently in plan mode: last `plan/mode` event wins, suspending all automatic gates (D8). */
 export function planModeActive(events: readonly SessionEvent[]): boolean {
   let active = false
   for (const event of events) {
@@ -626,32 +614,12 @@ export interface AcceptanceCriterion {
   score: number
 }
 
-/**
- * Criteria that do not clear the acceptance threshold.
- *
- * The acceptance score is the MEAN over criteria, so a session with one requirement at
- * zero and the others perfect averaged ~0.67 and cleared the 0.65 default: a single
- * failed requirement was arithmetically invisible. The gate therefore also requires
- * every criterion to clear the threshold on its own.
- * @param criteria - per-criterion A-side scores, when the judge reported them.
- * @param threshold - acceptance threshold.
- * @returns The failing criteria, in report order.
- */
+/** Criteria that do not clear the acceptance threshold on their own (D6). */
 export function failedAcceptanceCriteria(criteria: readonly AcceptanceCriterion[] | undefined, threshold: number): AcceptanceCriterion[] {
   return (criteria ?? []).filter(criterion => !(criterion.score >= threshold))
 }
 
-/**
- * Whether a session acceptance clears the gate.
- *
- * The empty-work baseline is a fixed sentence that always scores 0, so the comparison
- * itself is decorative; what actually decides is the session's own score, the winner
- * against that baseline, and (since the mean could hide a failed requirement) every
- * criterion clearing the threshold.
- * @param evidence - session acceptance result (score, winner and per-criterion scores).
- * @param threshold - acceptance threshold.
- * @returns True only when the session may conclude.
- */
+/** Whether a session acceptance clears the gate: winner A, mean score, and every criterion on its own (D6). */
 export function sessionAccepted(evidence: { score: number; winner: 'A' | 'B' | 'tie'; criteria?: readonly AcceptanceCriterion[] }, threshold: number): boolean {
   if (evidence.winner !== 'A' || !(evidence.score >= threshold)) return false
   return failedAcceptanceCriteria(evidence.criteria, threshold).length === 0
@@ -659,8 +627,6 @@ export function sessionAccepted(evidence: { score: number; winner: 'A' | 'B' | '
 
 export function automaticFeedback(score: number, baselineScore: number, winner: 'A' | 'B' | 'tie', threshold: number, failedCriteria: readonly AcceptanceCriterion[] = [], locator?: { sessionId?: string; fromSeq?: number; toSeq?: number; omittedCharacters?: number }, reportedCriteria?: number, diagnostics: readonly Diagnostic[] = []): string {
   const percent = (value: number) => (value * 100).toFixed(1) + '%'
-  // P04: located findings beat a generic "inspect the output yourself" — and when the judge reported
-  // none, saying so is better than inventing a cause the judge never named.
   const located = renderDiagnostics(diagnostics, 1600)
   const diagnosticLines = located === ''
     ? failedCriteria.length > 0
@@ -730,14 +696,7 @@ function locate(ref: RoutedCandidateRef, budget: number, ordinal: number): strin
   return sanitizeVerifierText(position + ' ' + label + withId + at, limit)
 }
 
-/**
- * Indices sharing the highest score.
- *
- * The engine breaks ties by index, so "the first entry of the ranking" is a stable sort
- * artefact — exactly what S04 forbids presenting as a unique winner.
- * @param scores - candidate scores in candidate order.
- * @returns The tied-for-top indices, empty when no score is finite.
- */
+/** Indices sharing the highest score; ties must not be presented as a unique winner from a stable sort. */
 export function topScoreIndices(scores: readonly number[]): number[] {
   const finite = scores.filter(score => Number.isFinite(score))
   if (finite.length === 0) return []

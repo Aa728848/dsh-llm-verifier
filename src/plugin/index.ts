@@ -66,12 +66,7 @@ const commonParams = { criteria: { type: 'array' as const, items: criterionSchem
  * routing de-duplication credential are unchanged. `proposal` means neither side has been executed.
  */
 const reviewStageParam = { type: 'string' as const, enum: ['proposal', 'artifact'] as const, description: 'Which stage both sides are in. proposal: unexecuted plans/drafts, scored against the proposal rubric (goal/constraints, feasibility, verification design) when criteria is omitted, and never evidence that the task was completed. artifact (default): completed work with its observed output.' }
-/**
- * One located finding (P04) as it appears in a tool result.
- *
- * `criterion`/`checkpoint` and `action` are optional on purpose: the verdict is valid without any
- * finding, and a finding whose target could not be verified was dropped rather than guessed.
- */
+/** Verified finding as it appears in a tool result; optional fields were dropped when unverifiable. */
 const diagnosticSchema = { type: 'object' as const, additionalProperties: false, properties: { criterion: { type: 'string' as const }, checkpoint: { type: 'string' as const }, evidence: { type: 'string' as const, required: true as const }, finding: { type: 'string' as const, required: true as const }, action: { type: 'string' as const } } }
 const diagnosticsSchema = { type: 'array' as const, items: diagnosticSchema, required: true as const }
 const reviewStageField = { type: 'string' as const, required: true as const }
@@ -115,21 +110,7 @@ const EXPLICIT_MAX_TOTAL_CHARS = 240_000
 const EXPLICIT_MIN_TOTAL_CHARS = 120_000
 const MAX_EXPLICIT_CANDIDATES = 16
 const MAX_EXPLICIT_PLANNED_CALLS = 500
-/**
- * Best-of-N bounds. The ceiling is 4 because cost grows ~linearly in N while the marginal
- * value of the 5th draft does not, and the tool is meant for a final deliverable rather than
- * routine work. The floor is 2 because "choose the best of one" is not a choice.
- */
-/**
- * P06 allowance of the RECOVERY mode: one process-selection cycle per task.
- *
- * A single cycle by design for this mode — the task is stuck, and one differently informed attempt
- * is the whole intervention. The every-step mode instead allows
- * `autoProcessCyclesPerTask`, and {@link processAllowance} maps the mode onto the router's
- * per-task process counter. There is no private per-session process counter: the router meters a
- * process cycle against the SAME task/session route allowance as every other routed decision
- * (plan 8.1), so one task's cycle can never consume another task's.
- */
+/** Recovery-mode allowance: one process-selection cycle per task (D5, D9). */
 const MAX_PROCESS_PER_TASK = 1
 interface EvidenceBounds { autoRouteMaxItemChars: number; autoRouteMaxInputChars: number }
 function explicitItemChars(selected: EvidenceBounds): number { return Math.max(selected.autoRouteMaxItemChars, EXPLICIT_MIN_ITEM_CHARS) }
@@ -260,13 +241,10 @@ export function apply(ctx: Context, config: Config = {}): void {
   const services = ctx as Context & { attachments: AttachmentStore; connection: HostConnectionHandle; sessionPersistence: SessionArtifactLocator & { list(signal?: AbortSignal): Promise<readonly unknown[]> } }
   const entry = resolveConfig(config)
   let limiter = new RequestLimiter(entry.maxConcurrency)
-  // A settings change invalidates every unconsumed P06 intent; the selector is created later in
-  // this closure, so the callback goes through a holder instead of capturing a TDZ binding.
+  // Settings changes invalidate unconsumed process-selection intents (D9); indirected through a holder because the selector is constructed later in this closure.
   let clearProcessIntents: () => void = () => {}
   const current = installVerifierSettings(ctx, entry, () => { limiter = new RequestLimiter(current().maxConcurrency); clearProcessIntents() })
-  // ONE activity table per plugin instance: the router publishes every granted cycle into it, P06
-  // adds its own richer records, and the chat chip's RPC reads it. It is UI state only — never a
-  // verdict, never the model history (see `verifier-activity.ts` for why it is not a session event).
+  // In-memory UI activity table for the chat chip (D9, D15).
   const activities = new VerifierActivities()
   const autoRouter = new AutoVerifierRouter(createActivityObserver(activities))
   // Automatic judge pricing: typed rates win, otherwise the installed pi-ai catalog and (when
@@ -486,37 +464,13 @@ export function apply(ctx: Context, config: Config = {}): void {
    * shared id namespace would let a reader mistake a diagnostic row for a purchased cycle.
    */
   const nextCycleId = nextDiagnosticCycleId
-  /**
-   * Evidence-budget numbers of one bounded routing view.
-   *
-   * Kept next to the view so a routing change caused by truncation can be told apart from a
-   * routing change caused by the model: the plan's S05-A asks for exactly that comparison.
-   * @param view - the bounded semantic view that was rendered.
-   * @returns The kept/omitted/character counts to store on the observation.
-   */
+  /** Evidence-budget counts of one bounded semantic routing view (D10). */
   const viewObservation = (view: SemanticRouteView): Pick<RouteObservation, 'evidenceKept' | 'evidenceOmitted' | 'evidenceChars'> => ({
     evidenceKept: view.candidateCallIds.size + view.checkpointSeqs.size,
     evidenceOmitted: view.omitted,
     evidenceChars: view.evidenceChars,
   })
-  /**
-   * The host's own record of what this turn changed on disk, as an acceptance evidence block.
-   *
-   * Session acceptance used to read the agent's edits only from what it said in `tool/call`
-   * arguments, so a patch that was described but never applied, or a file rewritten after the
-   * claim, was indistinguishable from real work. The host's workspace-change service knows the
-   * difference, and this block is where that knowledge reaches the judge — through the existing
-   * reference-context seam, so it is wrapped in the same delimited block, carries the same
-   * content-derived nonce, and joins the prompt hash (hence the score cache key).
-   *
-   * Purely additive by construction: a disabled switch, a host without the service (0.1.1/0.1.5),
-   * a session disposed since the turn, or any read failure all mean "no block" — never a failed
-   * acceptance, which by then has already spent judge budget.
-   * @param agent - agent whose session is being verified.
-   * @param extracted - the extracted range, which also bounds which change events count.
-   * @param signal - tool-call abort signal.
-   * @returns The evidence block, or undefined when there is nothing to attach.
-   */
+  /** Host-observed workspace changes inside the reviewed range, degraded to undefined on any failure (D10). */
   const workspaceEvidence = async (agent: Agent, extracted: SessionExtraction, signal: AbortSignal): Promise<string | undefined> => {
     const selected = current()
     if (!selected.autoWorkspaceEvidence) return undefined
@@ -573,58 +527,24 @@ export function apply(ctx: Context, config: Config = {}): void {
     return { result: { text: completion.text, stats }, selected }
   }, phase, observation)
   const extractTask = async (agent: Agent, fromSeq: number, toSeq: number, maxChars: number, signal: AbortSignal) => extractSession(agent, async (ref: ImageAttachmentRef) => { const stored = await services.attachments.readImage(ref, signal); return { data: stored.data, mediaType: stored.ref.mediaType } }, { fromSeq, toSeq, includeAssistantText: true, maxChars })
-  // The process counter is a THIRD, independent allowance: it is neither the routing quota nor the
-  // final-acceptance quota, and its size follows the P06 mode (one cycle for recovery, the
-  // configured per-task ceiling for every-step). Sharing a counter with either neighbour would let
-  // an expensive every-step configuration starve the mandatory final gate.
+  // Independent process-cycle allowance per task (D5, D9).
   const processAllowance = (selected: ReturnType<typeof current>): number =>
     selected.autoProcessSelection === 'every-step' ? selected.maxProcessCyclesPerTask : MAX_PROCESS_PER_TASK
   const routePolicy = (selected: ReturnType<typeof current>, minFinalModelCalls: number) => ({ mode: selected.autoVerifyMode, minConfidence: selected.autoRouteMinConfidence, maxCandidates: selected.autoRouteMaxCandidates, maxRoutePerTask: selected.autoRouteMaxPerTask, maxRoutePerSession: selected.autoRouteMaxPerSession, maxFinalPerTask: selected.autoVerifyMaxPerTask, maxFinalPerSession: selected.autoVerifyMaxPerSession, maxModelCallsPerTask: selected.autoMaxModelCallsPerTask, maxModelCallsPerSession: selected.autoMaxModelCallsPerSession, maxInputChars: selected.autoRouteMaxInputChars, maxItemChars: selected.autoRouteMaxItemChars, minFinalModelCalls, maxProcessPerTask: processAllowance(selected) })
-  /**
-   * The policy one process-selection cycle is admitted under.
-   *
-   * Deliberately built from the SAME resolver as every other route, so the mandatory final
-   * acceptance keeps its floor and the process cycle can never spend it.
-   */
   const processPolicy = async () => routePolicy(current(), (await configuredCriteria()).criteria.length * current().autoVerifyFinalRepeats * current().judges.length)
   /** One candidate's locator for automatic feedback: label plus identity/event position, never its text. */
   const candidateRef = (candidate: CandidateArtifact): RoutedCandidateRef => ({ label: candidate.label, id: candidate.id, fromSeq: candidate.fromSeq, toSeq: candidate.toSeq })
-  /**
-   * Wrap a routed result for steering.
-   *
-   * The whole message — fixed opening, detail and fixed instruction — is redacted and bounded
-   * by one shared budget, because the locator lines added by S04 count against it too.
-   */
-  /**
-   * Append a candidate group's scope annotation to an automatic feedback body.
-   *
-   * A v2 trusted workflow envelope MAY declare the task range / source reference its group was
-   * produced for; putting it in the feedback is what makes it checkable by the agent that receives
-   * the verdict instead of only by the plugin's own logs.
-   * @param detail - the rendered feedback body.
-   * @param scope - the group's scope annotation, when it declared one.
-   * @returns The body, bounded by the shared feedback budget.
-   */
+  /** Append a v2 workflow candidate group's scope annotation, bounded by the shared feedback budget. */
   const withScope = (detail: string, scope: string | undefined): string => scope === undefined
     ? detail
     : sanitizeVerifierText(detail + '\nCandidate group scope: ' + scope, MAX_ROUTE_FEEDBACK_CHARS)
+  /** Wrap a routed result for steering under the shared feedback budget. */
   const routeFeedback = (decision: RouteDecision, detail: string) => createUserMessage({ content: [{ type: 'text' as const, text: sanitizeVerifierText('[Automatic verifier routing: ' + decision.kind + ']\n' + detail + '\nUse this independent result to continue the actual task. Do not merely restate the ranking or progress score; implement, correct, and verify the required work.', MAX_ROUTE_FEEDBACK_CHARS) }], source: { kind: 'llm-verifier' as const, form: 'notice' as const, summary: 'Automatic verifier routed ' + decision.kind } })
 
   /**
-   * Early candidate review for the `agent/pre-step` entry (S02).
-   *
-   * Handles ONLY a completed, version-correct trusted workflow candidate envelope, and runs
-   * ONLY the compare/select it yields: no semantic classification, no track, no final
-   * acceptance, no candidate generation. The feedback is returned as a message for the
-   * CURRENT step, so the choice shapes the very next model request instead of arriving after
-   * it. The router reservation/fingerprint is shared with the stop boundary, so one candidate
-   * set is scored exactly once no matter which entry saw it first.
-   *
-   * Every failure path returns undefined and leaves the host's own step decision untouched:
-   * smart keeps working, and the stop boundary remains the fallback.
-   * @param agent - the agent proposing the step.
-   * @param signal - the turn's cancellation signal.
-   * @returns The feedback message to inject, or undefined to leave the step alone.
+   * Early candidate review for `agent/pre-step` (D7): scores a finished trusted workflow
+   * candidate envelope before the next model request so the choice shapes the current step,
+   * sharing the router reservation with the stop boundary so each set is scored at most once.
    */
   const earlyCandidateReview = async (agent: Agent, signal: AbortSignal): Promise<ReturnType<typeof routeFeedback> | undefined> => {
     const selected = current()
@@ -683,15 +603,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   }
 
-  /**
-   * P06: the request-level selector.
-   *
-   * Every decision point reads live settings, live budget and the live session, so a settings
-   * change, a new task or a spent budget invalidates an unconsumed intent without extra
-   * bookkeeping. The judge calls go through the ordinary engine (proposal stage, so the default
-   * rubric is the unexecuted one), and the whole cycle is reported as ONE statistics row whose
-   * usage covers the extra generation plus every judge call.
-   */
+  /** Request-level process selector (D9): reads live settings and budget on every decision point and reports one statistics row per cycle. */
   const processSelector = new ProcessSelector({
     settings: () => {
       const selected = current()
@@ -790,8 +702,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     record: async (report: ProcessCycleReport) => {
       const agent = report.agent as Agent
       const selected = current()
-      // One price line for the cycle: the generation tokens are real cost, and the plugin only has
-      // the verifier table (the same estimate best-of-n documents). Tokens are reported too.
+      // Price the cycle's combined generation + judge tokens under the primary judge's rate table (D13).
       const stats: RunStats = {
         ...report.usage,
         estimatedCostUsd: costUsd(report.usage, await pricesFor(selected.provider, selected.model, selected)),
@@ -866,24 +777,10 @@ export function apply(ctx: Context, config: Config = {}): void {
   })
 
   /**
-   * Arm one process-selection intent for the task's next real main request.
+   * Arm one process-selection intent for the task's next main request (D9).
    *
-   * Registration buys nothing by itself: it records that the NEXT real main request of this task
-   * may be worth an alternative reply. Every precondition is re-checked when a request actually
-   * arrives, so a stale intent can only ever be ignored. A log that cannot be read does NOT buy —
-   * the safe side of "already purchased or unknown" is to keep the original path.
-   *
-   * Three modes share one registration path and differ only in the trigger and the allowance:
-   *
-   * - `off` returns immediately (the shipped closed path);
-   * - `recovery` keeps the original semantics exactly: the two-failure recovery signal is required and
-   *   the task may buy at most ONE cycle for its whole life;
-   * - `every-step` needs no recovery signal at all — every main-loop request may select — and is
-   *   bounded per task by {@link ResolvedConfig.maxProcessCyclesPerTask}. The recovery signal is
-   *   still inspected, because when it happens to hold the alternative is handed its failure evidence
-   *   (when the operator left that on); otherwise the cycle runs without it.
-   * @param agent - the agent proposing the step.
-   * @param signal - the turn's cancellation signal.
+   * Both the in-memory router counter and the durable sidecar must allow the cycle; an unreadable
+   * sidecar fails safe by declining to buy.
    */
   const registerProcessIntent = async (agent: Agent, signal: AbortSignal): Promise<void> => {
     const selected = current()
@@ -962,13 +859,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   /** Whether a payload asks for a decision snapshot instead of a statistics overview. */
   const isDecisionQuery = (payload: unknown): boolean => typeof payload === 'object' && payload !== null && (payload as { kind?: unknown }).kind === 'decision'
 
-  /**
-   * Whether a payload asks what this plugin is doing for one session.
-   *
-   * This is what the chat chip polls while a turn runs: a P06 cycle (which buffers the reply), a
-   * routed review, or the final acceptance. The wire name is historical — it covers every stage now,
-   * and keeping it means a page holding the older client bundle keeps working.
-   */
+  /** Whether a payload polls the session's live verifier/thinking activity for the chat chip (D9, D15). */
   const isProcessQuery = (payload: unknown): boolean => typeof payload === 'object' && payload !== null && (payload as { kind?: unknown }).kind === 'process'
 
   /**
@@ -1118,69 +1009,36 @@ export function apply(ctx: Context, config: Config = {}): void {
     iot.clear(String(agent.id))
   })
 
-  // The host's ONE request-level interception point, shared by both request-level features. A second
-  // listener is not an option: the two would each take an independent, unordered turn at the same
-  // request, and the P06 hand-over (`internal` marking, replay bookkeeping) assumes it owns the
-  // stream it returns. The order is the contract — IoT compacts the ORIGINAL reply first, and P06 may
-  // then replace the compacted result with an alternative:
-  //   - no intent: the stream is exactly what IoT produced (with IoT ineligible, exactly `next()`);
-  //   - intent: P06 receives that same stream as its original arm, and its alternative reply is
-  //     dispatched through the selector's own `stream` seam (raw `ctx.llm`), so the alternative is
-  //     never routed through this hook and can neither be compacted nor recurse.
+  // Single `llm/stream` interception point: auxiliary thinking rewrites reasoning blocks first,
+  // then process selection may buffer and replace the resulting stream (D9, D15).
   ctx.on('llm/stream', (options, next) => {
     const intent = processSelector.take(options)
-    // The stream is built ONCE and handed over as a thunk: the selector consumes this exact stream as
-    // its original arm instead of calling the downstream waterfall a second time, so one host request
-    // stays one dispatch and one bill.
+    // Pass `stream` as a thunk so process selection consumes the already-wrapped stream without re-invoking `next()`.
     const stream = iot.stream(options, next)
     if (intent === undefined) return stream
     return processSelector.handle(options, () => stream, intent)
   })
 
-  // S02: review a finished trusted workflow candidate envelope BEFORE the next model
-  // request, so the chosen option shapes the very next action instead of arriving after it.
-  // Deliberately narrow — the stop boundary still owns semantic routing, track and the final
-  // acceptance, and remains the fallback for everything this entry declines to do.
+  // Review a finished trusted workflow candidate envelope or arm process selection before the next model request (D7, D9).
   ctx.on('agent/pre-step', async (payload, next) => {
     const decision = await next()
-    // A rejected or cancelled step is never resurrected by an injected prompt.
     if (decision.kind === 'reject') return decision
     const selected = current()
     if (!selected.enabled || selected.autoVerifyMode !== 'smart') return decision
     if (payload.signal.aborted) return decision
     if (!selected.autoVerifySubagents && isSubagentSession(payload.agent)) return decision
-    // Planning is the operator's review boundary: injecting candidate feedback or buying a
-    // process-selection cycle here would push the agent to execute a plan the human has not
-    // approved yet.
     if (planModeActive(sessionEvents(payload.agent.session))) return decision
-    // The operator's interaction boundary, the same one the stop boundary honours. Arriving here
-    // with the task already paused (a permission offer, an answered `ask_user_question`, a paused
-    // goal, or prose asking for guidance) means this step exists only to deliver the NEXT user
-    // message: injecting candidate feedback or buying a P06 cycle would spend judge calls to steer
-    // an agent that is waiting for a human, on requests that carry nothing but the operator's reply.
-    // `payload.turn` is this step's own turn, so a pause left in an earlier turn no longer suppresses
-    // work the operator has since re-authorised.
+    // Suppress pre-step review/selection when the current turn is paused for user interaction.
     if (inspectUserInteractionPause(sessionEvents(payload.agent.session), latestDirectUserSeq(sessionEvents(payload.agent.session)) ?? 0, payload.turn) !== undefined) return decision
-    // A step carrying a fresh direct or team task belongs to the operator, not to us.
     const carriesTask = payload.messages.some(message => {
       const kind = (message as { source?: { kind?: unknown } }).source?.kind
       return kind === 'user' || kind === 'team-message'
     })
     if (carriesTask) return decision
-    // Respect host admission. The plugin sees only the FINAL waterfall decision, so it can
-    // tell a normal tool-follow-up from a continuation a downstream listener cleared by
-    // comparing that decision with what the step was OFFERED:
-    //   - the driver's first step with nothing to enter (the host ends the turn), or
-    //   - a step that was offered messages but came back with none (cleared downstream),
-    // must stay empty. Only a tool-follow-up — nothing offered, nothing cleared — may receive
-    // an injected message; injecting into a cleared step resurrects a suppressed step and
-    // spends judge calls on it.
+    // Only inject into a normal tool-follow-up: never resurrect the initial empty step or a continuation cleared downstream.
     const clearedContinuation = payload.messages.length > 0 && decision.messages.length === 0
     if (decision.messages.length === 0 && (payload.step <= 1 || clearedContinuation)) return decision
     const injected = await earlyCandidateReview(payload.agent, payload.signal)
-    // P06 comes AFTER the existing-candidate review: a trusted pair that was just scored takes
-    // priority over generating a new reply, and so does an in-flight review (the router refuses
-    // the later reservation anyway). Registration itself calls no model.
     if (injected === undefined) await registerProcessIntent(payload.agent, payload.signal)
     if (injected === undefined) return decision
     return { kind: 'enter', messages: [...decision.messages, injected] }
@@ -1286,15 +1144,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     // delay it with evidence whose steered text would be identical. The preference is
     // consumed by the final reservation, so a failed acceptance releases routing again.
     const finalPreferred = autoRouter.finalPreferred(agent)
-    // The mandatory gate is read here as well because S03 decides whether the progress route
-    // is worth buying, and a forced gate changes that answer.
-    // Read once, but reassigned when THIS boundary itself arms the mandatory gate (see the track
-    // branch): a stale read would send the acceptance to the next boundary for no reason.
     let forcedFromSeq = autoRouter.finalRequired(agent)
-    // S03 delivery phase: every todo completed AND a real verification run exists. This only
-    // decides whether the progress score is worth buying — never whether the task passes —
-    // and it deliberately ignores the run's success, because a failing run is exactly what
-    // the judge must see.
+    // Delivery phase (all todos complete + a verification command ran) skips progress routing so budget goes straight to final acceptance.
     const delivery = inspectDeliveryPhase(snapshot)
     const deliverySignature = delivery?.signature
     const deliveryReady = delivery !== undefined && delivery.todosComplete && delivery.verification !== undefined
@@ -1308,11 +1159,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       ctx.logger.warn('llm-verifier automatic ' + structured.kind + ' route dropped: its evidence exceeds the per-item/total routing caps (' + selected.autoRouteMaxItemChars + '/' + selected.autoRouteMaxInputChars + ' characters)')
       await recordSkippedRoute(agent, structured.kind, 'structured', 'dropped-over-budget', { cycleId: nextCycleId(), trigger: 'turn-stopping', stage: 'skipped', destination: structured.kind, skipReason: 'dropped-over-budget' })
     }
-    // S03: the delivery phase skips the PROGRESS route, never an unprocessed candidate
-    // selection (a compare/select is step 3, before this shortcut). The skipped track cycle is
-    // recorded and the completion signal is consumed, so a failed acceptance cannot keep
-    // skipping routing on the same finished state — only new work or a new verification run
-    // changes the signature and re-arms it.
+    // Consume the delivery signature once so a failed acceptance does not keep skipping routing on the same state.
     const deliveryFastPath = deliveryReady && !finalPreferred && (decision?.kind === 'track' || (decision === undefined && !semanticRouteHint(snapshot)))
     if (deliveryFastPath) {
       if (decision?.kind === 'track') {
@@ -1478,8 +1325,6 @@ export function apply(ctx: Context, config: Config = {}): void {
               return
             }
             if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
-            // S04: a tie, a byte-identical pair and a real winner are three different
-            // outcomes and are reported as such, with locators instead of copied candidates.
             agent.steer(routeFeedback(decision, withScope(compareRouteFeedbackDetail(
               [candidateRef(decision.candidates[0]), candidateRef(decision.candidates[1])],
               { winner: result.winner, scoreA: result.scoreA, scoreB: result.scoreB, ...(result.identical === true ? { identical: true } : {}) },
@@ -1496,8 +1341,6 @@ export function apply(ctx: Context, config: Config = {}): void {
               return
             }
             if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
-            // A selection only has relative shares: a shared top score is reported as a tie
-            // set, and the stable-sort first entry is never called the clear winner.
             agent.steer(routeFeedback(decision, withScope(selectRouteFeedbackDetail(
               decision.candidates.map(candidateRef),
               { index: result.index, ranking: result.ranking, scores: result.scores, ...(result.identical === true ? { identical: true } : {}) },
@@ -1514,22 +1357,12 @@ export function apply(ctx: Context, config: Config = {}): void {
           }
           if (!autoRouter.commit(agent, reservation, admittedLastSeq)) return
           const detail = result.scores.map((score, index) => 'Checkpoint step ' + decision.checkpoints[index] + ': ' + (score * 100).toFixed(1) + '%').join('\n')
-          // Judge the CURRENT state, not the whole history: the first checkpoint is the
-          // state right after the first todo snapshot, which is always "nothing done
-          // yet", so "any checkpoint below threshold" made the continue branch
-          // unconditional (5/5 live routes) and the threshold meaningless.
+          // Judge the newest checkpoint rather than the history minimum: the first checkpoint is always near zero.
           const latest = result.scores.length > 0 ? result.scores[result.scores.length - 1]! : 0
           const completed = latest >= selected.autoTrackCompletionThreshold
-          // The work already reads as done: arm the next boundary to run the mandatory final
-          // gate instead of paying for another progress route that would say the same thing.
           if (completed && !subagentsPending && !userInteractionPending) autoRouter.preferFinal(agent)
           const located = renderDiagnostics(result.diagnostics, 1200)
-          // P04 (smart only; strict keeps its historical always-steer semantics): a track result is an
-          // OBSERVATION. A generic "continue the unfinished work" instruction is only worth sending
-          // when it says something the agent could not already read off the checkpoints, so:
-          //   - something locatable and unfinished  -> steer those findings;
-          //   - completed, or low score with nothing locatable -> hand the boundary over to the final
-          //     acceptance, which is the decision that can still fail the turn.
+          // In smart mode, only steer unfinished track results that carry located findings; otherwise fall through to final acceptance.
           if (selected.autoVerifyMode !== 'smart') {
             const continuation = completed ? '\nPrepare final delivery evidence; final session verification is mandatory.' : '\nContinue the unfinished work.'
             agent.steer(routeFeedback(decision, detail + continuation))
@@ -1602,16 +1435,11 @@ export function apply(ctx: Context, config: Config = {}): void {
         autoRouter.fail(agent, finalReservation, false)
         return
       }
-      // The mean over criteria used to hide a single failed requirement, and the fixed
-      // empty-work baseline can never win on its own, so the gate is (a) the winner,
-      // (b) the mean score and (c) every criterion on its own.
       const failed = failedAcceptanceCriteria(result.criteria, selected.autoVerifyThreshold)
       const passed = sessionAccepted({ score: result.score, winner: result.winner, criteria: result.criteria }, selected.autoVerifyThreshold)
       if (passed) autoRouter.commit(agent, finalReservation)
       else {
         autoRouter.fail(agent, finalReservation, selected.autoVerifyMode === 'strict')
-        // S04: the failure names the criteria that failed AND the interval the judge actually
-        // read, and says so explicitly when it reported no breakdown or the bound omitted evidence.
         agent.steer(createUserMessage({ content: [{ type: 'text', text: sanitizeVerifierText(automaticFeedback(result.score, result.baselineScore, result.winner, selected.autoVerifyThreshold, failed, { sessionId: result.sessionId, fromSeq: result.fromSeq, toSeq: result.toSeq, omittedCharacters: result.omittedCharacters }, result.criteria.length, result.diagnostics), MAX_ROUTE_FEEDBACK_CHARS) }], source: { kind: 'llm-verifier' } }))
       }
     } catch (error) {

@@ -20,7 +20,7 @@ export interface ProcessCycleStageView {
 }
 
 /**
- * Grouped view of one P06 process-selection cycle, as the dashboard renders it.
+ * Grouped view of one process-selection cycle (see D9), as the dashboard renders it.
  *
  * Every number is the cycle's own, never a sum over rows: the same reservation can produce more than
  * one statistics row (a skip row carries the reason, the purchase row carries the spend), and adding

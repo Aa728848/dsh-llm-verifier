@@ -23,11 +23,11 @@ export interface ActivityActive {
   phase: ActivityPhase
   /** Routing target of a `route` cycle; absent while it is still classifying and for the others. */
   destination?: ActivityDestination
-  /** Candidates in the P06 cycle, the original reply included (2..4). */
+  /** Candidates in the process-selection cycle, the original reply included (2..4). */
   candidates?: number
   /** Model calls this cycle reserved, for the copy that quotes a size. */
   expectedCalls?: number
-  /** `provider/model` of P06's second generator, when `autoProcessAlternativeModel` is set. */
+  /** `provider/model` of the process selector's second generator, when `autoProcessAlternativeModel` is set. */
   alternativeModel?: string
   startedAt: number
 }
@@ -75,7 +75,7 @@ export const ACTIVITY_SETTLED_TTL_MS = 20_000
 export const ACTIVITY_ACTIVE_TTL_MS = 600_000
 
 /**
- * Map one finished P06 cycle onto the outcome the chip distinguishes.
+ * Map one finished process-selection cycle onto the outcome the chip distinguishes.
  *
  * `replayed` is the host-facing fact ("which stream did the host actually receive") and wins over
  * the outcome label: a cycle recorded as `candidate-selected` whose winner was withheld before the
@@ -98,7 +98,7 @@ export function classifyProcessOutcome(
 /**
  * Map one granted reservation onto the chip's active record.
  *
- * `process` is deliberately NOT mapped: P06 publishes its own richer record (candidate count,
+ * `process` is deliberately NOT mapped: the process selector publishes its own richer record (candidate count,
  * generation vs comparison), and two writers for one cycle id would race. `team_task` is not
  * announced either: it answers one task-status change, a window too short for the chip to show.
  * @param reservation - the reservation the router just granted.
@@ -234,7 +234,7 @@ export class VerifierActivities {
    *
    * A cycle nobody observed (the purchase itself failed, so `begin` never ran) leaves nothing
    * behind: the chip must not claim a cycle that never started. A cycle that WAS observed stays
-   * correctable while its own settled record is the current one, which is what P06's late
+   * correctable while its own settled record is the current one, which is what the process selector's late
    * "the winner was not delivered" correction needs.
    * @param sessionId - the session the cycle belongs to.
    * @param cycleId - the cycle to retire.

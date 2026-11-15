@@ -20,7 +20,7 @@ export interface VerdictSummary {
   winner?: 'A' | 'B' | 'tie'
   threshold?: number
   /**
-   * Review stage the call declared (P02): `proposal` means unexecuted plans/drafts.
+   * Review stage the call declared (see D7): `proposal` means unexecuted plans/drafts.
    *
    * Optional and additive: old records have no stage and are rendered as artifacts, which is
    * exactly the semantics they were produced under.
@@ -153,8 +153,7 @@ function acceptanceVerdict(row: Record<string, unknown>, phase: string, threshol
     ...(criteria.length > 0 ? { criteria } : {}),
     ...(winner !== undefined ? { winner } : {}),
     threshold,
-    // best-of_n reports both phases; the gate-facing rubric is the baseline one, and the drafts
-    // it ranked were proposals. A plain session acceptance carries neither field.
+    // Legacy multi-draft acceptance records report both phases; a plain session acceptance carries neither field.
     ...(typeof row.rankingStage === 'string' ? { reviewStage: row.rankingStage } : {}),
     ...(typeof row.baselineCriteriaSource === 'string' ? { criteriaSource: row.baselineCriteriaSource } : {}),
   }
@@ -171,7 +170,7 @@ export type RouteStage = 'classification' | 'execution' | 'final' | 'skipped' | 
  * A cycle is NOT a model call and a diagnostic row is not a purchase, so these fields live
  * in their own object: adding them up as judge calls (or reading a cycle count as a call
  * count) is exactly the confusion the observation is meant to remove. The classification
- * row and the execution row it was promoted into (S01) share one {@link cycleId}, so the
+ * row and the execution row it was promoted into share one {@link cycleId}, so the
  * dashboard can tell "classified but never executed" from "scored".
  */
 export interface RouteObservation {
@@ -200,7 +199,7 @@ export interface RouteObservation {
   /** True when the task, snapshot or signal stopped being current mid-cycle. */
   canceled?: boolean
   /**
-   * P06 process selection: which stream was actually replayed to the host.
+   * Process selection (see D9): which stream was actually replayed to the host.
    *
    * `original` is the fallback for every decline (candidate failed, tie, identical, stale,
    * budget); `none` means not even a replay decision was reached (the intent never matched a
@@ -214,14 +213,14 @@ export interface RouteObservation {
   /** The normalized candidate was byte-identical to the original, so no judge was called. */
   sameCandidate?: boolean
   /**
-   * P06: the alternative was generated WITH the failing-run evidence attached.
+   * Process selection: the alternative was generated WITH the failing-run evidence attached.
    *
    * The A/B discriminator for the controlled comparison of the two designs (resample the same
    * prompt vs. hand the extra candidate the failure): without it the two arms are indistinguishable
    * in the stored rows.
    */
   alternativeAugmented?: boolean
-  /** P06: the `provider/model` the alternative was generated with, when it was not the request's own. */
+  /** Process selection: the `provider/model` the alternative was generated with, when it was not the request's own. */
   alternativeModel?: string
 }
 
@@ -387,7 +386,7 @@ function cleanRoute(input: RouteObservation | undefined): RouteObservation | und
   if (typeof input.skipReason === 'string' && input.skipReason) route.skipReason = input.skipReason.slice(0, 120)
   if (input.usageIncomplete === true) route.usageIncomplete = true
   if (input.canceled === true) route.canceled = true
-  // P06: which stream was replayed is the whole point of the observation, so it must survive.
+  // Which stream was replayed is the whole point of a process-selection observation, so it must survive.
   if (input.replayed === 'original' || input.replayed === 'candidate' || input.replayed === 'none') route.replayed = input.replayed
   if (input.sameCandidate === true) route.sameCandidate = true
   if (input.alternativeAugmented === true) route.alternativeAugmented = true

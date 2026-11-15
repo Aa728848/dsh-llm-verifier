@@ -7,7 +7,7 @@
 主 Agent 干活，另一个模型验收：比候选、看进度、判交付，并在宿主生命周期边界上自动门控。
 
 [![license](https://img.shields.io/badge/license-MIT-2EA44F.svg)](LICENSE)
-[![dsh](https://img.shields.io/badge/dsh-0.1.1%20%E2%80%93%200.2.2-blue.svg)](docs/HOST-COMPAT.md)
+[![dsh](https://img.shields.io/badge/dsh-0.2.0%20%E2%80%93%200.2.2-blue.svg)](docs/HOST-COMPAT.md)
 
 </div>
 
@@ -16,8 +16,8 @@
 - **裁判不是主模型**。判官在设置里任选 Provider 与模型，只看观测到的 stdout/stderr 与真实文件 diff，不看 Agent 的自我陈述。
 - **四档能力**：两个候选做比较、多个候选择优、长任务看进度、整个会话判交付。
 - **自动门控**。`smart` / `strict` 策略在 Agent 准备停止时自行判断该复核什么，不通过就 steering 让 Agent 修复，而不是指望模型主动想起工具。
-- **判决可解释**。每次调用都有逐判据分数、实际走的评分通道、token 与费用，看板能回答"这次为什么没通过"。
-- **数据不出本地之外的边界之外**。证据先脱敏限长，只发给你选定的判官。
+- **判决可解释**。每次调用都有逐判据分数、实际走的评分通道、token 与费用，看板能回答“这次为什么没通过”。
+- **数据不出你选定的判官边界**。证据先脱敏限长，只发给你选定的判官。
 
 ## 安装
 

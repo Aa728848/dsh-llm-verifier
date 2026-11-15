@@ -1,6 +1,6 @@
 /**
- * P06: request-level selection over the host's `llm/stream` waterfall. Default off, and a
- * selection is never an acceptance. See D9.
+ * Request-level selection over the host's `llm/stream` waterfall. Default off, and a selection is
+ * never an acceptance. See D9.
  */
 import { createUserMessage, isAgentLoopRequest, type GenerateOptions, type Message, type StreamChunk } from '@deepseek-ai/dsh-llm'
 // Supplies the `'llm-verifier'` MessageSourceMap member named by the failure notice below.
@@ -257,7 +257,7 @@ export interface ProcessSelectorDeps {
   policy(): Promise<RouterPolicy>
   router(): AutoVerifierRouter
   /**
-   * Shared activity table the router's cycles and these P06 cycles are published to.
+   * Shared activity table the router's cycles and process-selection cycles are published to.
    *
    * Injected so one plugin instance has ONE table: the chip's read must see a routed review and a
    * process cycle in the same place. Defaults to a private table, which is all a focused test needs.
@@ -399,15 +399,15 @@ export function buildFailureNotice(context: string): Message {
  * Build the alternative reply's request from the frozen original.
  *
  * Copying only the effective call configuration keeps the same model while giving the alternative
- * its own lifecycle, with two deliberate differences added after the P06 review:
+ * its own lifecycle, with two deliberate differences (see D9):
  *
  * - the temperature is raised to at least GENERATION_TEMPERATURE. A host configured for
  *   near-deterministic sampling would otherwise return a copy of the original reply and the cycle
  *   would pay a generation to learn nothing;
  * - failureContext, when present, is appended as a plugin message so the extra candidate is written
  *   with the failure evidence the cycle exists for.
- * the process-local "this is an agent-loop request" marker is
- * deliberately NOT copied, and neither is \`sessionId\`, so the alternative can never be mistaken
+ * The process-local "this is an agent-loop request" marker is
+ * deliberately NOT copied, and neither is `sessionId`, so the alternative can never be mistaken
  * for (or recurse into) a main-loop request.
  */
 export function buildAlternativeRequest(options: GenerateOptions, signal: AbortSignal, failureContext?: string, target?: { provider: string; model: string }): GenerateOptions {
@@ -428,15 +428,6 @@ export function buildAlternativeRequest(options: GenerateOptions, signal: AbortS
   }
 }
 
-/**
- * Render one bounded candidate view for the judge.
- *
- * The whole evidence budget is split across the two candidates, so the combined request can never
- * exceed it and \`boundDecision\`-style dropping cannot silently disable the comparison.
- * @param candidate - prose and actions of one reply.
- * @param budget - characters this candidate may occupy.
- * @returns The rendered block body.
- */
 /** Section labels of the process comparison's `CONTEXT` block, in reading order. */
 const EVIDENCE_LABEL = 'RECENT EXECUTION EVIDENCE'
 const CONSTRAINTS_LABEL = 'REQUEST CONSTRAINTS'
@@ -538,24 +529,6 @@ export type ProcessSelectView =
   | { ok: true; problem: string; context?: string; candidates: string[] }
   | { ok: false; reason: string }
 
-/**
- * Build the bounded, redacted comparison view of one process cycle.
- *
- * Three boundaries are enforced here, and exceeding any of them declines the cycle instead of
- * sending incomplete evidence:
- *
- * 1. every piece is redacted with the plugin's sanitizer BEFORE it is measured, so a secret that
- *    sanitizeVerifierText masks can never reach the judge prompt through a candidate reply;
- * 2. the task and its context must fit the combined input budget (a candidate scored against a
- *    truncated constraint set measures the truncation, not the candidate);
- * 3. the remaining budget is split across the two candidates with itemBudget, and a candidate whose
- *    actions cannot be shown in full is refused (see renderCandidateView).
- *
- * The TOTAL is measured on the rendered text, never estimated, so the view can never exceed
- * maxInputChars.
- * @param input - the evidence pack plus both replies and the live bounds.
- * @returns The view, or the specific length reason it was refused.
- */
 /** Shared inputs of both view shapes. */
 interface ProcessViewShared extends ProcessEvidencePack {
   maxItemChars: number
@@ -1134,9 +1107,9 @@ export class ProcessSelector {
   /**
    * The waterfall body.
    *
-   * \`next()\` is called exactly once. The original reply is buffered first; only after it is
-   * complete and inside the cap is the alternative generated, and only a judge-selected winner is
-   * replayed. Every decline replays the buffered original verbatim.
+   * `next()` is called exactly once. Buying the cycle and generating the alternative starts in
+   * `beginCycle` concurrently with buffering the original reply (see D9), and only a judge-selected
+   * winner is replayed. Every decline replays the buffered original verbatim.
    *
    * The live state — the settings switch, the turn signal and the current task — is re-read before
    * every purchase, before the comparison and before the winner is committed, and a settings change

@@ -17,16 +17,16 @@ export interface ReplayRouteObservation {
   evidenceChars?: number
   usageIncomplete?: boolean
   canceled?: boolean
-  /** P06: which stream the host actually received from the cycle. */
+  /** Process selection: which stream the host actually received from the cycle. */
   replayed?: string
-  /** P06: extra generation calls and judge calls the cycle bought. */
+  /** Process selection: extra generation calls and judge calls the cycle bought. */
   generatedCalls?: number
   judgeCalls?: number
-  /** P06: the alternative was byte-identical to the original, so no judge was called. */
+  /** Process selection: the alternative was byte-identical to the original, so no judge was called. */
   sameCandidate?: boolean
-  /** P06: the alternative was generated with the failing-run evidence attached. */
+  /** Process selection: the alternative was generated with the failing-run evidence attached. */
   alternativeAugmented?: boolean
-  /** P06: the `provider/model` the alternative was generated with. */
+  /** Process selection: the `provider/model` the alternative was generated with. */
   alternativeModel?: string
 }
 
@@ -40,7 +40,7 @@ export interface ReplayInvocation {
   score?: number
   baselineScore?: number
   winner?: 'A' | 'B' | 'tie'
-  /** Terminal outcome of the invocation, when the verdict declares one (P06 cycle rows do). */
+  /** Terminal outcome of the invocation, when the verdict declares one (process-selection cycle rows do). */
   outcome?: string
   criteria: Array<{ id: string; score: number }>
   /** Automatic routing-cycle observation, when the record carries one. */
@@ -236,7 +236,7 @@ export interface RouteCycleSummary {
   reservedCalls: number
   /** Model calls the executed rows actually completed. */
   actualScoringCalls: number
-  /** Share of judged objects that reached a decision before implementation (S02). */
+  /** Share of judged objects that reached a decision before implementation (see D6). */
   preStepShare: number
   /** Share of classifications that never executed their decision. */
   classificationOnlyShare: number
@@ -246,7 +246,7 @@ export interface RouteCycleSummary {
 }
 
 /**
- * Summarize the automatic routing cycles recorded by S05-A.
+ * Summarize the recorded automatic routing cycles.
  *
  * Every unit here is deliberately distinct: a CYCLE is not a model call, a diagnostic row is
  * not a purchase, and a reserved call is not an actual one. The report exists so those three
@@ -288,12 +288,11 @@ export function summarizeRouteCycles(invocations: readonly ReplayInvocation[]): 
 }
 
 /**
- * P06 process-selection cycle aggregate.
+ * Process-selection cycle aggregate (see D9).
  *
  * A separate section on purpose: a process row is neither a routing decision nor a model call,
- * and its outcome is not a verdict about the task. The design note for the controlled comparison
- * (`.agents/notes/proposed/testing/2026-09-13-real-evaluation-samples-and-four-arm-controls.md`)
- * asks for exactly these numbers per arm, so they are computed here instead of by hand.
+ * and its outcome is not a verdict about the task. Computes per-arm counts and replacement rates
+ * directly from the recorded cycle observations.
  */
 export interface ProcessCycleSummary {
   /** Purchased cycles (a statistics row exists only after the reservation was taken). */
@@ -323,7 +322,7 @@ export interface ProcessCycleSummary {
 }
 
 /**
- * Summarize the recorded P06 cycles.
+ * Summarize the recorded process-selection cycles.
  *
  * Reads only what the rows state: `replayed` is the delivery, not the decision, and a cycle whose
  * winner was withheld is therefore counted as an original replay (the plugin corrects that row for
