@@ -54,7 +54,8 @@ export function iotTraceDelimiters(strategy: IoTStrategy, reasoning: string): { 
 export function buildCompactionPrompt(strategy: IoTStrategy, reasoning: string): string {
   const { token } = iotTraceDelimiters(strategy, reasoning)
   return [
-    IOT_PROMPT_MARKER + ' Rewrite the reasoning trace delimited below as decision nodes.',
+    IOT_PROMPT_MARKER + ' Rewrite only the reasoning segment delimited below as decision nodes.',
+    'Do not reconstruct a whole reasoning block or refer to text outside this segment.',
     'Keep what decides the next action: the goal, the decisions already made, the paths rejected and why, the risks, and the questions still open.',
     'Copy file paths, commands, identifiers, numbers and error strings verbatim.',
     'Write in the language of the trace; never translate it.',

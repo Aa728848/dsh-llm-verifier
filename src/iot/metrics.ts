@@ -31,6 +31,14 @@ export interface SessionIoTMetrics {
   skips: number
   /** Reasoning characters received (original) and actually emitted (emitted). */
   chars: { original: number; emitted: number }
+  /** Segment streaming and cache-prefix preservation counters. */
+  streaming: {
+    emittedSegments: number
+    candidates: number
+    earlyCalls: number
+    maxBufferedChars: number
+    preservedPrefixChars: number
+  }
 }
 
 /** Fresh counters for one session. */
@@ -44,6 +52,7 @@ export function emptySessionMetrics(mode: IoTMode): SessionIoTMetrics {
     failures: 0,
     skips: 0,
     chars: { original: 0, emitted: 0 },
+    streaming: { emittedSegments: 0, candidates: 0, earlyCalls: 0, maxBufferedChars: 0, preservedPrefixChars: 0 },
   }
 }
 
@@ -58,6 +67,7 @@ export function copyMetrics(source: SessionIoTMetrics): SessionIoTMetrics {
     failures: source.failures,
     skips: source.skips,
     chars: { ...source.chars },
+    streaming: { ...source.streaming },
   }
 }
 

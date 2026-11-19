@@ -4,7 +4,7 @@ import {
   type GenerateOptions, type LlmRuntime, type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import {
-  IOT_AUX_TIMEOUT_MS, IOT_MAX_CHARS, IOT_MAX_SESSIONS, IOT_MIN_CHARS, IOT_STRATEGIES,
+  IOT_AUX_TIMEOUT_MS, IOT_MAX_CHARS, IOT_MAX_PENDING_CHARS, IOT_MAX_SESSIONS, IOT_MIN_CHARS, IOT_SEGMENT_CHARS, IOT_STRATEGIES,
   IoTController, type IoTMode, type IoTSettings,
 } from '../../src/iot/index.ts'
 
@@ -15,6 +15,12 @@ function reasoning(length: number): string {
   const unit = 'I will inspect the parser and the failing fixture first; '
   let text = ''
   while (text.length < length) text += unit
+  return text.slice(0, length)
+}
+
+function coherent(length: number): string {
+  let text = ''
+  for (let step = 0; text.length < length; step += 1) text += 'Step ' + step + ' inspects fixture-' + step + ' and records observation-' + step + '. '
   return text.slice(0, length)
 }
 
@@ -257,30 +263,29 @@ describe('replacement', () => {
     expect(controller.metrics('s-1')?.kept).toBe(1)
   })
 
-  it('compacts a block exactly at the maximum and skips one character above it', async () => {
-    const atMax = reasoning(IOT_MAX_CHARS)
-    const above = reasoning(IOT_MAX_CHARS + 1)
-    const { controller, calls } = makeController()
-    const first = await collect(controller.stream(request(), mainOf([...reasoningChunks(0, atMax), ...tail()]).next))
-    expect(deltas(first, 0)).toBe(COMPACTED)
-    expect(calls).toHaveLength(1)
-
-    const second = await collect(controller.stream(request({ sessionId: 's-2' as never }), mainOf([...reasoningChunks(0, above), ...tail()]).next))
-    expect(deltas(second, 0)).toBe(above)
-    expect(blockEndOf(second, 0).block).toEqual({ type: 'reasoning', text: above })
-    expect(calls).toHaveLength(1)
+  it('handles blocks at and above the former whole-block cap with one segment replacement', async () => {
+    for (const [sessionId, original] of [['s-1', reasoning(IOT_MAX_CHARS)], ['s-2', reasoning(IOT_MAX_CHARS + 1)]] as const) {
+      const { controller, calls } = makeController()
+      const out = await collect(controller.stream(request({ sessionId: sessionId as never }), mainOf([...reasoningChunks(0, original), ...tail()]).next))
+      const expected = COMPACTED + original.slice(IOT_SEGMENT_CHARS)
+      expect(deltas(out, 0)).toBe(expected)
+      expect(blockEndOf(out, 0).block).toEqual({ type: 'reasoning', text: expected })
+      expect(calls).toHaveLength(1)
+      expect(controller.metrics(sessionId)?.replacements).toBe(1)
+    }
   })
 
-  it('relays a block that overran the cap while it is still streaming', async () => {
-    const chunk = reasoning(2000)
+  it('replaces only the first high-waste segment of an over-cap streaming block', async () => {
+    const chunk = reasoning(IOT_SEGMENT_CHARS)
+    const original = chunk.repeat(Math.ceil((IOT_MAX_CHARS + chunk.length) / chunk.length))
     const source: StreamChunk[] = [{ type: 'block-start', index: 0, blockType: 'reasoning' }]
-    for (let at = 0; at < IOT_MAX_CHARS + chunk.length; at += chunk.length) source.push({ type: 'reasoning-delta', index: 0, text: chunk })
-    source.push({ type: 'block-end', index: 0, block: { type: 'reasoning', text: reasoning(IOT_MAX_CHARS + 2000) } }, ...tail())
+    for (let at = 0; at < original.length; at += chunk.length) source.push({ type: 'reasoning-delta', index: 0, text: chunk })
+    source.push({ type: 'block-end', index: 0, block: { type: 'reasoning', text: original } }, ...tail())
     const { controller, calls } = makeController()
     const out = await collect(controller.stream(request(), mainOf(source).next))
-    expect(deltas(out, 0)).toBe(chunk.repeat(Math.ceil((IOT_MAX_CHARS + 2000) / chunk.length)))
-    expect(calls).toHaveLength(0)
-    expect(controller.metrics('s-1')?.skips).toBe(1)
+    expect(deltas(out, 0)).toBe(COMPACTED + original.slice(IOT_SEGMENT_CHARS))
+    expect(calls).toHaveLength(1)
+    expect(controller.metrics('s-1')?.skips).toBe(0)
   })
 
   it('flushes an open buffer when the source ends without a block-end', async () => {
@@ -346,11 +351,13 @@ describe('replacement', () => {
     expect(controller.metrics('s-1')?.skips).toBe(0)
   })
 
-  it('never mutates the request it was given', async () => {
-    const { controller } = makeController()
-    const frozen = Object.freeze(request())
+  it('never mutates the request or the user-selected reasoning effort', async () => {
+    const { controller, calls } = makeController()
+    const frozen = Object.freeze(request({ reasoningEffort: ReasoningEffortId('max') }))
     await expect(collect(controller.stream(frozen, mainOf([...reasoningChunks(0, LONG), ...tail()]).next))).resolves.toBeDefined()
     expect(frozen.provider).toBe('deepseek-official')
+    expect(frozen.reasoningEffort).toBe('max')
+    expect(calls[0]?.reasoningEffort).toBe('low')
   })
 
   it('passes a stream with no reasoning blocks through unchanged', async () => {
@@ -391,6 +398,126 @@ describe('replacement', () => {
     const end = blockEndOf(out, 0) as unknown as { meta?: unknown; block: { text: string } }
     expect(end.block.text).toBe(COMPACTED)
     expect(end.meta).toEqual({ signature: 'sig-1' })
+  })
+})
+
+describe('segmented streaming', () => {
+  it('relays a coherent segment before block-end without an auxiliary call', async () => {
+    const text = coherent(IOT_SEGMENT_CHARS)
+    let release!: () => void
+    const parked = new Promise<void>(resolve => { release = resolve })
+    const source = async function* (): AsyncIterable<StreamChunk> {
+      yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+      yield { type: 'reasoning-delta', index: 0, text }
+      await parked
+      yield { type: 'block-end', index: 0, block: { type: 'reasoning', text } }
+      for (const chunk of tail()) yield chunk
+    }
+    const { controller, calls } = makeController()
+    const iterator = controller.stream(request(), source)[Symbol.asyncIterator]()
+    expect((await iterator.next()).value).toMatchObject({ type: 'block-start' })
+    expect((await iterator.next()).value).toMatchObject({ type: 'reasoning-delta', text })
+    expect(controller.thinking('s-1')).toBeUndefined()
+    expect(calls).toHaveLength(0)
+    release()
+    await collect({ [Symbol.asyncIterator]: () => iterator })
+    expect(calls).toHaveLength(0)
+  })
+
+  it('dispatches before block-end, hides partial auxiliary text and preserves the raw prefix and suffix', async () => {
+    const prefix = coherent(IOT_SEGMENT_CHARS)
+    const candidate = reasoning(IOT_SEGMENT_CHARS)
+    const suffix = coherent(IOT_SEGMENT_CHARS)
+    const original = prefix + candidate + suffix
+    let releaseAux!: () => void
+    const parked = new Promise<void>(resolve => { releaseAux = resolve })
+    const partial: AuxBehaviour = async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: COMPACTED.slice(0, 20) }
+      await parked
+      yield { type: 'text-delta', index: 0, text: COMPACTED.slice(20) }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: COMPACTED } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const source = async function* (): AsyncIterable<StreamChunk> {
+      yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+      yield { type: 'reasoning-delta', index: 0, text: prefix }
+      yield { type: 'reasoning-delta', index: 0, text: candidate }
+      yield { type: 'reasoning-delta', index: 0, text: suffix }
+      yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: original } }
+      for (const chunk of tail()) yield chunk
+    }
+    const { controller, calls } = makeController(undefined, partial)
+    const iterator = controller.stream(request(), source)[Symbol.asyncIterator]()
+    await iterator.next()
+    expect((await iterator.next()).value).toMatchObject({ type: 'reasoning-delta', text: prefix })
+    let completed = false
+    const pending = iterator.next().then(result => { completed = true; return result })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(completed).toBe(false)
+    expect(calls).toHaveLength(1)
+    expect(controller.metrics('s-1')?.streaming.earlyCalls).toBe(1)
+    expect(typeof controller.thinking('s-1')).toBe('number')
+    releaseAux()
+    expect((await pending).value).toMatchObject({ type: 'reasoning-delta', text: COMPACTED })
+    expect(controller.thinking('s-1')).toBeUndefined()
+    const rest = await collect({ [Symbol.asyncIterator]: () => iterator })
+    const streamed = rest.filter(chunk => chunk.type === 'reasoning-delta').map(chunk => chunk.text).join('')
+    expect(streamed).toBe(suffix)
+    expect(blockEndOf(rest, 0).block).toEqual({ type: 'reasoning', text: prefix + COMPACTED + suffix })
+    expect(controller.metrics('s-1')?.streaming.preservedPrefixChars).toBe(prefix.length)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('aborts a pending candidate and replays every original segment when the after-queue exceeds its cap', async () => {
+    const original = reasoning(IOT_SEGMENT_CHARS + IOT_MAX_PENDING_CHARS + IOT_SEGMENT_CHARS)
+    const hanging: AuxBehaviour = async function* (auxRequest) {
+      await new Promise<never>((_, reject) => {
+        auxRequest.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+      })
+    }
+    const { controller, calls } = makeController(undefined, hanging)
+    const out = await collect(controller.stream(request(), mainOf([...reasoningChunks(0, original), ...tail()]).next))
+    expect(deltas(out, 0)).toBe(original)
+    expect(blockEndOf(out, 0).block).toEqual({ type: 'reasoning', text: original })
+    expect(calls).toHaveLength(1)
+    expect(controller.metrics('s-1')?.streaming.maxBufferedChars).toBeGreaterThan(IOT_MAX_PENDING_CHARS)
+    expect(controller.metrics('s-1')?.failures).toBe(1)
+    expect(controller.metrics('s-1')?.replacements).toBe(0)
+  })
+
+  it('keeps a pending candidate original when finish arrives before block-end', async () => {
+    const original = reasoning(IOT_SEGMENT_CHARS)
+    const source: StreamChunk[] = [
+      { type: 'block-start', index: 0, blockType: 'reasoning' },
+      { type: 'reasoning-delta', index: 0, text: original },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]
+    const { controller, calls } = makeController()
+    const out = await collect(controller.stream(request(), mainOf(source).next))
+    expect(deltas(out, 0)).toBe(original)
+    expect(calls).toHaveLength(1)
+    expect(controller.metrics('s-1')?.replacements).toBe(0)
+  })
+  it('allows only one in-flight auxiliary call across concurrent requests in one session', async () => {
+    const original = reasoning(IOT_SEGMENT_CHARS)
+    let releaseAux!: () => void
+    const parked = new Promise<void>(resolve => { releaseAux = resolve })
+    const gated: AuxBehaviour = async function* () {
+      await parked
+      for (const chunk of auxReply(COMPACTED)) yield chunk
+    }
+    const { controller, calls } = makeController(undefined, gated)
+    const firstPending = collect(controller.stream(request(), mainOf([...reasoningChunks(0, original), ...tail()]).next))
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(calls).toHaveLength(1)
+    const second = await collect(controller.stream(request(), mainOf([...reasoningChunks(0, original), ...tail()]).next))
+    expect(deltas(second, 0)).toBe(original)
+    expect(calls).toHaveLength(1)
+    releaseAux()
+    const first = await firstPending
+    expect(deltas(first, 0)).toBe(COMPACTED)
+    expect(calls).toHaveLength(1)
   })
 })
 
@@ -679,7 +806,7 @@ describe('held window', () => {
 
   it('opens on the first withheld delta and closes when the replacement is emitted', async () => {
     const { controller } = makeController()
-    const { source, release } = gated(LONG)
+    const { source, release } = gated(reasoning(IOT_SEGMENT_CHARS))
     const iterator = controller.stream(request(), source)[Symbol.asyncIterator]()
     const first = await iterator.next()
     expect(first.value).toEqual({ type: 'block-start', index: 0, blockType: 'reasoning' })
@@ -733,7 +860,7 @@ describe('held window', () => {
 
   it('closes when the consumer stops reading mid-window', async () => {
     const { controller } = makeController()
-    const { source, release } = gated(LONG)
+    const { source, release } = gated(reasoning(IOT_SEGMENT_CHARS))
     const iterator = controller.stream(request(), source)[Symbol.asyncIterator]()
     await iterator.next()
     void iterator.next()
@@ -744,18 +871,18 @@ describe('held window', () => {
     expect(controller.thinking('s-1')).toBeUndefined()
   })
 
-  it('never opens for a block that overflows the cap, because that block keeps streaming', async () => {
-    const { controller } = makeController()
-    const huge = reasoning(IOT_MAX_CHARS + 1)
+  it('never opens for a coherent segment, because that segment streams without an auxiliary call', async () => {
+    const { controller, calls } = makeController()
+    const huge = coherent(IOT_SEGMENT_CHARS + 1)
     const { source, release } = gated(huge)
     const iterator = controller.stream(request(), source)[Symbol.asyncIterator]()
     await iterator.next()
-    // The over-cap delta is relayed live rather than withheld, so there is no window to report.
     const relayed = await iterator.next()
-    expect(relayed.value).toMatchObject({ type: 'reasoning-delta', index: 0, text: huge })
+    expect(relayed.value).toMatchObject({ type: 'reasoning-delta', index: 0, text: huge.slice(0, IOT_SEGMENT_CHARS) })
     expect(controller.thinking('s-1')).toBeUndefined()
     release()
     await collect({ [Symbol.asyncIterator]: () => iterator })
+    expect(calls).toHaveLength(0)
   })
 
   it('never opens for a request the bypass does not touch', async () => {

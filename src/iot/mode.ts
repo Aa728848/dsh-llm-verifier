@@ -73,18 +73,18 @@ export function resolveIoTRequestRoute(
 }
 
 /**
- * Smallest reasoning block worth an auxiliary call.
+ * Smallest reasoning segment worth an auxiliary call.
  *
  * Below this the trace is already short: paying a second model call to shorten it cannot save
- * more context than it costs, so the block streams through untouched.
+ * more context than it costs, so the segment streams through untouched.
  */
 export const IOT_MIN_CHARS = 400
 
 /**
- * Largest reasoning block eligible for compaction, in characters.
+ * Largest reasoning segment eligible for compaction, in characters.
  *
- * The cap bounds the auxiliary PROMPT, not the answer: a longer trace is passed through instead
- * of being sent, so one pathological block cannot turn a reasoning stream into a huge request.
+ * The cap bounds the auxiliary PROMPT, not the answer or the whole block. Streaming segments are
+ * normally much smaller; an overlong candidate is passed through instead of being sent.
  */
 export const IOT_MAX_CHARS = 24_000
 

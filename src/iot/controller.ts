@@ -1,21 +1,13 @@
 /**
- * DeepSeek IoT-Lite: replace one finished reasoning block with a compacted trace.
+ * DeepSeek IoT-Lite: stream ordinary reasoning and replace at most one high-waste segment per block.
  *
- * The block is the unit of work because a reasoning block is what the next request replays, and
- * because a block is complete before the replacement can be validated: deltas are buffered per
- * block, exactly one auxiliary call is made at block-end, and a refused answer costs nothing but
- * that call.
+ * Untouched text is relayed byte-for-byte. A candidate is dispatched as soon as its segment closes,
+ * while the main model may still be generating; auxiliary deltas are assembled privately and only a
+ * complete, accepted segment enters the main stream. Later text waits in a bounded ordered queue.
  *
- * What a replacement actually does: it substitutes the TEXT of one reasoning block. The chunk
- * shapes, the block indexes, every other chunk field, the main usage chunk, and the finish chunk
- * with its replay state (per-block signatures included) are relayed unchanged, so the host stores
- * a well-formed reply — but the stored reasoning is no longer what the model wrote, so the session
- * log and the next request's cache prefix DO differ from it. That divergence is the cost this
- * module buys, not something it avoids. See D15.
- *
- * Fail-safe direction: every failure path (refused answer, provider error, timeout, abort,
- * truncation, malformed stream) flushes the original deltas and the original block-end, in the
- * original order. See D15.
+ * Fail-open is scoped to the candidate: before it is emitted, any refusal, timeout, abort, source
+ * failure or terminal barrier relays its original text. Text already emitted cannot be retracted.
+ * The main GenerateOptions object, including the user's reasoningEffort, is never mutated. See D15.
  */
 import {
   BlockAssembler, ReasoningEffortId, createUserMessage, isAgentLoopRequest,
@@ -24,27 +16,24 @@ import {
 import type {} from '@deepseek-ai/dsh-compaction-basic'
 import type {} from '../plugin/message-source.ts'
 import {
-  IOT_AUX_TIMEOUT_MS, IOT_MAX_CHARS, IOT_MIN_CHARS, findIoTTarget, resolveIoTRequestRoute, strategyFor,
+  IOT_AUX_TIMEOUT_MS, findIoTTarget, resolveIoTRequestRoute, strategyFor,
   type IoTMode, type IoTRequestRoute, type IoTStrategy, type IoTThinkingTarget,
 } from './mode.ts'
 import { assessCompaction } from './compaction.ts'
 import { IoTFlights } from './flight.ts'
 import { IoTSessions, type SessionIoTMetrics } from './metrics.ts'
 import { buildCompactionPrompt } from './prompt.ts'
+import { IOT_MAX_PENDING_CHARS, IoTSegmenter, type IoTSegment } from './segments.ts'
 
 /** Live settings the controller acts on; read fresh at every decision point. */
 export interface IoTSettings {
-  /**
-   * Global auxiliary-thinking strategy; no per-session override exists. The level IS the switch:
-   * `off` disables the feature and any other level enables it. The plugin's review-tools switch is
-   * deliberately absent, so turning the tools off cannot stop this feature (D15).
-   */
+  /** The level IS the switch; the review-tools enabled switch deliberately does not appear here. */
   iotThinking: IoTMode
   /** Global auxiliary model settings; unset fields use the enabled route's own provider and model, and low. */
   iotThinkingProvider?: string
   iotThinkingModel?: string
   iotThinkingEffort?: string
-  /** Additional opt-in main routes, each with an optional auxiliary override. */
+  /** Explicit opt-in main routes, each with an optional auxiliary override. */
   iotThinkingTargets?: readonly IoTThinkingTarget[]
 }
 
@@ -56,99 +45,69 @@ export interface IoTDeps {
   logger?: { warn(message: string): void; info?(message: string): void }
 }
 
-/** One request eligible for compaction. */
 interface EligibleRequest {
   sessionId: string
   strategy: IoTStrategy
   target?: IoTThinkingTarget
 }
 
-/** Reasoning deltas of one open block, plus the two facts that decide its fate. */
-interface ReasoningBuffer {
-  deltas: string[]
-  chars: number
-  /** Over the prompt cap: the block is relayed as it arrived from here on. */
-  overflowed: boolean
-  /** Already drained by a terminal chunk, so a late block-end must not be counted again. */
-  flushed: boolean
-}
-
-/** One auxiliary call's verdict. */
 interface CompactionOutcome {
   text?: string
   reason?: string
 }
 
-/** The controller the host wires onto `llm/stream` and session disposal. */
+interface PendingCompaction {
+  start: number
+  original: string
+  promise: Promise<CompactionOutcome>
+  cancel: AbortController
+  settled: boolean
+  outcome?: CompactionOutcome
+}
+
+interface ReasoningBuffer {
+  segmenter: IoTSegmenter
+  received: number
+  emitted: string[]
+  after: string[]
+  afterChars: number
+  candidate?: PendingCompaction
+  candidateUsed: boolean
+  hadAux: boolean
+  replaced: boolean
+  ended: boolean
+  flushed: boolean
+}
+
+/** The controller the host wires onto llm/stream and session disposal. */
 export class IoTController {
   private readonly sessions = new IoTSessions()
-  /** Held blocks: the chip's only fact, and it exists only while a `compacting()` call runs. */
   private readonly flights = new IoTFlights()
+  /** At most one auxiliary call per session, including concurrent requests and interleaved blocks. */
+  private readonly auxiliarySessions = new Map<string, AbortController>()
 
-  /**
-   * @param deps - host seams: the LLM runtime, live settings, and a diagnostic logger.
-   */
   constructor(private readonly deps: IoTDeps) {}
 
-  /**
-   * Wrap one stream. Ineligible requests reach `next()` untouched and are never buffered.
-   * @param options - the request entering the waterfall.
-   * @param next - the rest of the waterfall.
-   * @returns The possibly compacted stream.
-   */
   stream(options: GenerateOptions, next: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk> {
     const eligible = this.eligible(options)
     if (eligible === undefined) return next()
     return this.compacting(options, eligible, next)
   }
 
-  /**
-   * Forget one session's counters and any held block (session disposal, settings reset).
-   * @param sessionId - session to forget.
-   */
   clear(sessionId: string): void {
     this.sessions.clear(sessionId)
     this.flights.clear(sessionId)
+    this.auxiliarySessions.get(sessionId)?.abort(new Error('llm-iot: session cleared'))
+    this.auxiliarySessions.delete(sessionId)
   }
 
-  /**
-   * When this session last started holding a reasoning block, while it still holds one.
-   *
-   * One fact, read by the chat chip through the plugin's process query: the bypass withholds a
-   * block's text until it is relayed, so this is the only sign of life the chat has (D15).
-   * @param sessionId - session to read.
-   * @returns The hold start, or undefined when the bypass is not holding anything for it.
-   */
   thinking(sessionId: string): number | undefined { return this.flights.held(sessionId, Date.now()) }
 
-  /**
-   * The strategy one session would run under right now.
-   * @param sessionId - session to read.
-   * @returns The effective mode.
-   */
-  mode(sessionId: string | undefined): IoTMode {
-    return this.deps.settings().iotThinking
-  }
+  mode(_sessionId: string | undefined): IoTMode { return this.deps.settings().iotThinking }
 
-  /**
-   * Detached counters of one session.
-   * @param sessionId - session to read.
-   * @returns The snapshot, or undefined when nothing was recorded yet.
-   */
   metrics(sessionId: string): SessionIoTMetrics | undefined { return this.sessions.metrics(sessionId) }
 
-  /**
-   * The one place eligibility is decided.
-   *
-   * Every fact here is required, and the agent-loop marker is what makes the feature safe against
-   * itself: an auxiliary call is a hand-built request with no session id, so it can never satisfy
-   * this check — no recursion, no double counting. The opt-in route is the last fact: no matching
-   * target means no work at all, so enabling a provider cannot spend another provider's credential.
-   * The plugin's review-tools switch is NOT one of them: this feature stands on its own level, so
-   * turning the review tools off must not silently stop it (D15).
-   * @param options - the request entering the waterfall.
-   * @returns The session and strategy, or undefined to delegate untouched.
-   */
+  /** Eligibility never rewrites the main request or its reasoning effort. */
   private eligible(options: GenerateOptions): EligibleRequest | undefined {
     if (typeof options !== 'object' || options === null) return undefined
     const settings = this.deps.settings()
@@ -162,36 +121,18 @@ export class IoTController {
     return target === undefined ? undefined : { sessionId, strategy, target }
   }
 
-  /**
-   * The buffering body of one eligible request.
-   * @param options - the request, unchanged (its route and signal are reused for the auxiliary call).
-   * @param eligible - the resolved session and strategy.
-   * @param next - the rest of the waterfall.
-   * @returns The main stream, with compacted reasoning blocks.
-   */
   private async *compacting(
     options: GenerateOptions,
     eligible: EligibleRequest,
     next: () => AsyncIterable<StreamChunk>,
   ): AsyncGenerator<StreamChunk> {
+    const controller = this
+    const logger = this.deps.logger
     const metrics = this.sessions.metricsFor(eligible.sessionId, eligible.strategy.mode)
     const buffers = new Map<number, ReasoningBuffer>()
     const open: number[] = []
-
-    const close = (index: number): void => {
-      buffers.delete(index)
-      const at = open.indexOf(index)
-      if (at >= 0) open.splice(at, 1)
-    }
-    /**
-     * Blocks whose text is withheld right now.
-     *
-     * The chip's window opens on the FIRST withheld delta and closes when that block's text is
-     * emitted: before the first delta there is nothing being done and the chat shows nothing anyway,
-     * and after the release the chat has the text itself. Counted as a set because the stream may
-     * hold more than one block; the plugin-level record is opened and closed on 0<->1.
-     */
     const holding = new Set<number>()
+
     const hold = (index: number): void => {
       if (holding.has(index)) return
       holding.add(index)
@@ -201,51 +142,146 @@ export class IoTController {
       if (!holding.delete(index)) return
       if (holding.size === 0) this.flights.end(eligible.sessionId)
     }
-    /** Relay what is buffered for one block, in the order it arrived, and empty the buffer. */
-    const relay = function* (buffer: ReasoningBuffer, index: number): Generator<StreamChunk> {
-      const texts = buffer.deltas
-      buffer.deltas = []
-      buffer.chars = 0
-      // The window is over the moment the text leaves the plugin, not when the consumer has read
-      // the last chunk: this is the release edge for every keep/overflow/flush path.
+    const close = (index: number): void => {
+      buffers.delete(index)
+      const at = open.indexOf(index)
+      if (at >= 0) open.splice(at, 1)
       release(index)
-      for (const text of texts) yield { type: 'reasoning-delta', index, text }
     }
-    /** Relay every open buffer before a terminal chunk, so no text is ever lost. */
-    const relayOpen = function* (): Generator<StreamChunk> {
-      for (const index of [...open]) {
-        const buffer = buffers.get(index)
-        if (buffer === undefined) continue
-        yield* relay(buffer, index)
-        buffer.flushed = true
+    const updateBuffered = (buffer: ReasoningBuffer): void => {
+      const chars = buffer.segmenter.pendingText.length + buffer.afterChars + (buffer.candidate?.original.length ?? 0)
+      metrics.streaming.maxBufferedChars = Math.max(metrics.streaming.maxBufferedChars, chars)
+    }
+    const emit = function* (buffer: ReasoningBuffer, index: number, text: string): Generator<StreamChunk> {
+      if (text.length === 0) return
+      buffer.emitted.push(text)
+      metrics.streaming.emittedSegments += 1
+      yield { type: 'reasoning-delta', index, text }
+    }
+
+    const start = (index: number, buffer: ReasoningBuffer, segment: IoTSegment): void => {
+      const cancel = new AbortController()
+      buffer.candidateUsed = true
+      buffer.hadAux = true
+      metrics.streaming.candidates += 1
+      if (!buffer.ended) metrics.streaming.earlyCalls += 1
+      hold(index)
+      this.auxiliarySessions.set(eligible.sessionId, cancel)
+      const pending: PendingCompaction = {
+        start: segment.start,
+        original: segment.text,
+        cancel,
+        settled: false,
+        promise: this.compact(options, eligible.strategy, segment.text, options.signal, metrics, eligible.target, cancel),
       }
+      buffer.candidate = pending
+      void pending.promise.then(outcome => {
+        pending.outcome = outcome
+        pending.settled = true
+      })
+      void pending.promise.finally(() => {
+        if (this.auxiliarySessions.get(eligible.sessionId) === cancel) this.auxiliarySessions.delete(eligible.sessionId)
+      })
+    }
+
+    /** Commit a ready candidate, or await it at a block/barrier boundary. */
+    const settle = async function* (index: number, allowReplacement: boolean): AsyncGenerator<StreamChunk> {
+      const buffer = buffers.get(index)
+      const pending = buffer?.candidate
+      if (buffer === undefined || pending === undefined) return
+      const outcome = pending.settled ? pending.outcome! : await pending.promise
+      buffer.candidate = undefined
+      release(index)
+      try {
+        if (allowReplacement && outcome.text !== undefined) {
+          buffer.replaced = true
+          metrics.streaming.preservedPrefixChars += pending.start
+          logger?.info?.('llm-iot: replaced a reasoning segment at ' + pending.start + ' (' + pending.original.length + ' -> ' + outcome.text.length + ' chars)')
+          yield* emit(buffer, index, outcome.text)
+        } else {
+          metrics.failures += 1
+          logger?.warn('llm-iot: kept the original reasoning segment (' + (outcome.reason ?? 'refused') + ')')
+          yield* emit(buffer, index, pending.original)
+        }
+        const after = buffer.after.splice(0)
+        buffer.afterChars = 0
+        for (const text of after) yield* emit(buffer, index, text)
+      } finally {
+        release(index)
+      }
+    }
+    const processSegments = async function* (index: number, segments: readonly IoTSegment[]): AsyncGenerator<StreamChunk> {
+      const buffer = buffers.get(index)
+      if (buffer === undefined) return
+      for (const segment of segments) {
+        if (buffer.candidate?.settled) yield* settle(index, true)
+        if (buffer.candidate !== undefined) {
+          buffer.after.push(segment.text)
+          buffer.afterChars += segment.text.length
+          updateBuffered(buffer)
+          if (buffer.afterChars + buffer.segmenter.pendingText.length > IOT_MAX_PENDING_CHARS) {
+            buffer.candidate.cancel.abort(new Error('llm-iot: pending buffer limit'))
+            yield* settle(index, false)
+          }
+          continue
+        }
+        if (segment.waste && !buffer.candidateUsed) {
+          if (!controller.auxiliarySessions.has(eligible.sessionId)) start(index, buffer, segment)
+          else buffer.candidateUsed = true
+          updateBuffered(buffer)
+          if (buffer.candidate !== undefined) continue
+        }
+        yield* emit(buffer, index, segment.text)
+        updateBuffered(buffer)
+      }
+    }
+
+    const flushBuffer = async function* (index: number): AsyncGenerator<StreamChunk> {
+      const buffer = buffers.get(index)
+      if (buffer === undefined) return
+      if (buffer.candidate !== undefined) {
+        buffer.candidate.cancel.abort(new Error('llm-iot: stream ended before block-end'))
+        yield* settle(index, false)
+      }
+      const pending = buffer.segmenter.takePending()
+      yield* emit(buffer, index, pending)
+      buffer.flushed = true
+      release(index)
+    }
+    const flushOpen = async function* (): AsyncGenerator<StreamChunk> {
+      for (const index of [...open]) yield* flushBuffer(index)
     }
 
     try {
       for await (const chunk of next()) {
+        // A completed auxiliary result may be committed before the reasoning block ends. Terminal
+        // barriers deliberately skip this step so an unterminated block always keeps its candidate.
+        if (chunk.type !== 'usage' && chunk.type !== 'finish') {
+          for (const index of [...open]) {
+            if (buffers.get(index)?.candidate?.settled) yield* settle(index, true)
+          }
+        }
         switch (chunk.type) {
           case 'block-start':
             if (chunk.blockType === 'reasoning' && !buffers.has(chunk.index)) {
-              buffers.set(chunk.index, { deltas: [], chars: 0, overflowed: false, flushed: false })
+              buffers.set(chunk.index, {
+                segmenter: new IoTSegmenter(), received: 0, emitted: [], after: [], afterChars: 0,
+                candidateUsed: false, hadAux: false, replaced: false, ended: false, flushed: false,
+              })
               open.push(chunk.index)
             }
             yield chunk
             break
           case 'reasoning-delta': {
             const buffer = buffers.get(chunk.index)
-            if (buffer === undefined || buffer.overflowed) {
+            if (buffer === undefined || buffer.flushed) {
               yield chunk
               break
             }
-            buffer.deltas.push(chunk.text)
-            buffer.chars += chunk.text.length
-            if (buffer.chars > IOT_MAX_CHARS) {
-              // Too large to be worth a prompt: stop compacting THIS block and keep the stream live.
-              buffer.overflowed = true
-              yield* relay(buffer, chunk.index)
-              break
-            }
-            hold(chunk.index)
+            buffer.received += chunk.text.length
+            const segments = buffer.segmenter.push(chunk.text)
+            yield* processSegments(chunk.index, segments)
+            updateBuffered(buffer)
             break
           }
           case 'block-end': {
@@ -254,46 +290,33 @@ export class IoTController {
               yield chunk
               break
             }
+            buffer.ended = true
+            yield* processSegments(chunk.index, buffer.segmenter.finish())
+            yield* settle(chunk.index, true)
+            const text = buffer.emitted.join('')
+            const countMetrics = !buffer.flushed
             close(chunk.index)
-            if (buffer.deltas.length === 0) {
-              if (!buffer.flushed) metrics.skips += 1
-              yield chunk
-              break
+            if (countMetrics) {
+              if (buffer.received === 0) metrics.skips += 1
+              else {
+                if (!buffer.hadAux) metrics.skips += 1
+                if (buffer.replaced) metrics.replacements += 1
+                else metrics.kept += 1
+                metrics.chars.original += buffer.received
+                metrics.chars.emitted += text.length
+              }
             }
-            const original = buffer.deltas.join('')
-            if (chunk.block.type !== 'reasoning' || original.length < IOT_MIN_CHARS || original.length > IOT_MAX_CHARS) {
-              metrics.skips += 1
-              this.keepBlock(metrics, original.length)
-              yield* relay(buffer, chunk.index)
-              yield chunk
-              break
-            }
-            const outcome = await this.compact(options, eligible.strategy, original, options.signal, metrics, eligible.target)
-            if (outcome.text === undefined) {
-              metrics.failures += 1
-              this.deps.logger?.warn('llm-iot: kept the original reasoning block (' + (outcome.reason ?? 'refused') + ')')
-              this.keepBlock(metrics, original.length)
-              yield* relay(buffer, chunk.index)
-              yield chunk
-              break
-            }
-            // The replacement is the release: the window closes as the rewritten text is emitted.
-            release(chunk.index)
-            this.replaceBlock(metrics, original.length, outcome.text.length)
-            this.deps.logger?.info?.('llm-iot: replaced a reasoning block (' + original.length + ' -> ' + outcome.text.length + ' chars)')
-            // One delta carrying the whole replacement, then the block-end with the new text. Every
-            // other field (index, and any adapter-private extension) is carried over untouched.
-            yield { type: 'reasoning-delta', index: chunk.index, text: outcome.text }
-            yield { ...chunk, block: { ...chunk.block, text: outcome.text } }
+            if (buffer.received === 0 || chunk.block.type !== 'reasoning') yield chunk
+            else yield { ...chunk, block: { ...chunk.block, text } }
             break
           }
           case 'usage':
-            yield* relayOpen()
+            yield* flushOpen()
             this.recordMainUsage(metrics, chunk.usage)
             yield chunk
             break
           case 'finish':
-            yield* relayOpen()
+            yield* flushOpen()
             yield chunk
             break
           default:
@@ -301,39 +324,25 @@ export class IoTController {
         }
       }
     } catch (error) {
-      // The source died: hand out what it already produced before the failure reaches the host.
-      yield* relayOpen()
+      yield* flushOpen()
       throw error
     } finally {
-      // Every path above releases its block, so this only matters when the consumer stops reading
-      // mid-window: a generator abandoned while holding a block must not leave the chat chip
-      // claiming work that no longer exists.
+      for (const buffer of buffers.values()) buffer.candidate?.cancel.abort(new Error('llm-iot: main stream closed'))
       for (const index of [...holding]) release(index)
     }
-    yield* relayOpen()
+    yield* flushOpen()
   }
 
-  /**
-   * One auxiliary compaction call: no retry, no tools, no session identity, one deadline.
-   *
-   * Collected through `BlockAssembler` so the answer is judged exactly like any other model reply,
-   * and consumed here so none of its chunks can leak into the main stream.
-   * @param options - the main request whose route is reused.
-   * @param strategy - budget the answer must satisfy.
-   * @param original - reasoning text being replaced.
-   * @param signal - the main request's cancellation.
-   * @param metrics - counters that receive the auxiliary spend even when the call fails.
-   * @returns Accepted text, or the reason the original must be kept.
-   */
+  /** One auxiliary call: streaming input, private assembly, no retry, tools, session identity or main-option mutation. */
   private async compact(
     options: GenerateOptions,
     strategy: IoTStrategy,
     original: string,
     signal: AbortSignal | undefined,
     metrics: SessionIoTMetrics,
-    target?: IoTThinkingTarget,
+    target: IoTThinkingTarget | undefined,
+    controller: AbortController,
   ): Promise<CompactionOutcome> {
-    const controller = new AbortController()
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
@@ -380,8 +389,6 @@ export class IoTController {
       }
       recordUsage()
       if (!finished) return { reason: 'incomplete' }
-      // Only a natural stop finished the answer. A truncated, aborted, failed or tool-calling turn
-      // did not, even when the text it managed to write is shaped like a valid answer.
       if (assembler.finish.kind !== 'stop') {
         return { reason: assembler.finish.kind === 'aborted' && timedOut ? 'timeout' : assembler.finish.kind }
       }
@@ -398,31 +405,14 @@ export class IoTController {
     }
   }
 
-  /** Count one block as relayed unchanged. */
-  private keepBlock(metrics: SessionIoTMetrics, chars: number): void {
-    metrics.kept += 1
-    metrics.chars.original += chars
-    metrics.chars.emitted += chars
-  }
-
-  /** Count one block as replaced. */
-  private replaceBlock(metrics: SessionIoTMetrics, before: number, after: number): void {
-    metrics.replacements += 1
-    metrics.chars.original += before
-    metrics.chars.emitted += after
-  }
-
-  /** Add the main request's token counts; the chunk itself is relayed unaltered. */
   private recordMainUsage(metrics: SessionIoTMetrics, usage: TokenUsage): void {
     metrics.main.inputTokens += usage.inputTokens
     metrics.main.cacheReadTokens += usage.cacheReadTokens ?? 0
     metrics.main.outputTokens += usage.outputTokens
     metrics.main.reasoningTokens += usage.reasoningTokens ?? 0
   }
-
 }
 
-/** Add one auxiliary call's tokens to a session's auxiliary counters. */
 function addAuxiliaryTokens(metrics: SessionIoTMetrics, usage: TokenUsage): void {
   metrics.auxiliary.inputTokens += usage.inputTokens
   metrics.auxiliary.cacheReadTokens += usage.cacheReadTokens ?? 0

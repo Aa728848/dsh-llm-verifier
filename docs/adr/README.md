@@ -21,3 +21,4 @@
 | [D13](D13-cache-identity.md) | 缓存身份与四层定价 |
 | [D14](D14-sidecar-and-artifacts.md) | 侧车留在话题目录，构建产物不入库 |
 | [D15](D15-deepseek-thinking-rewrite.md) | DeepSeek 辅助思考是可选旁路，失败即回放原流 |
+| [D16](D16-segmented-thinking-stream.md) | 高浪费片段提前压缩，按段流式提交并保留原文前后缀 |

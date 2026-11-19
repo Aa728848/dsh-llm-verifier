@@ -8,6 +8,7 @@ describe('session counters', () => {
     expect(metrics.auxiliary).toEqual({ calls: 0, inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, reasoningTokens: 0 })
     expect(metrics.replacements + metrics.kept + metrics.failures + metrics.skips).toBe(0)
     expect(metrics.chars).toEqual({ original: 0, emitted: 0 })
+    expect(metrics.streaming).toEqual({ emittedSegments: 0, candidates: 0, earlyCalls: 0, maxBufferedChars: 0, preservedPrefixChars: 0 })
   })
 
   it('copies deeply so a snapshot cannot mutate the live counters', () => {
@@ -16,8 +17,10 @@ describe('session counters', () => {
     const copy = copyMetrics(live)
     copy.main.inputTokens = 99
     copy.chars.emitted = 7
+    copy.streaming.maxBufferedChars = 99
     expect(live.main.inputTokens).toBe(5)
     expect(live.chars.emitted).toBe(0)
+    expect(live.streaming.maxBufferedChars).toBe(0)
   })
 })
 
