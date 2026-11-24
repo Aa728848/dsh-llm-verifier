@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.21.0 - 2026-11-24
 - **[DSH 0.2.3-alpha.2 / Cordis 4.2.0-alpha.1] 全面对齐最新宿主版本与新时代前端扩展能力**
   - **依赖与兼容范围**：18 条 `@deepseek-ai/dsh-*` 开发依赖精确锁定至 `0.2.3-alpha.2`（含编译期类型包 `@deepseek-ai/dsh-client-ui-session-panel`），`@deepseek-ai/cordis` 开发依赖锁定至 `4.2.0-alpha.1` 且 `peerDependencies` 扩展覆盖 `^4.2.0-alpha.1 || ^4.2.0`；`engines.dsh` 与 8 条 DSH peer 保持 `>=0.2.0-rc.1 <0.3.0-0`，并同步更新 `pnpm-workspace.yaml` 与 `tsconfig.local.json`
   - **插件展示元数据**：新增 `locale/en.json` 与 `locale/zh.json`（`meta.title`、`meta.description`）并在 `package.json` 的 `exports` / `files` 中发布，适配 DSH 0.2.3 Plugins 管理页、详情页与插件市场的多语言卡片展示
