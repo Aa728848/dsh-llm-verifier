@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, hasPendingSubagents, inspectUserInteractionPause, isAwaitingUserText, isSubagentSession, planModeActive, selectRouteFeedbackDetail, sessionAccepted, topScoreIndices, type RoutedCandidateRef } from '../../src/routing/auto.ts'
+import { analyzeAutoTask, automaticFeedback, compareRouteFeedbackDetail, failedAcceptanceCriteria, hasActionCardFence, hasPendingSubagents, inspectUserInteractionPause, isAwaitingUserText, isSubagentSession, planModeActive, selectRouteFeedbackDetail, sessionAccepted, topScoreIndices, type RoutedCandidateRef } from '../../src/routing/auto.ts'
 
 function taskSession() {
   const session = Session.create('session-00000000-0000-4000-8000-000000000009' as never)
@@ -814,5 +814,70 @@ describe('routed selection feedback', () => {
     expect(tie).not.toContain('no per-criterion breakdown')
     const missing = automaticFeedback(0.7, 0.5, 'tie', 0.65, [], { sessionId: 's', fromSeq: 0, toSeq: 3 }, 0)
     expect(missing).toContain('no per-criterion breakdown')
+  })
+})
+
+describe('DSH 0.2.3 tool classification and tool-less action-card pauses', () => {
+  it('treats list_workspace, list_session, and cordis_inspect as passive read-only tools', () => {
+    const session = taskSession()
+    call(session, 'list_workspace', 'c1')
+    call(session, 'list_session', 'c2')
+    call(session, 'cordis_inspect', 'c3')
+    const analysis = analyzeAutoTask(session.snapshotEvents(), smart)
+    expect(analysis.consequentialToolCalls).toBe(0)
+    expect(analysis.eligible).toBe(false)
+    expect(analysis.reason).toBe('no-consequential-work')
+  })
+
+  it('treats enter_worktree, exit_worktree, plugin_manager, and session_send_message as consequential and invalidates stale reviews', () => {
+    for (const toolName of ['enter_worktree', 'exit_worktree', 'plugin_manager', 'session_send_message']) {
+      const session = taskSession()
+      call(session, 'edit', 'c1')
+      call(session, 'read', 'c2')
+      sessionVerify(session, 'v1', verdict(0.9, 'A', { sessionId: 's-1', fromSeq: 0, toSeq: session.snapshotEvents().at(-1)!.seq }))
+      expect(analyzeAutoTask(session.snapshotEvents(), smart, 's-1').manualVerificationAccepted).toBe(true)
+
+      call(session, toolName, 'c3')
+      const after = analyzeAutoTask(session.snapshotEvents(), smart, 's-1')
+      expect(after.consequentialToolCalls).toBeGreaterThanOrEqual(2)
+      expect(after.manualVerificationAccepted).toBe(false)
+      expect(after.eligible).toBe(true)
+    }
+  })
+
+  it('recognizes top-level non-empty action-card fences while ignoring indented examples and blockquotes', () => {
+    expect(hasActionCardFence('Here is an option:\n```action-card\n{"kind":"plugin"}\n```')).toBe(true)
+    expect(hasActionCardFence('~~~ACTION-CARD\n{"kind":"plugin"}\n~~~')).toBe(true)
+    expect(hasActionCardFence('- ```action-card\n  {"kind":"plugin"}\n  ```')).toBe(true)
+    // Empty blocks, 4-space indented examples, blockquotes, and other languages must not match.
+    expect(hasActionCardFence('```action-card\n   \n```')).toBe(false)
+    expect(hasActionCardFence('    ```action-card\n    {"kind":"plugin"}\n    ```')).toBe(false)
+    expect(hasActionCardFence('> ```action-card\n> {"kind":"plugin"}\n> ```')).toBe(false)
+    expect(hasActionCardFence('```json\n{"action-card": true}\n```')).toBe(false)
+  })
+
+  it('pauses automatic gating for an undecided action-card proposal and resumes once decided', () => {
+    const session = taskSession()
+    session.append('turn/start' as never, { turn: 1 } as never)
+    call(session, 'edit', 'c1')
+    call(session, 'read', 'c2')
+    call(session, 'read', 'c3')
+    session.append('assistant/message', {
+      turn: 1,
+      step: 2,
+      message: createAssistantMessage({
+        content: [{ type: 'text', text: 'Proposed next step:\n```action-card\n{"title":"Install helper"}\n```' }],
+      }),
+    }, { surfaceOp: 'append' })
+
+    const beforeDecision = inspectUserInteractionPause(session.snapshotEvents(), 0, 1)
+    expect(beforeDecision).toEqual({ paused: true, reason: 'action-card awaiting user decision' })
+    const blocked = analyzeAutoTask(session.snapshotEvents(), smart)
+    expect(blocked.pendingUserInteraction).toBe(true)
+    expect(blocked.eligible).toBe(false)
+
+    // Once the user records a decision on the card, the pause lifts.
+    session.append('action-cards/decision' as never, { cardId: 'card-1', decision: 'dismissed' } as never)
+    expect(inspectUserInteractionPause(session.snapshotEvents(), 0, 1)).toBeUndefined()
   })
 })

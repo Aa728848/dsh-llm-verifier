@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { zh, en, toolLabels, tFormat, detectLanguage, compact, dateTime, verifierActivityText } from '../../src/client/model/client-i18n.ts'
 import {
   resolveCacheDirOnSave,
@@ -1184,5 +1184,113 @@ describe('auxiliary-thinking global model and target editors', () => {
     expect(en['field.iotThinkingTargets.empty']).toContain('No enabled route')
     expect(zh['field.iotThinking.title']).toBe('辅助思考')
     expect(en['field.iotThinking.title']).toBe('Auxiliary Thinking')
+  })
+})
+
+describe('DSH 0.2.3 client slot assembly and cross-version guards', () => {
+  it('registers Session panel, settings icon, and composer model-menu slots while degrading cleanly on older hosts', async () => {
+    vi.resetModules()
+    vi.doMock('@deepseek-ai/dsh-client-ui-primitives', () => ({
+      Button: () => null,
+      StateDot: () => null,
+      IconRefreshOutlineRegular: undefined,
+      IconRefreshOutline16: undefined,
+      HoverCard: undefined,
+      HoverCardGroup: undefined,
+      Switch: undefined,
+      IconChevronRightOutlineRegular: undefined,
+    }))
+    vi.doMock('@deepseek-ai/dsh-client-ui-model-selection/client', () => ({ apply: undefined }))
+    const clientModule = await import('../../src/client/view/client.tsx')
+    const injectedSlots: string[] = []
+    const registered: Array<{ name: string; id?: string; key?: string }> = []
+    const listeners = new Map<string, (...args: unknown[]) => void>()
+    const describeSpy = vi.fn(async () => ({
+      ok: true,
+      value: {
+        writable: true,
+        namespaces: [{
+          ns: 'llm-verifier',
+          revision: 1,
+          applies: 'live',
+          base: {},
+          user: {},
+          value: { enabled: true, autoVerifyMode: 'smart', iotThinking: 'off', provider: 'deepseek-official', model: 'deepseek-flash' },
+        }],
+      },
+      error: { message: '' },
+    }))
+    const disposers: Array<() => void> = []
+    const mockCtx = {
+      get: (service: string) => service === 'connection' ? { rpc: { call: vi.fn() } } : undefined,
+      remote: {
+        $on: (event: string, fn: (...args: unknown[]) => void) => {
+          listeners.set(event, fn)
+          return () => { listeners.delete(event) }
+        },
+        settings: { describe: describeSpy, update: vi.fn() },
+        session: { modelCatalog: vi.fn() },
+      },
+      effect: (fn: () => (() => void) | void) => {
+        const cleanup = fn()
+        if (typeof cleanup === 'function') disposers.push(cleanup)
+      },
+      on: vi.fn(),
+      inject: vi.fn(),
+      slots: {
+        inject: (name: string, register: () => unknown) => {
+          injectedSlots.push(name)
+          register()
+        },
+        register: (descriptor: { name: string; id?: string; key?: string }) => {
+          registered.push(descriptor)
+          return () => {}
+        },
+      },
+    }
+
+    clientModule.apply(mockCtx as never)
+
+    expect(injectedSlots).toEqual(expect.arrayContaining([
+      'settings.section',
+      'settings.section.icon',
+      'conversation.view',
+      'conversation.input.dock',
+      'conversation.session.panel.section',
+      'conversation.session.panel.section.actions',
+      'conversation.session.panel.indicator',
+      'conversation.input.model.options',
+      'conversation.input.model.pane',
+      'sidebar.right.pane.tab',
+      'sidebar.right.pane.tab.title',
+    ]))
+    expect(registered).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'settings.section.icon', id: 'llm-verifier' }),
+      expect.objectContaining({ name: 'conversation.session.panel.section', id: 'llm-verifier' }),
+      expect.objectContaining({ name: 'conversation.session.panel.section.actions', key: 'llm-verifier' }),
+      expect.objectContaining({ name: 'conversation.session.panel.indicator', id: 'llm-verifier.activity' }),
+      expect.objectContaining({ name: 'conversation.input.model.options', id: 'llm-verifier' }),
+      expect.objectContaining({ name: 'conversation.input.model.pane', key: 'llm-verifier' }),
+    ]))
+
+    // Host `settings/document-updated` pushes trigger a live refresh for our namespace only.
+    listeners.get('settings/document-updated')?.('other-namespace', 2)
+    expect(describeSpy).toHaveBeenCalledTimes(0)
+    listeners.get('settings/document-updated')?.('llm-verifier', 2)
+    expect(describeSpy).toHaveBeenCalledTimes(1)
+
+    for (const cleanup of disposers) cleanup()
+    expect(listeners.size).toBe(0)
+  })
+
+  it('probes newer host primitives at runtime instead of named-importing symbols absent from older 0.2 hosts', () => {
+    const panelSource = readFileSync(fileURLToPath(new URL('../../src/client/view/session-panel.tsx', import.meta.url)), 'utf8')
+    const menuSource = readFileSync(fileURLToPath(new URL('../../src/client/view/model-menu.tsx', import.meta.url)), 'utf8')
+    expect(panelSource).not.toMatch(/import\s*\{[^}]*\bHoverCardGroup\b/)
+    expect(panelSource).not.toMatch(/import\s*\{[^}]*\bHoverCard\b/)
+    expect(menuSource).not.toMatch(/import\s*\{[^}]*\bSwitch\b/)
+    expect(menuSource).not.toMatch(/import\s*\{[^}]*\bIconChevronRightOutlineRegular\b/)
+    expect(menuSource).toContain('data-model-menu-pane={VERIFIER_MODEL_MENU_PANE_KEY}')
+    expect(panelSource).toContain('data-session-panel-row=""')
   })
 })

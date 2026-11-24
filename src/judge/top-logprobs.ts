@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import * as CredentialsModule from '@deepseek-ai/dsh-credentials'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
@@ -73,10 +74,43 @@ function text(value: unknown): string | undefined { return typeof value === 'str
 function endpoint(baseURL: string): string { return baseURL.replace(/\/+$/, '') + '/chat/completions' }
 function dataUrl(image: VerifierImage): string { return 'data:' + image.mediaType + ';base64,' + Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength).toString('base64') }
 
+const LEGAL_API_KEY = /^[\x21-\x7E]+$/
+
+/** Sanitize a resolved API key using the host helper when present, rejecting unusable header characters. */
+function usableApiKey(raw: string | undefined): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const mod = CredentialsModule as unknown as {
+    normalizeApiKey?: (value: string) => { ok: boolean; value?: string }
+  }
+  if (typeof mod.normalizeApiKey === 'function') {
+    const checked = mod.normalizeApiKey(raw)
+    return checked.ok ? checked.value : undefined
+  }
+  const value = raw.trim()
+  return value.length > 0 && LEGAL_API_KEY.test(value) ? value : undefined
+}
+
+/**
+ * Resolve one credential reference across mounted-store and headless/SDK hosts (D12).
+ * A mounted credentials service is authoritative; ambient launch-environment lookup runs
+ * only when no credentials service is mounted and the host exports `resolveCredentialRef`.
+ */
 async function credential(ctx: Context, name: string | undefined): Promise<string | undefined> {
   if (!name) return undefined
+  const ref = credentialRef(name)
   const provider = ctx.get('credentials')
-  return (await provider?.resolve(credentialRef(name)))?.value
+  if (provider !== undefined) return usableApiKey((await provider.resolve(ref))?.value)
+  const mod = CredentialsModule as unknown as {
+    resolveCredentialRef?: (context: Context, key: typeof ref) => Promise<string | undefined>
+  }
+  if (typeof mod.resolveCredentialRef === 'function') {
+    try {
+      return usableApiKey(await mod.resolveCredentialRef(ctx, ref))
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
 }
 
 /**

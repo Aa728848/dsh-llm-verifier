@@ -1,6 +1,16 @@
 # Changelog
 
 ## Unreleased
+- **[DSH 0.2.3-alpha.2 / Cordis 4.2.0-alpha.1] 全面对齐最新宿主版本与新时代前端扩展能力**
+  - **依赖与兼容范围**：18 条 `@deepseek-ai/dsh-*` 开发依赖精确锁定至 `0.2.3-alpha.2`（含编译期类型包 `@deepseek-ai/dsh-client-ui-session-panel`），`@deepseek-ai/cordis` 开发依赖锁定至 `4.2.0-alpha.1` 且 `peerDependencies` 扩展覆盖 `^4.2.0-alpha.1 || ^4.2.0`；`engines.dsh` 与 8 条 DSH peer 保持 `>=0.2.0-rc.1 <0.3.0-0`，并同步更新 `pnpm-workspace.yaml` 与 `tsconfig.local.json`
+  - **插件展示元数据**：新增 `locale/en.json` 与 `locale/zh.json`（`meta.title`、`meta.description`）并在 `package.json` 的 `exports` / `files` 中发布，适配 DSH 0.2.3 Plugins 管理页、详情页与插件市场的多语言卡片展示
+  - **接入 DSH Session Panel（会话抽屉面板）**：新增共享引用计数监控器 `VerifierSessionMonitor`（与底部聊天活动提示条复用，零重复轮询），渐进注册 `conversation.session.panel.section`（当前会话实时评审/辅助思考活动与最近决策记录，支持官方 `HoverCard` + `conversation.session.panel.details` 悬浮详情、`conversation.session.panel.fold` 折叠与点击跳转右侧边栏统计页）、`conversation.session.panel.section.actions`（标题右侧计数/告警摘要）与 `conversation.session.panel.indicator`（收起态运行/未通过角标指示点）
+  - **接入主对话模型菜单快捷控制与设置页实时同步**：新增共享设置镜像 `VerifierSettingsStore`，通过 `conversation.input.model.options` 与 `conversation.input.model.pane` 在对话框模型菜单内直接切换评审开关、自动策略（手动/智能/严格）与辅助思考档位；为 Settings 导航栏注册专属单色盾牌图标（`settings.section.icon`）；设置页与模型菜单共同订阅 `settings/document-updated` 及模型目录/凭据变更事件实现跨界面实时同步
+  - **后端宿主契约与工具面对齐**：
+    - `PASSIVE_TOOLS` 补齐 `list_workspace`、`list_session`、`cordis_inspect`；`CONSEQUENTIAL_TOOLS` 补齐 `enter_worktree`、`exit_worktree`、`plugin_manager`、`session_send_message`
+    - 适配 DSH `0.2.2-rc.5` 免工具 Action Cards：`inspectUserInteractionPause()` 识别 `assistant/message` 中的合法顶层 `action-card` 围栏代码块，在对应 `action-cards/decision` 记录前暂停自动门控，避免打断用户决策
+    - 适配 `@deepseek-ai/dsh-credentials` 新契约：`top-logprobs.ts` 在未挂载 `credentials` 服务时按能力探测 `resolveCredentialRef`，并用 `normalizeApiKey` 校验与修剪 API Key
+  - **宿主新能力逐项审查结论**：`vendor/cordis` `4.2.0-alpha.1`（`ctx[Context.root]`）、`dsh-llm` `CONTENT_REFUSED` 错误码、`ImageRequestTarget` 字段改名、`system/message` 增量 section 更新、`list_agents` `{ running, limit, agents }` 结构及 `ctx.sessionQuery.inspectSession` 移除均已核验并天然兼容；客户端配置继续经 `remote.settings` 读写（因需要修订号写回与完整表单验证，不迁至只读 `SyncedConfig`）；辅助思考停留在 `llm/stream` 流式重写层，不侵入 `cot-translation` 的前端展示槽
 
 ## 0.20.0 - 2026-11-19
 - **[新增] 辅助思考改为分段流式最小改写**

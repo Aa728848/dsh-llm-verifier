@@ -20,8 +20,9 @@
 | `src/iot/` | DeepSeek 主 Agent 辅助思考：流缓冲、供应商改写路由、辅助调用与内存指标 |
 | `src/telemetry/` | 调用统计、决策快照、看板活动视图 |
 | `src/replay/` | 离线回放：阈值重放、解析器重放、样本评测 |
-| `src/client/view/` | React 设置页与统计看板 |
-| `src/client/model/` | 设置页的字段注册、文案字典、纯函数 |
+| `src/client/view/` | React 设置页、统计看板、DSH Session Panel 分节/指示点与模型菜单快捷控制 |
+| `src/client/model/` | 设置页字段注册、文案字典、共享会话/设置存储与纯视图模型函数 |
+| `locale/` | DSH 插件管理页与插件市场读取的本地化显示元数据（`en.json` / `zh.json`） |
 | `test/<域>/` | 与 `src/<域>/` 同名的单测，扩展名一律 `.test.ts`；`test/iot/` 覆盖档位解析、供应商路由、流缓冲与 fail-open 回放 |
 | `scripts/` | 构建、类型门禁、离线回放、发版 |
 | `docs/` | 本文档树 |

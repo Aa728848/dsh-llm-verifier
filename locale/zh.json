@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "LLM Verifier",
+    "description": "为主 Agent 配置独立裁判模型，自动复核候选方案、任务进度、会话交付与辅助思考。"
+  }
+}

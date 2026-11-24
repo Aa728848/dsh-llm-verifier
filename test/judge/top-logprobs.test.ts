@@ -308,6 +308,30 @@ describe('resolveTopLogprobRoute settings seam', () => {
       { ns: 'llm-pi-ai', value: { providers: { 'custom-provider': { api: 'openai-completions', baseURL: 'https://ok.example/v1', apiKeyEnv: 'PROVIDER_KEY' } } } },
     ] })).resolves.toEqual({ baseURL: 'https://ok.example/v1', apiKey: 'secret', deepSeekThinking: false })
   })
+
+  it('trims padded API keys, rejects illegal HTTP header characters, and degrades cleanly without a credentials service', async () => {
+    const withCred = (raw: string | undefined) => resolveTopLogprobRoute(
+      { get: (name: string) => name === 'credentials' ? { resolve: async () => raw === undefined ? undefined : { value: raw } } : undefined } as never,
+      'deepseek-official',
+    )
+    await expect(withCred('  sk-valid-key  \n')).resolves.toEqual({
+      baseURL: 'https://api.deepseek.com',
+      apiKey: 'sk-valid-key',
+      deepSeekThinking: true,
+    })
+    // Spaces or non-ASCII characters cannot travel in an HTTP header; stand down instead of crashing fetch.
+    await expect(withCred('sk invalid key')).resolves.toBeUndefined()
+    await expect(withCred('   ')).resolves.toBeUndefined()
+
+    // When no credentials service is mounted and ambient launch environment has no key, degrade cleanly.
+    const prev = process.env.DEEPSEEK_API_KEY
+    delete process.env.DEEPSEEK_API_KEY
+    try {
+      await expect(resolveTopLogprobRoute({ get: () => undefined } as never, 'deepseek-official')).resolves.toBeUndefined()
+    } finally {
+      if (prev !== undefined) process.env.DEEPSEEK_API_KEY = prev
+    }
+  })
 })
 describe('callTopLogprobs no-logprob classification', () => {
   afterEach(() => vi.unstubAllGlobals())

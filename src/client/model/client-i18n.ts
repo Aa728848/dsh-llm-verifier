@@ -418,6 +418,39 @@ export const zh = {
   'settings.unit.chars': '字符',
   'settings.unit.calls': '次调用',
   'settings.unit.tokens': 'Token',
+
+  // Session Panel (DSH 0.2.3+)
+  'sessionPanel.title': 'LLM Verifier',
+  'sessionPanel.running': '运行中',
+  'sessionPanel.count': '{count} 次',
+  'sessionPanel.countAlert': '{count} 次 · {issues} 告警',
+  'sessionPanel.foldMore': '展开其余 {count} 条',
+  'sessionPanel.foldLess': '收起',
+  'sessionPanel.foldName': '{label}（Verifier 记录）',
+  'sessionPanel.indicatorBusy': 'Verifier 正在运行',
+  'sessionPanel.indicatorAttention': 'Verifier 终验未通过',
+  'sessionPanel.openDashboard': '在右侧栏打开 Verifier 统计详情',
+  'sessionPanel.hoverModel': '裁判：{route}',
+  'sessionPanel.hoverOutcome': '结果：{outcome}',
+  'sessionPanel.hoverCost': '估算费用：{cost}',
+  'sessionPanel.tokens': '{tokens} tok',
+  'sessionPanel.status.ok': '通过',
+  'sessionPanel.status.warn': '告警',
+  'sessionPanel.status.error': '失败',
+
+  // Composer model menu quick controls (DSH 0.2.2-rc.4+)
+  'modelMenu.title': 'LLM Verifier',
+  'modelMenu.stateDisabled': '已停用',
+  'modelMenu.stateSummary': '{mode} · 思考 {iot}',
+  'modelMenu.enabledLabel': '评审工具与门控',
+  'modelMenu.modeLabel': '自动策略',
+  'modelMenu.iotLabel': '辅助思考',
+  'modelMenu.judgeLine': '主裁判：{route}',
+  'modelMenu.targetsHint': '辅助思考生效线路：{count} 条',
+  'modelMenu.targetsEmpty': '尚未配置辅助思考生效线路，请前往设置页添加。',
+  'modelMenu.readOnly': '当前配置为只读，无法在此修改。',
+  'modelMenu.saveFailed': '保存 LLM Verifier 设置失败：{message}',
+  'modelMenu.description': '更改全局即时生效；完整判据与预算请在设置 → LLM Verifier 中配置。',
 }
 
 export type I18nDict = typeof zh
@@ -840,6 +873,39 @@ export const en: I18nDict = {
   'settings.unit.chars': 'chars',
   'settings.unit.calls': 'calls',
   'settings.unit.tokens': 'tokens',
+
+  // Session Panel (DSH 0.2.3+)
+  'sessionPanel.title': 'LLM Verifier',
+  'sessionPanel.running': 'Running',
+  'sessionPanel.count': '{count}',
+  'sessionPanel.countAlert': '{count} · {issues} alert',
+  'sessionPanel.foldMore': 'Show {count} more',
+  'sessionPanel.foldLess': 'Show less',
+  'sessionPanel.foldName': '{label} verifier records',
+  'sessionPanel.indicatorBusy': 'Verifier active',
+  'sessionPanel.indicatorAttention': 'Verifier attention needed',
+  'sessionPanel.openDashboard': 'Open Verifier statistics in the right sidebar',
+  'sessionPanel.hoverModel': 'Judge: {route}',
+  'sessionPanel.hoverOutcome': 'Outcome: {outcome}',
+  'sessionPanel.hoverCost': 'Est. cost: {cost}',
+  'sessionPanel.tokens': '{tokens} tok',
+  'sessionPanel.status.ok': 'Passed',
+  'sessionPanel.status.warn': 'Alert',
+  'sessionPanel.status.error': 'Failed',
+
+  // Composer model menu quick controls (DSH 0.2.2-rc.4+)
+  'modelMenu.title': 'LLM Verifier',
+  'modelMenu.stateDisabled': 'Off',
+  'modelMenu.stateSummary': '{mode} · Think {iot}',
+  'modelMenu.enabledLabel': 'Review tools & gates',
+  'modelMenu.modeLabel': 'Auto policy',
+  'modelMenu.iotLabel': 'Auxiliary thinking',
+  'modelMenu.judgeLine': 'Primary judge: {route}',
+  'modelMenu.targetsHint': 'Auxiliary thinking routes: {count}',
+  'modelMenu.targetsEmpty': 'No auxiliary thinking routes configured; add one in Settings.',
+  'modelMenu.readOnly': 'Configuration is read-only here.',
+  'modelMenu.saveFailed': 'Could not save LLM Verifier settings: {message}',
+  'modelMenu.description': 'Changes apply immediately across sessions; configure rubrics and budgets in Settings → LLM Verifier.',
 }
 
 export const dictionaries = { zh, en }

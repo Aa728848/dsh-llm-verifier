@@ -4,11 +4,11 @@
 
 ## 1. 本插件消费的宿主面
 
-宿主包：`@deepseek-ai/cordis`、`dsh-tools`、`dsh-agent`、`dsh-session`、`dsh-llm`、`dsh-attachment`、`dsh-settings`、`dsh-credentials`、`dsh-api-remotes`、`dsh-client-connection`、`dsh-client-ui-renderer`、`dsh-client-ui-slots`、`dsh-client-ui-settings`、`dsh-client-ui-conversation`、`dsh-client-ui-primitives`、`dsh-client-ui-model-selection`、`dsh-client-locale`。
+宿主包：`@deepseek-ai/cordis`、`dsh-tools`、`dsh-agent`、`dsh-session`、`dsh-llm`、`dsh-attachment`、`dsh-settings`、`dsh-credentials`、`dsh-api-remotes`、`dsh-client-connection`、`dsh-client-ui-renderer`、`dsh-client-ui-slots`、`dsh-client-ui-settings`、`dsh-client-ui-conversation`、`dsh-client-ui-session-panel`（仅编译期类型与渐进插槽，不列为启动硬注入）、`dsh-client-ui-primitives`、`dsh-client-ui-model-selection`、`dsh-client-locale`。
 
-宿主**服务名**（`ctx.get()` / `ctx.inject()` 读取，类型系统看不见，改名就是静默失效）：`agents`、`llm`、`settings`、`credentials`、`jobs`、`workspaceChanges`、`connection`、`sidebarRightTabs`、`slots`、`remote` / `remote.session`。
+宿主**服务名**（`ctx.get()` / `ctx.inject()` 读取，类型系统看不见，改名就是静默失效）：`agents`、`llm`、`settings`、`credentials`、`jobs`、`workspaceChanges`、`connection`、`sidebarRight`（可选导航探测）、`sidebarRightTabs`、`slots`、`remote` / `remote.session` / `remote.settings`。
 
-设置页优先通过 `window.__DSH_CLAUDE_STYLE_CONTROLS__` 通用控件注册表挂载 `dsh-claude-style` 的 `model-picker`；未安装或版本较旧时复用 `dsh-client-ui-model-selection` 注册的 `ModelSelect`。原生组件未从包入口导出，唯一借用点是 `client-native-model.ts` 的注册捕获；两种宿主选择器都不可用时显示旧的三项控件。模型目录读取与设置读取彼此独立，目录慢或失败不得阻塞设置页首屏。
+设置页优先通过 `window.__DSH_CLAUDE_STYLE_CONTROLS__` 通用控件注册表挂载 `dsh-claude-style` 的 `model-picker`；未安装或版本较旧时复用 `dsh-client-ui-model-selection` 注册的 `ModelSelect`。原生组件未从包入口导出，唯一借用点是 `client-native-model.ts` 的注册捕获；两种宿主选择器都不可用时显示旧的三项控件。模型目录读取与设置读取彼此独立，目录慢或失败不得阻塞设置页首屏。插件另通过 `locale/*.json` 暴露插件管理页与市场读取的本地化显示元数据，并通过 `ctx.slots.inject()` 渐进注册 Settings 导航图标（`settings.section.icon`）、主对话模型菜单快捷控制（`conversation.input.model.options` / `.pane`）与 DSH 0.2.3+ Session Panel 分节、标题计数及状态指示点。
 
 宿主**事件**（`ctx.on()`）：`agent/pre-step`、`agent/turn-stopping`、`agent/disposed`、`llm/stream`。
 
@@ -47,7 +47,7 @@
 
 ## 4. 不要当成 bug 顺手"修"掉
 
-- **门禁精确锁在 `0.2.2-rc.3`，兼容声明限定为 `>=0.2.0-rc.1 <0.3.0-0`**。0.1 系列不再由宿主兼容门放行；旧形态读取代码仍可保留，但不构成对旧宿主的支持承诺。精确 pin 是为了防止门禁在未逐 tag 审查时浮到半发布版本。
+- **门禁精确锁在 `0.2.3-alpha.2` 与 `@deepseek-ai/cordis` `4.2.0-alpha.1`，兼容声明限定为 `>=0.2.0-rc.1 <0.3.0-0`**。0.1 系列不再由宿主兼容门放行；旧形态读取代码仍可保留，但不构成对旧宿主的支持承诺。精确 pin 是为了防止门禁在未逐 tag 审查时浮到半发布版本。
 - **`snapshotEvents()` 是有豁免的调用**：见 [D12](adr/D12-host-seams.md)。
 - **`lib/types/plugin/message-source.d.ts` 是孤立产物**：该模块只含类型层声明，运行时被 tree-shake，没有对应的 `lib/plugin/message-source.js`，属正常。
 - **`lib/` 里的 chunk 文件名带 hash**：`build` 先清空 `lib/`，磁盘上成对的新增/删除是正常的，不要手工保留旧文件。

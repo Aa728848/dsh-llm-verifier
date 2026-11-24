@@ -25,7 +25,7 @@ import * as uiPrimitives from '@deepseek-ai/dsh-client-ui-primitives'
  */
 const hostIcons = uiPrimitives as unknown as Record<string, React.ComponentType<{ size?: number }> | undefined>
 const IconRefresh = hostIcons.IconRefreshOutlineRegular ?? hostIcons.IconRefreshOutline16 ?? (() => null)
-import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
   zh, en, dictionaries, toolLabels, tFormat, useLanguage, detectLanguage,
   compact, money, duration, dateTime, type I18nDict,
@@ -50,7 +50,11 @@ import {
 import { buildProcessCycles, type ProcessCycleTone } from '../model/client-process-cycles.ts'
 import { startSettingsPageLoad } from '../model/client-loading.ts'
 import type { ModelCatalogFailureView, ModelProviderGroupView } from '../model/client-native-model.ts'
+import { VERIFIER_ACTIVITY_POLL_MS, VerifierSessionMonitor } from '../model/client-session-store.ts'
+import { VerifierSettingsStore } from '../model/client-settings-store.ts'
 import { HostModelSelect } from './host-model-select.tsx'
+import { VerifierModelMenuOption, VerifierModelMenuPane, VERIFIER_MODEL_MENU_PANE_KEY } from './model-menu.tsx'
+import { VerifierSessionPanelActions, VerifierSessionPanelIndicator, VerifierSessionPanelSection } from './session-panel.tsx'
 import {
   FIELDS,
   PROFILES,
@@ -109,6 +113,7 @@ interface ModelStatistics { provider: string; model: string; invocations: number
 interface Totals extends RunStats { invocations: number; successes: number; failures: number; successRate: number; averageDurationMs: number; tokens: number; cacheHitRate: number; prefixCacheHitRate: number }
 interface StatisticsOverview { generatedAt: number; fromMs: number; toMs: number; sessionId?: string; totals: Totals; daily: DailyStatistics[]; tools: ToolStatistics[]; models: ModelStatistics[]; recent: InvocationRecord[] }
 interface VerifierRemote {
+  $on?(event: string, listener: (...args: unknown[]) => void): () => void
   session: {
     modelCatalog(): Promise<{
       ok: boolean
@@ -435,7 +440,21 @@ export function VerifierSettings({ remote }: VerifierSettingsProps) {
     }
     window.addEventListener('focus',sync)
     document.addEventListener('visibilitychange',sync)
-    return ()=>{window.removeEventListener('focus',sync);document.removeEventListener('visibilitychange',sync)}
+    const unsubs: Array<() => void> = []
+    if (typeof remote.$on === 'function') {
+      unsubs.push(remote.$on('settings/document-updated', (ns) => {
+        if (ns === undefined || ns === NS) sync()
+      }))
+      const refreshCatalog = () => { loadCatalog() }
+      for (const event of ['llm/adapters-updated', 'llm/models-updated', 'credentials/record-updated', 'credentials/reference-updated']) {
+        unsubs.push(remote.$on(event, refreshCatalog))
+      }
+    }
+    return ()=>{
+      window.removeEventListener('focus',sync)
+      document.removeEventListener('visibilitychange',sync)
+      for (const dispose of unsubs) { try { dispose() } catch { /* ignore remote listener teardown */ } }
+    }
   },[remote])
   const patch=<K extends keyof Values>(key:K,value:Values[K])=>{setSaveState(null);setDraft(v=>v?{...v,[key]:value}:v)}
   const selectJudgeModel=(selection:{provider:string;model:string;reasoningEffort?:string})=>{
@@ -1461,6 +1480,16 @@ export function VerifierSidebarIcon({ size = 26, className }: { size?: number; c
   )
 }
 
+/** Monochrome shield-check navigation glyph for `settings.section.icon` (DSH 0.2.2+ Settings nav). */
+export function VerifierSettingsNavIcon({ size = 16 }: { size?: number; active?: boolean }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+      <path d="M12 3.4 19 6v5.2c0 4.3-2.8 7.5-7 9.4-4.2-1.9-7-5.1-7-9.4V6l7-2.6Z" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />
+      <path d="m8.8 12.1 2.1 2.1 4.3-4.3" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 export function GlobalVerifierDashboard({ rpc }: { rpc: any }) {
   return <StatisticsPage rpc={rpc} isGlobal />
 }
@@ -1480,8 +1509,7 @@ export function RightSidebarVerifierTitle() {
 }
 
 export const inject = ['slots', 'connection', 'remote', 'remote.session', 'remote.settings']
-/** Poll interval of the chat chip while a turn runs (the answer is in-memory and cheap). */
-export const VERIFIER_ACTIVITY_POLL_MS = 1_000
+export { VERIFIER_ACTIVITY_POLL_MS }
 
 /**
  * Read what the plugin is doing for one session (P06 cycle, routed review, final acceptance).
@@ -1563,30 +1591,57 @@ const activityTextStyle: React.CSSProperties = {
  * while something is still being shown — so an idle conversation makes no requests.
  * @param props - the input-dock owner values (the session snapshot) plus the injected RPC handle.
  */
-export function VerifierActivityChip({ session, rpc }: { session?: { sessionId?: unknown; running?: unknown } | null; rpc?: any }) {
+function useActivityChipView(
+  sessionId: string | undefined,
+  running: boolean,
+  rpc: any,
+  monitor?: VerifierSessionMonitor,
+): ActivityChipView | null {
+  const monitored = useSyncExternalStore(
+    listener => (monitor && sessionId) ? monitor.subscribe(sessionId, listener) : () => {},
+    () => (monitor && sessionId) ? monitor.getSnapshot(sessionId).activity : null,
+  )
+  const [standalone, setStandalone] = useState<ActivityChipView | null>(null)
+  const showingStandalone = monitor === undefined && standalone !== null && (
+    standalone.active !== undefined || standalone.thinking !== undefined || standalone.settled !== undefined
+  )
+  useEffect(() => {
+    if (monitor !== undefined) {
+      if (sessionId === undefined) return undefined
+      return monitor.watch(sessionId, { running, includeSummary: false })
+    }
+    if (sessionId === undefined) { setStandalone(null); return undefined }
+    if (!running && !showingStandalone) { setStandalone(null); return undefined }
+    let cancelled = false
+    const controller = new AbortController()
+    const load = async () => {
+      const value = await readVerifierActivity(rpc, sessionId, controller.signal)
+      if (!cancelled) setStandalone(value)
+    }
+    void load()
+    const timer = setInterval(() => { void load() }, VERIFIER_ACTIVITY_POLL_MS)
+    return () => { cancelled = true; clearInterval(timer); controller.abort() }
+  }, [monitor, sessionId, running, showingStandalone, rpc])
+  return monitor !== undefined ? monitored : standalone
+}
+
+/**
+ * The chat-visible half of the automatic stages: what the plugin is doing for this session right now.
+ *
+ * It answers the pauses the chat cannot explain: a P06 cycle buffers the reply, a routed review and
+ * the final acceptance hold the turn open while the judges run, and a PASSING acceptance otherwise
+ * says nothing at all. Shares {@link VerifierSessionMonitor} with the Session panel when injected,
+ * avoiding duplicate polling for the same session.
+ * @param props - the input-dock owner values (the session snapshot) plus the injected monitor/RPC handle.
+ */
+export function VerifierActivityChip({ session, rpc, monitor }: { session?: { sessionId?: unknown; running?: unknown } | null; rpc?: any; monitor?: VerifierSessionMonitor }) {
   const lang = useLanguage()
   const t = dictionaries[lang]
   const raw = session?.sessionId
   const sessionId = raw === undefined || raw === null || String(raw) === '' ? undefined : String(raw)
   const running = session?.running === true
-  const [view, setView] = useState<ActivityChipView | null>(null)
+  const view = useActivityChipView(sessionId, running, rpc, monitor)
   const rendered = verifierActivityText(view, t)
-  // Keyed on whether anything is RENDERED rather than on whether a read answered: an empty view has
-  // to stop the polling too, or a conversation that once ran a cycle would poll forever.
-  const showing = rendered !== null
-  useEffect(() => {
-    if (sessionId === undefined) { setView(null); return }
-    if (!running && !showing) { setView(null); return }
-    let cancelled = false
-    const controller = new AbortController()
-    const load = async () => {
-      const value = await readVerifierActivity(rpc, sessionId, controller.signal)
-      if (!cancelled) setView(value)
-    }
-    void load()
-    const timer = setInterval(() => { void load() }, VERIFIER_ACTIVITY_POLL_MS)
-    return () => { cancelled = true; clearInterval(timer); controller.abort() }
-  }, [sessionId, running, showing, rpc])
   if (rendered === null) return null
   const dotState: StateDotState = rendered.tone === 'busy' ? 'ongoing' : rendered.tone === 'ok' ? 'done' : 'error'
   return (
@@ -1607,7 +1662,23 @@ const BLANK_COMPOSER = Object.freeze({ blank: true })
 
 export function apply(ctx: ClientContext): void {
   const connection = ctx.get('connection') as any
-  const remote = ctx.remote
+  const remote = ctx.remote as unknown as VerifierRemote
+  const monitor = new VerifierSessionMonitor(connection?.rpc)
+  const settingsStore = remote?.settings ? new VerifierSettingsStore(remote.settings) : undefined
+  if (typeof (ctx as any).effect === 'function') {
+    (ctx as any).effect(() => () => {
+      monitor.dispose()
+      settingsStore?.dispose()
+    })
+    if (settingsStore && typeof remote?.$on === 'function') {
+      (ctx as any).effect(() => remote.$on!('settings/document-updated', (ns) => {
+        if (ns === undefined || ns === NS) void settingsStore.refresh()
+      }))
+    }
+  }
+  if (settingsStore && typeof (ctx as any).on === 'function') {
+    (ctx as any).on('connection/reset', () => { void settingsStore.refresh() })
+  }
   /**
    * Collapse the resident composer while the statistics View is the active one.
    *
@@ -1635,6 +1706,15 @@ export function apply(ctx: ClientContext): void {
       return () => {}
     }
   }
+  const VERIFIER_TAB_KIND = 'llm-verifier'
+  const VERIFIER_TAB_ID = 'dsh-llm-verifier'
+  const openDashboard = (): void => {
+    try {
+      const nav = (typeof ctx.get === 'function' ? ctx.get('sidebarRight' as never) : undefined) as { openTab?: (kind: string) => void } | undefined
+      nav?.openTab?.(VERIFIER_TAB_KIND)
+    } catch { /* host without sidebar navigation keeps the row read-only */ }
+  }
+
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'llm-verifier',
@@ -1642,6 +1722,10 @@ export function apply(ctx: ClientContext): void {
     label: 'LLM Verifier',
     inject: () => ({ remote }),
   }, VerifierSettings as never))
+  ctx.slots.inject('settings.section.icon', () => ctx.slots.register({
+    name: 'settings.section.icon',
+    id: 'llm-verifier',
+  }, VerifierSettingsNavIcon as never))
   ctx.slots.inject('conversation.view', () => ctx.slots.register({
     name: 'conversation.view',
     id: 'llm-verifier-statistics',
@@ -1656,11 +1740,43 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.input.dock' as never,
     id: 'llm-verifier-activity',
     order: 30,
-    inject: () => ({ rpc: connection.rpc }),
+    inject: () => ({ rpc: connection.rpc, monitor }),
   } as never, VerifierActivityChip as never))
 
-  const VERIFIER_TAB_KIND = 'llm-verifier'
-  const VERIFIER_TAB_ID = 'dsh-llm-verifier'
+  // DSH 0.2.3+ Session panel: per-session live activity, recent verdicts, heading count, and toggle dot.
+  // Progressive enhancement: older 0.2 hosts simply never declare these slots.
+  ctx.slots.inject('conversation.session.panel.section', () => ctx.slots.register({
+    name: 'conversation.session.panel.section',
+    id: 'llm-verifier',
+    order: 350,
+    label: () => (detectLanguage() === 'zh' ? zh['sessionPanel.title'] : en['sessionPanel.title']),
+    inject: () => ({ monitor, openDashboard }),
+  }, VerifierSessionPanelSection as never))
+  ctx.slots.inject('conversation.session.panel.section.actions', () => ctx.slots.register({
+    name: 'conversation.session.panel.section.actions',
+    key: 'llm-verifier',
+    inject: () => ({ monitor }),
+  }, VerifierSessionPanelActions as never))
+  ctx.slots.inject('conversation.session.panel.indicator', () => ctx.slots.register({
+    name: 'conversation.session.panel.indicator',
+    id: 'llm-verifier.activity',
+    order: 30,
+    inject: () => ({ monitor }),
+  }, VerifierSessionPanelIndicator as never))
+
+  // DSH 0.2.2-rc.4+ composer model menu quick controls for verifier policy and auxiliary thinking.
+  if (settingsStore !== undefined) {
+    ctx.slots.inject('conversation.input.model.options', () => ctx.slots.register({
+      name: 'conversation.input.model.options',
+      id: 'llm-verifier',
+      inject: () => ({ settingsStore }),
+    }, VerifierModelMenuOption as never))
+    ctx.slots.inject('conversation.input.model.pane', () => ctx.slots.register({
+      name: 'conversation.input.model.pane',
+      key: VERIFIER_MODEL_MENU_PANE_KEY,
+      inject: () => ({ settingsStore }),
+    }, VerifierModelMenuPane as never))
+  }
 
   const registerRightSidebar = (tabs: any): (() => void) | undefined => {
     if (!tabs || typeof tabs.register !== 'function') return undefined

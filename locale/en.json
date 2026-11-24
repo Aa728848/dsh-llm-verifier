@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "LLM Verifier",
+    "description": "Independent judge model for verifying candidate plans, task progress, session delivery, and auxiliary thinking."
+  }
+}

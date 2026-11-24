@@ -27,6 +27,9 @@
       "@deepseek-ai/dsh-client-ui-conversation/client": [
         "../deepseek-harness/packages/client/ui-conversation/lib/types/client/index.d.ts"
       ],
+      "@deepseek-ai/dsh-client-ui-session-panel/client": [
+        "../deepseek-harness/packages/client/ui-session-panel/lib/types/client/index.d.ts"
+      ],
       "@deepseek-ai/dsh-client-ui-model-selection/client": [
         "../deepseek-harness/packages/client/ui-model-selection/lib/types/client/index.d.ts"
       ],

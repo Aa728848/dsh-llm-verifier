@@ -100,9 +100,11 @@ describe('hasLiveActiveSubagents', () => {
 })
 
 describe('plugin assembly', () => {
-  it('keeps engines.dsh identical to every DSH peer compatibility range', () => {
+  it('keeps engines.dsh identical to every DSH peer compatibility range and ships localized plugin metadata', () => {
     const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
       engines?: { dsh?: unknown }
+      exports?: Record<string, unknown>
+      files?: string[]
       peerDependencies: Record<string, string>
     }
     const range = manifest.engines?.dsh
@@ -110,9 +112,19 @@ describe('plugin assembly', () => {
     expect(range).not.toContain('workspace:')
     expect(range).toBe('>=0.2.0-rc.1 <0.3.0-0')
     expect(manifest.peerDependencies['@deepseek-ai/cordis']).toContain('^4.1.0')
+    expect(manifest.peerDependencies['@deepseek-ai/cordis']).toContain('^4.2.0-alpha.1')
     const peers = Object.entries(manifest.peerDependencies).filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
     expect(peers).toHaveLength(8)
     for (const [, peerRange] of peers) expect(peerRange).toBe(range)
+    expect(manifest.exports?.['./locale/*.json']).toBe('./locale/*.json')
+    expect(manifest.files).toContain('locale')
+    for (const file of ['en.json', 'zh.json']) {
+      const meta = JSON.parse(readFileSync(new URL('../../locale/' + file, import.meta.url), 'utf8')) as {
+        meta?: { title?: string; description?: string }
+      }
+      expect(meta.meta?.title?.trim().length).toBeGreaterThan(0)
+      expect(meta.meta?.description?.trim().length).toBeGreaterThan(0)
+    }
   })
 
   it('registers exactly the four verifier tools with ensemble-aware output schemas', () => {

@@ -45,8 +45,9 @@ const PASSIVE_TOOLS = new Set([
   'get_goal', 'skill', 'load_workspace_dependencies', 'office_render', 'mcp__codegraph__codegraph_explore', 'ask_user_question',
   'todo_write', 'team_task_list', 'team_task_get', 'schedule_list', 'schedule_view',
   'timeline_tree', 'timeline_tasks', 'timeline_pull', 'timeline_read', 'timeline_reply',
-  'cordis_inspect_list', 'cordis_inspect_query', 'plugin_market', 'propose_action',
+  'cordis_inspect', 'cordis_inspect_list', 'cordis_inspect_query', 'plugin_market', 'propose_action',
   'terminal_read', 'terminal_list', 'user_terminal_list', 'user_terminal_read',
+  'list_workspace', 'list_session',
   'session_search', 'session_event_search', 'session_trace', 'session_event_trace', 'session_event_read',
   'present', 'run_code', 'cua_run_code',
 ])
@@ -59,7 +60,8 @@ const CONSEQUENTIAL_TOOLS = new Set([
   'terminal_open', 'terminal_send', 'terminal_signal', 'terminal_close',
   'ssh_exec', 'ssh_upload', 'ssh_download', 'ssh_tunnel', 'ssh_cluster',
   'job_kill', 'workbench_session_delete', 'create_goal', 'update_goal',
-  'schedule_create', 'schedule_edit', 'create_worktree', 'ralph',
+  'schedule_create', 'schedule_edit', 'create_worktree', 'enter_worktree', 'exit_worktree',
+  'plugin_manager', 'session_send_message', 'ralph',
 ])
 
 /**
@@ -376,6 +378,43 @@ export function isAwaitingUserText(text: string): boolean {
   return USER_QUESTION_PATTERNS.some(p => p.test(lastLine) || p.test(trimmed))
 }
 
+const ACTION_CARD_OPENING = /^( {0,3})((?:[-+*]|\d{1,9}[.)]) {1,4})?(`{3,}|~{3,})(.*)$/u
+
+/**
+ * Whether assistant prose contains a non-empty `action-card` fenced block (DSH 0.2.2-rc.5+ tool-less proposals).
+ * Matches the host's fence rules so indented code examples and blockquotes are ignored.
+ */
+export function hasActionCardFence(text: string): boolean {
+  let closing: RegExp | undefined
+  let isCard = false
+  let hasBody = false
+  for (const line of text.split(/\r?\n/u)) {
+    if (closing === undefined) {
+      const opening = ACTION_CARD_OPENING.exec(line)
+      if (opening === null) continue
+      const indent = opening[1] ?? ''
+      const item = opening[2]
+      const marker = opening[3] ?? ''
+      const info = opening[4] ?? ''
+      if (marker.startsWith('`') && info.includes('`')) continue
+      const width = indent.length + (item?.length ?? 0)
+      const closingIndent = (item === undefined ? 0 : width) + 3
+      closing = new RegExp(`^ {0,${closingIndent}}${marker.charAt(0)}{${marker.length},}[ \\t]*$`, 'u')
+      const lang = info.trim().replace(/[^\w-][\s\S]*$/u, '').toLowerCase()
+      isCard = lang === 'action-card'
+      hasBody = false
+    } else if (closing.test(line)) {
+      if (isCard && hasBody) return true
+      closing = undefined
+      isCard = false
+      hasBody = false
+    } else if (isCard && line.trim().length > 0) {
+      hasBody = true
+    }
+  }
+  return isCard && hasBody
+}
+
 function narrativeText(blocks: unknown): string {
   if (typeof blocks === 'string') return blocks.trim()
   if (!Array.isArray(blocks)) return ''
@@ -497,6 +536,10 @@ export function inspectUserInteractionPause(
     const hasToolCalls = content.some(b => b.type === 'tool-call')
     if (!hasToolCalls) {
       const text = narrativeText(content)
+      if (text && hasActionCardFence(text)) {
+        const decided = turnEvents.some(event => event.seq > lastAssistant.seq && (event.type as string) === 'action-cards/decision')
+        if (!decided) return { paused: true, reason: 'action-card awaiting user decision' }
+      }
       if (text && isAwaitingUserText(text)) {
         return { paused: true, reason: 'assistant awaiting user instructions' }
       }

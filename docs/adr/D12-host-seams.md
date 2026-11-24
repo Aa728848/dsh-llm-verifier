@@ -21,6 +21,10 @@
 | DSH 原生模型选择器未从包入口导出，旧宿主又可能缺少其注册形态；新列表子插槽省略 `options`，keyed 详情子插槽传入 `entryKey` | `client/model/client-native-model.ts` 的 `captureNativeModelSelect()` / `renderNativeModelSlot()`；失败时退回旧控件 |
 | 子代理委托工具实例名（`subagent` / `subagent_fork` / `subagent_oar` / `subagent_*`） | `routing/router.ts` 的 `isSubagentDelegationTool()` |
 | 具名子代理结算（`subagent/catalog` 映射与通知主语）及 `interrupt_agent` 参数（`agent` / `target` / `agent_id`） | `routing/auto.ts` 的 `hasPendingSubagents()` / `interruptAgentTarget()` |
+| 免工具 `action-card` 围栏代码块与 `action-cards/decision` 决策事件（0.2.2-rc.5+） | `routing/auto.ts` 的 `hasActionCardFence()` / `inspectUserInteractionPause()` |
+| 凭证读取（已挂载 `credentials` 服务优先；无服务时探测 `resolveCredentialRef` 启动环境与 `normalizeApiKey` 校验） | `judge/top-logprobs.ts` 的 `credential()` |
+| Session Panel 插槽及可选原语（`HoverCard` / `HoverCardGroup`）与 `useSessionStatus`（`Map` / 普通对象） | `client/view/session-panel.tsx` 按能力探测，旧宿主由 `slots.inject` 静默跳过 |
+| 主对话模型菜单钻取扩展（`openPane` / `Switch` / `IconChevronRightOutlineRegular` 能力探测） | `client/view/model-menu.tsx`，无 `openPane` 的旧宿主自动隐身 |
 
 ## 后果
 
