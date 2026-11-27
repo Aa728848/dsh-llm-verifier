@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import z from 'schemastery'
+import z from '@deepseek-ai/schemastery'
 import { CRITERIA_PRESET_IDS, type CriteriaPresetId } from '../scoring/core.ts'
 import { IOT_MODES, type IoTMode, type IoTThinkingTarget } from '../iot/mode.ts'
 export type { IoTThinkingTarget } from '../iot/mode.ts'

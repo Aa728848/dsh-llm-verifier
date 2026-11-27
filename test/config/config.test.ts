@@ -326,12 +326,12 @@ describe('config - judges ensemble resolution', () => {
     // the field must never enter the request-level path. Both resolution paths must agree, because
     // the settings namespace reads the schema and the runtime reads resolveConfig.
     expect(resolveConfig({}).autoProcessSelection).toBe('off')
-    expect(Config({}).autoProcessSelection).toBe('off')
+    expect(unwrapVolatileConfig(Config({})).autoProcessSelection).toBe('off')
     for (const mode of AUTO_PROCESS_SELECTION_MODES) {
       expect(resolveConfig({ autoProcessSelection: mode }).autoProcessSelection).toBe(mode)
-      expect(Config({ autoProcessSelection: mode }).autoProcessSelection).toBe(mode)
+      expect(unwrapVolatileConfig(Config({ autoProcessSelection: mode })).autoProcessSelection).toBe(mode)
       // A user-saved mode survives resolution and re-serialization through the schema.
-      const roundTripped = Config({ ...Config({}), autoProcessSelection: mode } as never) as { autoProcessSelection?: string }
+      const roundTripped = unwrapVolatileConfig(Config({ ...unwrapVolatileConfig(Config({})), autoProcessSelection: mode } as never)) as { autoProcessSelection?: string }
       expect(roundTripped.autoProcessSelection).toBe(mode)
       expect(resolveConfig(Config({ autoProcessSelection: mode }) as never).autoProcessSelection).toBe(mode)
     }
@@ -344,8 +344,8 @@ describe('config - judges ensemble resolution', () => {
     // shared normalizer the settings page uses.
     expect(resolveConfig({ autoProcessSelection: true }).autoProcessSelection).toBe('recovery')
     expect(resolveConfig({ autoProcessSelection: false }).autoProcessSelection).toBe('off')
-    expect(Config({ autoProcessSelection: true }).autoProcessSelection).toBe('recovery')
-    expect(Config({ autoProcessSelection: false }).autoProcessSelection).toBe('off')
+    expect(unwrapVolatileConfig(Config({ autoProcessSelection: true })).autoProcessSelection).toBe('recovery')
+    expect(unwrapVolatileConfig(Config({ autoProcessSelection: false })).autoProcessSelection).toBe('off')
     expect(normalizeAutoProcessSelection(true)).toBe('recovery')
     expect(normalizeAutoProcessSelection(false)).toBe('off')
     expect(normalizeAutoProcessSelection(undefined)).toBe('off')
@@ -363,11 +363,11 @@ describe('config - judges ensemble resolution', () => {
 
   it('bounds the every-step per-task cycle allowance to 1..32 with a default of 4', () => {
     expect(resolveConfig({}).maxProcessCyclesPerTask).toBe(4)
-    expect(Config({}).maxProcessCyclesPerTask).toBe(4)
+    expect(unwrapVolatileConfig(Config({})).maxProcessCyclesPerTask).toBe(4)
     // Boundaries are inclusive: the ceiling is a spend cap, not a threshold to stay below.
     for (const value of [1, 32]) {
       expect(resolveConfig({ maxProcessCyclesPerTask: value }).maxProcessCyclesPerTask).toBe(value)
-      expect(Config({ maxProcessCyclesPerTask: value }).maxProcessCyclesPerTask).toBe(value)
+      expect(unwrapVolatileConfig(Config({ maxProcessCyclesPerTask: value })).maxProcessCyclesPerTask).toBe(value)
     }
     for (const bad of [0, 33, 2.5, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() => resolveConfig({ maxProcessCyclesPerTask: bad })).toThrow('llm-verifier: maxProcessCyclesPerTask must be an integer between 1 and 32')
@@ -379,9 +379,9 @@ describe('config - judges ensemble resolution', () => {
     // information as the reply the session already showed failing, so the cycle mostly measures
     // sampling noise. OFF is the control arm of the controlled comparison, not an end state.
     expect(resolveConfig({}).autoProcessFailureContext).toBe(true)
-    expect(Config({}).autoProcessFailureContext).toBe(true)
+    expect(unwrapVolatileConfig(Config({})).autoProcessFailureContext).toBe(true)
     expect(resolveConfig({ autoProcessFailureContext: false }).autoProcessFailureContext).toBe(false)
-    const roundTripped = Config({ ...Config({}), autoProcessFailureContext: false } as never) as { autoProcessFailureContext?: boolean }
+    const roundTripped = unwrapVolatileConfig(Config({ ...unwrapVolatileConfig(Config({})), autoProcessFailureContext: false } as never)) as { autoProcessFailureContext?: boolean }
     expect(roundTripped.autoProcessFailureContext).toBe(false)
   })
 
@@ -405,7 +405,7 @@ describe('config - judges ensemble resolution', () => {
     expect(resolveConfig({ autoProcessAlternativeModel: ' openai/gpt-5 , anthropic/claude-4 ' }).autoProcessAlternativeModel).toBe('openai/gpt-5,anthropic/claude-4')
     expect(resolveConfig({ autoProcessAlternativeModel: 'a/1,b/2,c/3' }).autoProcessAlternativeModel).toBe('a/1,b/2,c/3')
     // The schema preserves what the operator typed; resolveConfig is what trims and joins.
-    expect(Config({ autoProcessAlternativeModel: ' a/1 , b/2 ' }).autoProcessAlternativeModel).toBe(' a/1 , b/2 ')
+    expect(unwrapVolatileConfig(Config({ autoProcessAlternativeModel: ' a/1 , b/2 ' })).autoProcessAlternativeModel).toBe(' a/1 , b/2 ')
     expect(resolveConfig(Config({ autoProcessAlternativeModel: ' a/1 , b/2 ' }) as never).autoProcessAlternativeModel).toBe('a/1,b/2')
     // Empty stays legal (= resample the session model), and blank entries are DROPPED, never
     // rejected: a trailing comma is a typing habit, not a malformed route.
@@ -476,21 +476,21 @@ describe('config - judges ensemble resolution', () => {
     // ON by default: the acceptance judge scores the host's own record of what changed on disk
     // rather than the agent's account of its edits. OFF reproduces the pre-0.1.6 prompt exactly.
     expect(resolveConfig({}).autoWorkspaceEvidence).toBe(true)
-    expect(Config({}).autoWorkspaceEvidence).toBe(true)
+    expect(unwrapVolatileConfig(Config({})).autoWorkspaceEvidence).toBe(true)
     expect(resolveConfig({ autoWorkspaceEvidence: false }).autoWorkspaceEvidence).toBe(false)
-    const roundTripped = Config({ ...Config({}), autoWorkspaceEvidence: false } as never) as { autoWorkspaceEvidence?: boolean }
+    const roundTripped = unwrapVolatileConfig(Config({ ...unwrapVolatileConfig(Config({})), autoWorkspaceEvidence: false } as never)) as { autoWorkspaceEvidence?: boolean }
     expect(roundTripped.autoWorkspaceEvidence).toBe(false)
     // The schema is the save-time gate: a non-boolean must be refused, not quietly read as an arm.
     expect(() => Config({ autoWorkspaceEvidence: 'yes' as never })).toThrow(/expected boolean/u)
   })
 
   it('Config schema accepts optional keys inside extraJudges array and defaults to []', () => {
-    const fromEmpty = Config({})
+    const fromEmpty = unwrapVolatileConfig(Config({}))
     expect(fromEmpty.extraJudges).toEqual([])
 
-    const fromPartial = Config({
+    const fromPartial = unwrapVolatileConfig(Config({
       extraJudges: [{ provider: 'openai', model: 'gpt-4o' }],
-    })
+    }))
     expect(fromPartial.extraJudges).toEqual([{ provider: 'openai', model: 'gpt-4o' }])
     const resolved = resolveConfig(fromPartial)
     expect(resolved.judges).toHaveLength(2)
@@ -512,7 +512,7 @@ describe('config - settings payload seam', () => {
     ])
 
     // The settings namespace validates the section with the schema, then resolveConfig runs again.
-    const parsed = Config({ provider: 'deepseek-official', model: 'deepseek-flash', extraJudges: payload })
+    const parsed = unwrapVolatileConfig(Config({ provider: 'deepseek-official', model: 'deepseek-flash', extraJudges: payload }))
     expect(parsed.extraJudges).toEqual(payload)
     const resolved = resolveConfig(parsed)
     expect(resolved.judges.map(judge => judge.label)).toEqual(['deepseek-flash', 'Second opinion', 'claude-3-5-sonnet', 'qwen3'])
@@ -522,7 +522,7 @@ describe('config - settings payload seam', () => {
   it('carries the criteria preset across the settings schema, JSON boundary and resolveConfig', () => {
     // The host validates the stored section with the schema and the RPC carries plain JSON, so the
     // new keys must survive Config -> JSON -> Config -> resolveConfig, not just resolveConfig.
-    const payload = JSON.parse(JSON.stringify(Config({ provider: 'deepseek-official', model: 'deepseek-flash', criteriaPreset: 'ops', criteriaFile: ' criteria/ops.md ' })))
+    const payload = JSON.parse(JSON.stringify(unwrapVolatileConfig(Config({ provider: 'deepseek-official', model: 'deepseek-flash', criteriaPreset: 'ops', criteriaFile: ' criteria/ops.md ' }))))
     expect(payload.criteriaPreset).toBe('ops')
     expect(payload.criteriaFile).toBe(' criteria/ops.md ')
     const resolved = resolveConfig(payload)
@@ -533,7 +533,7 @@ describe('config - settings payload seam', () => {
     for (const preset of ['coding', 'debug', 'research', 'ops', 'writing', 'custom'] as const) {
       expect(resolveConfig(Config({ criteriaPreset: preset })).criteriaPreset).toBe(preset)
     }
-    expect(Config({}).criteriaPreset).toBe('coding')
+    expect(unwrapVolatileConfig(Config({})).criteriaPreset).toBe('coding')
     expect(resolveConfig({}).criteriaFile).toBe('')
   })
 
@@ -546,14 +546,14 @@ describe('config - settings payload seam', () => {
 
 describe('config - temperature', () => {
   it('defaults to 0.2 in schema and resolveConfig', () => {
-    const fromSchema = Config({})
+    const fromSchema = unwrapVolatileConfig(Config({}))
     expect(fromSchema.temperature).toBe(0.2)
     const resolved = resolveConfig({})
     expect(resolved.temperature).toBe(0.2)
   })
 
   it('accepts explicit valid temperature (including 0, 1.5, 2)', () => {
-    const fromSchema = Config({ temperature: 0.7 })
+    const fromSchema = unwrapVolatileConfig(Config({ temperature: 0.7 }))
     expect(fromSchema.temperature).toBe(0.7)
     const resolved = resolveConfig({ temperature: 0.7 })
     expect(resolved.temperature).toBe(0.7)
@@ -580,7 +580,7 @@ describe('config - automatic verification repeats and budget', () => {
 
   it('accepts an explicit final repeat count', () => {
     expect(resolveConfig({ autoVerifyFinalRepeats: 4 }).autoVerifyFinalRepeats).toBe(4)
-    expect(Config({ autoVerifyFinalRepeats: 3 }).autoVerifyFinalRepeats).toBe(3)
+    expect(unwrapVolatileConfig(Config({ autoVerifyFinalRepeats: 3 })).autoVerifyFinalRepeats).toBe(3)
   })
 
   it('rejects a non-positive final repeat count', () => {
@@ -641,10 +641,10 @@ describe('config - volatile schema and reference unwrapping', () => {
     expect(isVolatileConfigRef(value)).toBe(true)
     // The walk returns at the root, so the snapshot's own fields are never treated as config nodes.
     expect(volatilePaths(value)).toEqual([[]])
-    // Read side only: `get` is enumerable exactly as cosmokit's own reference exposes it, while the
-    // write hook is a non-enumerable symbol so it never leaks into JSON or form projection.
+    // Read side only: `get` is the sole enumerable string key, while the write hook is a symbol
+    // so neither leaks into JSON or form projection.
     expect(Object.keys(value)).toEqual(['get'])
-    expect(Object.getOwnPropertyDescriptor(value, VOLATILE_WRITE)?.enumerable).toBe(false)
+    expect(typeof value[VOLATILE_WRITE]).toBe('function')
   })
 
   it('keeps a rejected parse a rejection instead of wrapping it into a reference', () => {
@@ -715,7 +715,7 @@ describe('config - the single DeepSeek IoT setting', () => {
     // both resolve to the closed path. The schema is what the host validates the stored user layer
     // with, so the two paths have to agree.
     expect(resolveConfig({}).iotThinking).toBe('off')
-    expect(Config({}).iotThinking).toBe('off')
+    expect(unwrapVolatileConfig(Config({})).iotThinking).toBe('off')
     expect([...IOT_THINKING_MODES]).toEqual(['off', 'compact', 'balanced', 'full'])
     // Adding the key must not shift a single existing default.
     expect(resolveConfig({})).toMatchObject({
@@ -730,17 +730,17 @@ describe('config - the single DeepSeek IoT setting', () => {
   it('accepts all four levels through resolveConfig and through the schema', () => {
     for (const mode of IOT_THINKING_MODES) {
       expect(resolveConfig({ iotThinking: mode }).iotThinking).toBe(mode)
-      expect(Config({ iotThinking: mode }).iotThinking).toBe(mode)
+      expect(unwrapVolatileConfig(Config({ iotThinking: mode })).iotThinking).toBe(mode)
       // A saved level survives resolution and re-serialization through the schema, which is the
       // round trip the live settings section performs on every autosave.
-      const roundTripped = Config({ ...Config({}), iotThinking: mode } as never) as { iotThinking?: string }
+      const roundTripped = unwrapVolatileConfig(Config({ ...unwrapVolatileConfig(Config({})), iotThinking: mode } as never)) as { iotThinking?: string }
       expect(roundTripped.iotThinking).toBe(mode)
       expect(resolveConfig(Config({ iotThinking: mode }) as never).iotThinking).toBe(mode)
     }
   })
 
   it('carries the level across the settings JSON boundary and rejects a smuggled one', () => {
-    const saved = JSON.parse(JSON.stringify(Config({ iotThinking: 'full' }))) as { iotThinking?: string }
+    const saved = JSON.parse(JSON.stringify(unwrapVolatileConfig(Config({ iotThinking: 'full' })))) as { iotThinking?: string }
     expect(saved.iotThinking).toBe('full')
     expect(resolveConfig(saved as never).iotThinking).toBe('full')
     expect(() => resolveConfig({ iotThinking: 'turbo' } as never))
@@ -767,8 +767,8 @@ describe('config - auxiliary-thinking global model and targets', () => {
     expect(resolved.iotThinkingModel).toBeUndefined()
     expect(resolved.iotThinkingEffort).toBeUndefined()
     expect(resolved.iotThinkingTargets).toEqual([])
-    expect(Config({}).iotThinkingTargets).toEqual([])
-    expect(Config({}).iotThinkingProvider).toBe('')
+    expect(unwrapVolatileConfig(Config({})).iotThinkingTargets).toEqual([])
+    expect(unwrapVolatileConfig(Config({})).iotThinkingProvider).toBe('')
   })
 
   it('normalizes global model settings and target overrides', () => {
